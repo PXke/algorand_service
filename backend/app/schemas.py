@@ -394,6 +394,85 @@ class X402ListingItem(msgspec.Struct, kw_only=True):
     settlement_tx_id: str = ""
 
 
+# ── x402 visibility board ─────────────────────────────────────────────────────
+class X402BoardPlacementRequest(msgspec.Struct, kw_only=True):
+    """Request body for POST /x402/board — one paid visibility-board placement.
+
+    Deliberately smaller than X402ListingRequest: the board advertises that
+    something exists, it does not describe something callable, so there is no
+    price, no accepted-asset list and no request schema here. `pitch` is capped
+    at 280 characters because a board tile is an advert, not documentation.
+
+    The payer is NOT a field: it comes from the settled payment, so a caller
+    cannot claim to be placing on someone else's wallet's behalf.
+    """
+
+    link: Annotated[str, Meta(min_length=8, max_length=2048)]
+    name: Annotated[str, Meta(max_length=80)] = ""
+    pitch: Annotated[str, Meta(max_length=280)] = ""
+
+
+class X402BoardItem(msgspec.Struct, kw_only=True):
+    """One board placement as served by /x402/board."""
+
+    link: str
+    name: str = ""
+    pitch: str = ""
+    payer: str = ""
+    term_end_epoch: int = 0
+    created_at_epoch: int = 0
+    settlement_tx_id: str = ""
+
+
+# ── x402 feature-request board ────────────────────────────────────────────────
+class X402FeatureRequestSubmission(msgspec.Struct, kw_only=True):
+    """Request body for POST /x402/features — one paid feature request.
+
+    `title` is what the board lists and `description` is the detail a builder
+    reads before deciding to build it, so the title is required and tightly
+    capped while the description gets the same 2000-character headroom as a
+    directory listing's.
+
+    The submitter is NOT a field: it comes from the settled payment, so a
+    caller cannot file a request in someone else's wallet's name.
+
+    There is no matching struct for the vote route — POST
+    /x402/features/:id/vote takes no body at all. The request voted on is in
+    the path and the voter is the settled payer, so there is nothing left for a
+    body to carry, and accepting one would only invite a caller to try putting
+    a voter or a vote weight in it.
+    """
+
+    title: Annotated[str, Meta(min_length=1, max_length=120)]
+    description: Annotated[str, Meta(max_length=2000)] = ""
+
+
+# ── x402 endpoint grading ─────────────────────────────────────────────────────
+class X402GradeSubmission(msgspec.Struct, kw_only=True):
+    """Request body for POST /x402/grades — one paid grade of any x402 endpoint.
+
+    `url` is any http(s) endpoint URL the grader wants to grade. It is not a
+    directory listing id and the endpoint does not have to be listed with us:
+    grading is decoupled from x402_directory entirely. The service normalizes
+    and hashes it with its own rule, so a caller never has to reproduce our
+    normalization; the resulting url_hash comes back in the response.
+
+    `score` is 1-5 stars, range-enforced here so an out-of-range score is a 400
+    before the payment gate rather than a stored value that skews every average.
+
+    `comment` is the grader's optional one-line opinion, capped so a paid write
+    is never an unbounded text column (CLAUDE.md section 4).
+
+    There is deliberately no payer field of any kind: the grader of record is
+    always the wallet that settled the payment, so nobody can grade in another
+    wallet's name.
+    """
+
+    url: Annotated[str, Meta(min_length=8, max_length=2048)]
+    score: Annotated[int, Meta(ge=1, le=5)]
+    comment: Annotated[str, Meta(max_length=280)] = ""
+
+
 # ── Metrics ───────────────────────────────────────────────────────────────────
 class PriceMetricsResponse(msgspec.Struct, kw_only=True):
     """Price-metrics brief for the dashboard."""

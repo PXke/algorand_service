@@ -205,6 +205,144 @@ class Settings(msgspec.Struct, kw_only=True):
     x402_search_rate_limit_per_hour: int = 120
     # Hard cap on a search page — no unbounded listings (CLAUDE.md section 4).
     x402_search_max_results: int = 100
+
+    # x402 visibility board (POST /x402/board paid, GET /x402/board free).
+    # See app/modules/x402_board/. Separate settings from the directory's on
+    # purpose: it is a separate product whose price and term should move
+    # independently of the directory's.
+    x402_board_store: str = "memory"
+    # Flat placement fee, a Money string parsed by the tagged money parser in
+    # modules/x402/client.py (which is also what attaches the challenge tag).
+    # Half the directory's listing fee: a board tile is pure presence, worth
+    # less than a directory entry that makes an endpoint callable, and this is
+    # meant to be the cheapest, lowest-friction paid surface an agent can try.
+    x402_board_price: str = "$0.05"
+    # How long a paid placement stays visible. Stated in the 402 offer's
+    # description before the payer commits, and stored as term_end. Shorter
+    # than the directory's 30 days: an advertising board has to churn to stay
+    # worth reading, and a cheap tile should not buy a permanent squat.
+    x402_board_term_days: int = 14
+    # Free-endpoint abuse gate (CLAUDE.md section 9: rate limit every free
+    # endpoint per IP), counted under its own key prefix, not the search one.
+    x402_board_rate_limit_per_hour: int = 120
+    # Hard cap on a board page — no unbounded listings (CLAUDE.md section 4).
+    x402_board_max_results: int = 100
+    # x402 feature-request board (POST /x402/features paid, POST
+    # /x402/features/:id/vote paid, GET /x402/features free, GET
+    # /x402/features/demand paid). See app/modules/x402_features/. Separate
+    # settings from the directory's and the board's on purpose: a third product
+    # whose prices should move independently of theirs.
+    x402_features_store: str = "memory"
+    # Flat fee to file one feature request. Money strings, parsed by the tagged
+    # money parser in modules/x402/client.py (which is also what attaches the
+    # challenge tag).
+    #
+    # Priced at the board's placement fee, not the directory's listing fee:
+    # both are one paid write of a short piece of text, and filing a request is
+    # meant to be as low-friction as putting up a tile.
+    x402_features_request_price: str = "$0.05"
+    # Flat fee per vote. Below the request fee on purpose: a vote is a smaller
+    # act than authoring a request, and the demand signal is only as good as
+    # the number of honest agents willing to cast one. Not free and not dust,
+    # because the entire point of a PAID vote board is that the payment is the
+    # costly signal a free upvote cannot be. Keep this flat -- the ranking
+    # counts votes, and a count is only amount-weighted while every vote costs
+    # the same (see FeatureService.vote).
+    x402_features_vote_price: str = "$0.02"
+    # Fee to read the ranked demand signal. The most expensive surface in the
+    # module by an order of magnitude, and the only one priced above the other
+    # products' write fees: it is the aggregate of every vote every agent has
+    # paid for, so a builder reading it is buying the whole board's accumulated
+    # paid signal rather than performing one write. It is also the only read
+    # here that resells other payers' contributions, which is what makes it
+    # worth more than a nickel.
+    x402_features_demand_price: str = "$0.25"
+    # Free-endpoint abuse gate (CLAUDE.md section 9: rate limit every free
+    # endpoint per IP), counted under its own key prefix, not the search or
+    # board one. The paid demand read is not counted against this.
+    x402_features_rate_limit_per_hour: int = 120
+    # Hard cap on a browse or demand page — no unbounded listings (CLAUDE.md
+    # section 4).
+    x402_features_max_results: int = 100
+    # How many requests the paid demand read scans before ranking them. The
+    # ranking is an in-memory sort (see FeatureService.rank_by_demand for why
+    # there is no third denormalized table), so this is what bounds it: the
+    # ranking is exact while the board holds fewer requests than this, and
+    # degrades to "the top of the N most recent" past it. Raise it, or build
+    # the sweep-rebuilt rank projection, before the board outgrows it.
+    x402_features_demand_scan_limit: int = 500
+    # x402 endpoint grading (POST /x402/grades paid, GET /x402/grades/score
+    # paid, GET /x402/grades free). See app/modules/x402_grading/. A fourth
+    # product with its own settings for the same reason as the other three:
+    # its prices should move independently of theirs.
+    x402_grading_store: str = "memory"
+    # Flat fee to submit one grade. Money strings, parsed by the tagged money
+    # parser in modules/x402/client.py (which is also what attaches the
+    # challenge tag).
+    #
+    # THIS FEE IS THE "STAKE" of roadmap item 6, and it is a one-way payment.
+    # Nothing is held, escrowed, refunded, forfeited or slashed anywhere in
+    # this module -- CLAUDE.md section 9 bars this project from holding user
+    # funds, and the escrow primitive belongs to roadmap item 5's smart
+    # contract, which is not started.
+    #
+    # Priced at the feature board's vote fee, not its request fee: a grade is
+    # the same act as a vote -- one small paid datum contributed to an
+    # aggregate somebody else reads -- and both are worthless as signals if
+    # the fee is high enough that honest agents skip them. Flooding is bounded
+    # by the one-grade-per-(grader, url) rule rather than by price.
+    x402_grading_grade_price: str = "$0.02"
+    # Fee to read one endpoint's aggregate score. 5x the grade fee: a grade is
+    # one data point and this is every grader's paid contribution to that
+    # endpoint at once, the same reasoning that puts the feature board's demand
+    # read above its vote. Below that demand read's $0.25 because this returns
+    # one endpoint's score rather than the whole board's ranking.
+    x402_grading_score_price: str = "$0.10"
+    # Free-endpoint abuse gate (CLAUDE.md section 9: rate limit every free
+    # endpoint per IP), counted under its own key prefix, not the search,
+    # board or features one.
+    x402_grading_rate_limit_per_hour: int = 120
+    # Hard cap on a free-index page and on how many individual grades the paid
+    # score lookup serves — no unbounded listings (CLAUDE.md section 4).
+    x402_grading_max_results: int = 100
+    # How many grades of one endpoint the aggregate reads before averaging. The
+    # aggregate is computed in Python over a single LIMITed partition read (see
+    # GradingService.aggregate for why there is no counter column), so this is
+    # what bounds it: the average is exact while an endpoint has fewer graders
+    # than this, and the response says truncated=true past it.
+    x402_grading_scan_limit: int = 500
+    # Credibility weighting of the paid aggregate. A grade's weight is
+    #   min(base + that wallet's all-time atomic spend with us, max)
+    # summed over the settlement ledger at read time. Read
+    # modules/x402_grading/services/credibility.py before changing either;
+    # both numbers are in atomic units of the payment asset (USDC has 6
+    # decimals, so 10_000 = $0.01).
+    #
+    # The base is what every grade is worth before any spending history. It is
+    # never zero: each grade was itself paid for, and a zero weight would
+    # silently delete a paid grade from the average. It is also what every
+    # weight falls back to when the ledger cannot be read, which makes the
+    # weighted mean degrade to the plain mean rather than to 0/0.
+    x402_grading_base_weight_atomic: int = 10_000
+    # Ceiling on one wallet's weight, so credibility cannot be bought outright:
+    # without it a single wallet that has spent enough with us outweighs every
+    # honest grader combined. 100x the base -- a large but finite multiple of a
+    # newcomer's influence.
+    x402_grading_max_weight_atomic: int = 1_000_000
+    # How far back the credibility sum reads the settlement ledger, in whole
+    # UTC days. Each day is one partition-key read with a bound LIMIT, so this
+    # is literally the number of queries one paid score lookup costs (the sum
+    # answers for every grader of that endpoint in ONE pass, so it does not
+    # scale with grader count). It also states a product rule: credibility is
+    # earned by recent spending, not by a wallet's whole history.
+    x402_grading_spend_lookback_days: int = 30
+    # Rows read per ledger day partition during a credibility sum. Bounds the
+    # scan at lookback_days x this; a payer whose settlements are past this
+    # many rows into a busy day is under-counted, which is the argument for
+    # building the by-payer ledger projection credibility.py flags rather than
+    # raising this.
+    x402_grading_spend_scan_limit: int = 500
+
     # Replay window for an already-spent payment header. Must be >= 2x the
     # facilitator's own HTTP timeout (FacilitatorConfig.timeout defaults to
     # 30s in x402-avm==2.0.2) so a header can never be re-presented while the

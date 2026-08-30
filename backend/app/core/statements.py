@@ -828,6 +828,97 @@ class X402DirectoryStmts:
     )
 
 
+class X402BoardStmts:
+    """Prepared statements for the x402 paid visibility board."""
+
+    # Full INSERT, never a partial UPDATE: a partial write to either board
+    # table would upsert a row whose unwritten columns read back as null, the
+    # same phantom-row class articles_feed hit (CLAUDE.md section 3).
+    UPSERT_PLACEMENT = _Stmt(
+        "INSERT INTO algorand_platform.x402_board_entries ("
+        "entry_id, link, name, pitch, payer, term_end, settlement_tx_id, created_at"
+        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+    )
+    GET_PLACEMENT = _Stmt(
+        "SELECT entry_id, link, name, pitch, payer, term_end, settlement_tx_id, "
+        "created_at FROM algorand_platform.x402_board_entries WHERE entry_id = ?"
+    )
+    INSERT_RECENCY = _Stmt(
+        "INSERT INTO algorand_platform.x402_board_by_recency ("
+        "board, created_at, entry_id, link, name, pitch, payer, term_end, settlement_tx_id"
+        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+    )
+    # Deletes the row a renewed placement supersedes. Needs the exact
+    # created_at of the previous placement (read from x402_board_entries
+    # first), since created_at is a clustering column -- deleting by entry_id
+    # alone is not addressable.
+    DELETE_RECENCY = _Stmt(
+        "DELETE FROM algorand_platform.x402_board_by_recency "
+        "WHERE board = ? AND created_at = ? AND entry_id = ?"
+    )
+    # Newest-first by clustering order; the LIMIT is bound, never interpolated,
+    # and the caller clamps it (no unbounded listings, CLAUDE.md section 4).
+    # Expired placements are filtered by BoardService, not here: term_end is
+    # not part of the key, so a CQL filter on it would need ALLOW FILTERING.
+    LIST_RECENT = _Stmt(
+        "SELECT entry_id, link, name, pitch, payer, term_end, settlement_tx_id, "
+        "created_at FROM algorand_platform.x402_board_by_recency "
+        "WHERE board = ? LIMIT ?"
+    )
+
+
+class X402FeaturesStmts:
+    """Prepared statements for the x402 feature-request board."""
+
+    # Full INSERT, never a partial UPDATE: a partial write to either request
+    # table would upsert a row whose unwritten columns read back as null, the
+    # same phantom-row class articles_feed hit (CLAUDE.md section 3).
+    INSERT_REQUEST = _Stmt(
+        "INSERT INTO algorand_platform.x402_feature_requests ("
+        "request_id, title, description, submitter, settlement_tx_id, created_at"
+        ") VALUES (?, ?, ?, ?, ?, ?)"
+    )
+    GET_REQUEST = _Stmt(
+        "SELECT request_id, title, description, submitter, settlement_tx_id, "
+        "created_at FROM algorand_platform.x402_feature_requests WHERE request_id = ?"
+    )
+    INSERT_RECENCY = _Stmt(
+        "INSERT INTO algorand_platform.x402_feature_requests_by_recency ("
+        "board, created_at, request_id, title, description, submitter, settlement_tx_id"
+        ") VALUES (?, ?, ?, ?, ?, ?, ?)"
+    )
+    # Newest-first by clustering order; the LIMIT is bound, never interpolated,
+    # and the caller clamps it (no unbounded listings, CLAUDE.md section 4).
+    # There is no DELETE_RECENCY counterpart to the board's: a feature request
+    # is created once and never re-stamped, so no projection row is ever
+    # superseded.
+    LIST_RECENT = _Stmt(
+        "SELECT request_id, title, description, submitter, settlement_tx_id, "
+        "created_at FROM algorand_platform.x402_feature_requests_by_recency "
+        "WHERE board = ? LIMIT ?"
+    )
+    # A counter update, which is why vote_total lives in its own table:
+    # Cassandra forbids mixing counter and non-counter columns outside the
+    # primary key, so it cannot be a column on x402_feature_requests. The
+    # counter is what makes two simultaneous votes both land -- see
+    # CassandraFeatureStore.increment_vote_total.
+    INCREMENT_VOTE_TOTAL = _Stmt(
+        "UPDATE algorand_platform.x402_feature_vote_totals "
+        "SET vote_total = vote_total + 1 WHERE request_id = ?"
+    )
+    GET_VOTE_TOTAL = _Stmt(
+        "SELECT vote_total FROM algorand_platform.x402_feature_vote_totals WHERE request_id = ?"
+    )
+    # Append-only audit log, one row per settled vote. Never read on a request
+    # path and deliberately has no public read surface -- it exists for abuse
+    # forensics, not as a product.
+    INSERT_VOTE = _Stmt(
+        "INSERT INTO algorand_platform.x402_feature_votes ("
+        "request_id, voted_at, settlement_tx_id, voter"
+        ") VALUES (?, ?, ?, ?)"
+    )
+
+
 class X402Stmts:
     """Prepared statements shared by every x402-gated module (modules/x402/).
 
@@ -841,6 +932,64 @@ class X402Stmts:
         "day, settled_at, tx_id, asset_id, amount_atomic, payer, resource, "
         "network, eur_value"
         ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+    )
+
+
+class X402GradingStmts:
+    """Prepared statements for x402 endpoint grading (migration 093)."""
+
+    # Full INSERT, never a partial UPDATE: a partial write to either grading
+    # table would upsert a row whose unwritten columns read back as null, the
+    # same phantom-row class articles_feed hit (CLAUDE.md section 3).
+    #
+    # This single statement is also the whole "one grade per (grader, url),
+    # latest overwrites" rule: (url_hash, grader) is the primary key, so a
+    # re-grade addresses and replaces the same row rather than adding one.
+    UPSERT_GRADE = _Stmt(
+        "INSERT INTO algorand_platform.x402_grades ("
+        "url_hash, grader, url, score, comment, settlement_tx_id, created_at"
+        ") VALUES (?, ?, ?, ?, ?, ?, ?)"
+    )
+    GET_GRADE = _Stmt(
+        "SELECT url_hash, grader, url, score, comment, settlement_tx_id, created_at "
+        "FROM algorand_platform.x402_grades WHERE url_hash = ? AND grader = ?"
+    )
+    # One endpoint's grades, for the aggregate. Single partition, clustered by
+    # grader; the LIMIT is bound, never interpolated, and the caller clamps it
+    # (no unbounded listings, CLAUDE.md section 4).
+    LIST_GRADES = _Stmt(
+        "SELECT url_hash, grader, url, score, comment, settlement_tx_id, created_at "
+        "FROM algorand_platform.x402_grades WHERE url_hash = ? LIMIT ?"
+    )
+    INSERT_GRADED_ENDPOINT = _Stmt(
+        "INSERT INTO algorand_platform.x402_graded_endpoints ("
+        "registry, url_hash, url, last_graded_at"
+        ") VALUES (?, ?, ?, ?)"
+    )
+    GET_GRADED_ENDPOINT = _Stmt(
+        "SELECT registry, url_hash, url, last_graded_at "
+        "FROM algorand_platform.x402_graded_endpoints WHERE registry = ? AND url_hash = ?"
+    )
+    LIST_GRADED_ENDPOINTS = _Stmt(
+        "SELECT registry, url_hash, url, last_graded_at "
+        "FROM algorand_platform.x402_graded_endpoints WHERE registry = ? LIMIT ?"
+    )
+    # Reads the SHARED settlement ledger (x402_settlements, migration 090) to
+    # total how much a grader has paid this marketplace, which is the weight
+    # their grade carries. A read of another module's table, deliberately: the
+    # ledger is the one place settlements are recorded and duplicating it would
+    # be worse. It selects only the three columns the sum needs -- network
+    # included because TestNet and MainNet spend must never be summed together
+    # (modules/x402/settlement.py records it per row for exactly this reason).
+    #
+    # Whole day partitions, summed in Python, because payer is not a key column
+    # and CLAUDE.md section 4 forbids ALLOW FILTERING on non-key columns.
+    # Partition-key read, bound LIMIT, caller-bounded number of days --
+    # bounded, but see CassandraSpendLookup for why a by-payer projection of
+    # the ledger is the real answer.
+    LIST_SETTLEMENTS_FOR_DAY = _Stmt(
+        "SELECT payer, amount_atomic, network FROM algorand_platform.x402_settlements "
+        "WHERE day = ? LIMIT ?"
     )
 
 

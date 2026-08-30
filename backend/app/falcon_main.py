@@ -31,7 +31,10 @@ from app.modules.search.api.routes import register_search_routes
 from app.modules.seo.api.routes import register_seo_routes
 from app.modules.sharing.api.routes import register_sharing_routes
 from app.modules.suggestions.api.routes import register_suggestions_routes
+from app.modules.x402_board.api.routes import register_x402_board_routes
 from app.modules.x402_directory.api.routes import register_x402_directory_routes
+from app.modules.x402_features.api.routes import register_x402_features_routes
+from app.modules.x402_grading.api.routes import register_x402_grading_routes
 
 
 class CorsMiddleware:
@@ -141,6 +144,9 @@ def create_app() -> falcon.App:
     if settings.x402_enabled:
         register_kyc_routes(router)
         register_x402_directory_routes(router)
+        register_x402_board_routes(router)
+        register_x402_features_routes(router)
+        register_x402_grading_routes(router)
     register_seo_routes(router)
     return app
 
