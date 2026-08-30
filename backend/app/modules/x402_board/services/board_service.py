@@ -9,6 +9,7 @@ from datetime import UTC, datetime, timedelta
 from urllib.parse import urlsplit, urlunsplit
 
 from app.core.config import settings
+from app.modules.x402.probe_payers import is_probe_payer
 from app.modules.x402_board.models.domain import BoardError, StoredPlacement
 from app.modules.x402_board.stores.base import PlacementStore
 from app.modules.x402_board.stores.factory import get_placement_store
@@ -258,10 +259,27 @@ class BoardService:
 
         A paid term that has ended must stop being advertised: the payer bought
         N days of visibility, not permanent placement.
+
+        Placements paid for by one of OUR wallets (x402_probe_payers) are
+        never served: the probe may pay this endpoint to measure it, but a
+        tile it bought is wash visibility and is dropped here, in code, not
+        by a label (CLAUDE.md section 9). The row is still stored and still
+        resolvable by id, so the probe's own round-trip still succeeds.
         """
         moment = now or datetime.now(tz=UTC)
         cutoff = int(moment.timestamp())
         clamped = max(1, min(limit, settings.x402_board_max_results))
         return [
-            item for item in self.store.list_recent(limit=clamped) if item.term_end_epoch > cutoff
+            item
+            for item in self.store.list_recent(limit=clamped)
+            if item.term_end_epoch > cutoff and not is_probe_payer(item.payer)
         ]
+
+    def delete(self, entry_id: str) -> bool:
+        """Admin-only: remove a placement outright, recency projection included.
+
+        Returns False if there was nothing to delete, so the admin route can
+        tell a real removal from a no-op. The click counter stays (see the
+        store Protocol).
+        """
+        return bool(entry_id) and self.store.delete(entry_id)

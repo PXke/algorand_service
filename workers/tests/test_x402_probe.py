@@ -10,16 +10,19 @@ import base64
 import json
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
+from typing import ClassVar
 
 import pytest
+from celery.exceptions import SoftTimeLimitExceeded
 
 import app.celery_app as celery_app
 from app.core import config
 from app.core import redis_lock as redis_lock_module
-from app.core.net_guard import UnsafeUrlError
+from app.core.net_guard import UnsafeUrlError, assert_public_url
 from app.modules.x402_probe import probe as probe_module
 from app.modules.x402_probe.probe import (
     PROBE_USER_AGENT,
+    ProbeDeadlineExceeded,
     ProbeResult,
     RawResponse,
     parse_offer,
@@ -34,8 +37,9 @@ from app.modules.x402_probe.service import (
 from app.modules.x402_probe.tasks import probe_tasks
 
 NOW = datetime(2026, 8, 30, 12, 0, tzinfo=UTC)
-PAYER = "A" * 58
-OTHER = "B" * 58
+# Real (checksum-valid) Algorand addresses: parse_offer only lets those through.
+PAYER = "OBYYVU3ECOL7CEFWMB3DCEN5V4HJV472KENDIZHOI6ASVVV5BUNMEIA6ZE"
+OTHER = "D2JBLXHWIUBIB2SZUGZF2FIUSL6MT3VBX623VADSMX5I6NKIAGHTHZYEAI"
 
 
 def _offer_header(payto: str | None = PAYER, *, accepts: list | None = None) -> dict[str, str]:
@@ -105,9 +109,114 @@ def test_parse_offer_rejects_malformed_offers(status: int, headers: dict, body: 
     assert parse_offer(RawResponse(status=status, headers=headers, body=body)) == (False, "")
 
 
+@pytest.mark.parametrize(
+    "payto",
+    ["A" * 58, "0x" + "ab" * 20, "<script>alert(1)</script>", "x" * 5000, PAYER[:-1] + "B"],
+)
+def test_parse_offer_stores_an_empty_payto_when_it_is_not_an_algorand_address(
+    payto: str,
+) -> None:
+    """A well-formed offer whose payTo is not a checksum-valid Algorand address is still a valid 402, but payTo is recorded as "" (it is served verbatim on free routes)."""
+    raw = RawResponse(status=402, headers=_offer_header(payto), body=b"")
+    assert parse_offer(raw) == (True, "")
+
+
 # --------------------------------------------------------------------------- #
 # probe_url: never raises, records what it saw
 # --------------------------------------------------------------------------- #
+class _SlowStream:
+    """A fake httpx streaming response whose body arrives one byte per `step` fake seconds."""
+
+    status_code = 402
+    headers: ClassVar[dict[str, str]] = {}
+    is_redirect = False
+    url = "https://tarpit.example.com/q"
+
+    def __init__(self, clock: list[float], step: float) -> None:
+        self._clock = clock
+        self._step = step
+
+    def __enter__(self) -> _SlowStream:
+        return self
+
+    def __exit__(self, *_a: object) -> None:
+        return None
+
+    def iter_bytes(self):  # noqa: ANN202 -- generator faking httpx.Response.iter_bytes
+        while True:
+            self._clock[0] += self._step
+            yield b"."
+
+
+def test_fetch_unpaid_gives_up_on_a_tarpit_body_at_the_wall_clock_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A body trickling in under httpx's per-read timeout is cut at 2 x the probe timeout instead of running for hours."""
+    monkeypatch.setattr(probe_module, "assert_public_url", lambda url: url)
+    monkeypatch.setattr(probe_module, "X402_PROBE_TIMEOUT_SECONDS", 5.0)
+    monkeypatch.setattr(probe_module, "X402_PROBE_MAX_BODY_BYTES", 1_000_000)
+    clock = [1000.0]
+    monkeypatch.setattr(probe_module, "_monotonic", lambda: clock[0])
+    stream = _SlowStream(clock, step=4.0)
+    monkeypatch.setattr(
+        probe_module,
+        "get_http_client",
+        lambda **_kw: SimpleNamespace(stream=lambda *_a, **_k: stream),
+    )
+    with pytest.raises(ProbeDeadlineExceeded):
+        probe_module.fetch_unpaid("https://tarpit.example.com/q")
+    # 5 s timeout x factor 2 = 10 s budget; at 4 s/byte the third chunk trips it.
+    assert clock[0] - 1000.0 <= 12.0
+
+
+def test_fetch_unpaid_gives_up_on_slow_redirect_hops_at_the_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Redirect hops share the same wall-clock budget: a slow 302 chain stops at the deadline, not at the redirect cap."""
+    monkeypatch.setattr(probe_module, "assert_public_url", lambda url: url)
+    monkeypatch.setattr(probe_module, "X402_PROBE_TIMEOUT_SECONDS", 5.0)
+    clock = [0.0]
+    monkeypatch.setattr(probe_module, "_monotonic", lambda: clock[0])
+    hops: list[str] = []
+
+    class _Redirect:
+        status_code = 302
+        headers: ClassVar[dict[str, str]] = {"location": "/next"}
+        is_redirect = True
+        url = "https://slow.example.com/start"
+
+        def __enter__(self) -> _Redirect:
+            return self
+
+        def __exit__(self, *_a: object) -> None:
+            return None
+
+    def _stream(_method: str, url: str, **_k: object) -> _Redirect:
+        hops.append(url)
+        clock[0] += 6.0
+        return _Redirect()
+
+    monkeypatch.setattr(
+        probe_module, "get_http_client", lambda **_kw: SimpleNamespace(stream=_stream)
+    )
+    with pytest.raises(ProbeDeadlineExceeded):
+        probe_module.fetch_unpaid("https://slow.example.com/start")
+    assert len(hops) == 2  # 0 s and 6 s are within budget; 12 s is past the 10 s deadline
+
+
+def test_probe_url_records_a_deadline_as_reachable_with_error_deadline() -> None:
+    """A tarpit is recorded (reachable=True, error="deadline") and never granted a valid offer; the sweep moves on."""
+
+    def _tarpit(_url: str) -> RawResponse:
+        raise ProbeDeadlineExceeded("probe deadline exceeded")
+
+    result = probe_url("https://tarpit.example.com/q", fetch=_tarpit, now=NOW)
+    assert result.reachable is True
+    assert result.served_valid_402 is False
+    assert result.payto_seen == ""
+    assert result.error == "deadline"
+
+
 def test_probe_url_records_a_valid_402() -> None:
     """A reachable endpoint serving a valid offer is recorded with its status and payTo."""
     result = probe_url(
@@ -284,6 +393,50 @@ def test_sweep_survives_a_failing_listing_and_probes_the_rest() -> None:
     assert [e[1] for e in repo.events if e[0] == "record"] == ["h-https://good.example.com/x"]
 
 
+def test_sweep_reraises_the_soft_time_limit_instead_of_sweeping_on() -> None:
+    """Celery's SoftTimeLimitExceeded (an Exception subclass) is not swallowed as a per-URL failure: the sweep stops and the task ends at the soft limit (invariant 6)."""
+    listings = [_listing(url=f"https://{i}.example.com/x") for i in range(3)]
+    fetched: list[str] = []
+
+    def _fetch(url: str) -> RawResponse:
+        fetched.append(url)
+        if len(fetched) == 2:
+            raise SoftTimeLimitExceeded
+        return RawResponse(status=402, headers=_offer_header(), body=b"")
+
+    repo = _FakeRepo(listings)
+    with pytest.raises(SoftTimeLimitExceeded):
+        run_probe_sweep(repo=repo, fetch=_fetch, now=NOW)
+    assert len(fetched) == 2
+    assert [e[1] for e in repo.events if e[0] == "record"] == ["h-https://0.example.com/x"]
+
+
+def test_task_releases_the_lock_when_the_sweep_hits_the_soft_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The single_flight lock is released (finally) when the sweep re-raises SoftTimeLimitExceeded."""
+    monkeypatch.setattr(probe_tasks, "X402_PROBE_ENABLED", True)
+
+    def _sweep() -> dict[str, object]:
+        raise SoftTimeLimitExceeded
+
+    monkeypatch.setattr(probe_tasks, "run_probe_sweep", _sweep)
+    released: list[object] = []
+
+    class _Redis:
+        def set(self, *_a: object, **_k: object) -> bool:
+            return True
+
+        def eval(self, *args: object) -> int:
+            released.append(args)
+            return 1
+
+    monkeypatch.setattr(redis_lock_module, "_client", lambda: _Redis())
+    with pytest.raises(SoftTimeLimitExceeded):
+        probe_tasks.probe_listed_endpoints()
+    assert len(released) == 1
+
+
 def test_sweep_never_pays_even_when_our_own_endpoint_is_listed() -> None:
     """The fetch is the only network call and it is unpaid: no payment header is ever built."""
     fetched: list[str] = []
@@ -304,7 +457,7 @@ def test_sweep_never_pays_even_when_our_own_endpoint_is_listed() -> None:
 def test_repository_filters_expired_listings_and_writes_history_before_latest(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """LIST drops expired rows; record_result writes x402_probe_results then x402_probe_latest; set_verified touches canonical, recency, then tags."""
+    """LIST drops expired rows; record_result writes x402_probe_results then x402_probe_latest; set_verified touches canonical, recency, then every tag row including the reserved category row."""
     executed: list[tuple[str, tuple]] = []
 
     class _Session:
@@ -320,6 +473,7 @@ def test_repository_filters_expired_listings_and_writes_history_before_latest(
                         term_end=NOW + timedelta(days=1),
                         payer=PAYER,
                         verified_wallet=None,
+                        category="finance",
                     ),
                     SimpleNamespace(
                         url_hash="dead",
@@ -329,6 +483,7 @@ def test_repository_filters_expired_listings_and_writes_history_before_latest(
                         term_end=NOW - timedelta(days=1),
                         payer=PAYER,
                         verified_wallet=None,
+                        category=None,
                     ),
                 ]
             return []
@@ -339,6 +494,8 @@ def test_repository_filters_expired_listings_and_writes_history_before_latest(
     listings = repo.list_live_listings(now=NOW, limit=50)
     assert [item.url_hash for item in listings] == ["live"]
     assert executed[0][1] == ("default", 50)
+    assert "category" in executed[0][0]
+    assert listings[0].category == "finance"
 
     executed.clear()
     repo.record_result("live", _result(valid=True, payto=PAYER))
@@ -354,9 +511,56 @@ def test_repository_filters_expired_listings_and_writes_history_before_latest(
         "algorand_platform.x402_listings",
         "algorand_platform.x402_listings_by_recency",
         "algorand_platform.x402_listings_by_tag",
+        "algorand_platform.x402_listings_by_tag",
     ]
     assert all("IF EXISTS" in s for s, _ in executed)
     assert executed[2][1] == (PAYER, NOW, "fx", NOW, "live")
+    # The badge also lands on the reserved category partition (099), which is
+    # what GET /x402/search?category= reads.
+    assert executed[3][1] == (PAYER, NOW, "category:finance", NOW, "live")
+
+
+def test_set_verified_writes_the_default_category_row_for_a_pre_099_listing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A listing whose category read back null is projected under category:other, and the badge write reaches that row."""
+    executed: list[tuple[str, tuple]] = []
+
+    class _Session:
+        def execute(self, stmt: str, params: tuple) -> list:
+            executed.append((stmt, params))
+            return []
+
+    monkeypatch.setattr("app.core.cassandra.prepare_cached", lambda cql: cql)
+    monkeypatch.setattr("app.modules.x402_probe.service.get_cassandra_session", lambda: _Session())
+    listing = ListingRow(
+        url_hash="h",
+        url="https://l.example.com",
+        created_at=NOW,
+        tags=(),
+        term_end=NOW + timedelta(days=1),
+        payer=PAYER,
+        verified_wallet="",
+        category="",
+    )
+    CassandraProbeRepository().set_verified(listing, "", None)
+    by_tag = [p for s, p in executed if "x402_listings_by_tag" in s]
+    assert by_tag == [("", None, "category:other", NOW, "h")]
+
+
+# --------------------------------------------------------------------------- #
+# SSRF guard: CGNAT
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize("host", ["100.64.0.1", "100.127.255.254", "192.0.0.8"])
+def test_net_guard_rejects_cgnat_and_other_non_global_literals(host: str) -> None:
+    """100.64.0.0/10 (CGNAT) is not caught by is_private; is_global rejects it (and the other IANA special-purpose ranges)."""
+    with pytest.raises(UnsafeUrlError):
+        assert_public_url(f"http://{host}/")
+
+
+def test_net_guard_still_accepts_a_public_literal() -> None:
+    """The is_global check does not over-reject: an ordinary public literal passes with no DNS."""
+    assert assert_public_url("https://8.8.8.8/x") == "https://8.8.8.8/x"
 
 
 # --------------------------------------------------------------------------- #

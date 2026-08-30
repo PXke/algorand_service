@@ -10,12 +10,15 @@ Replay protection and the settlement ledger are shared infrastructure
 (modules/x402/) already covered by test_x402_directory.py -- they are not
 re-tested here. What IS News-Engine-specific and tested here: the pre-gate
 404 for unknown/draft articles, the pre-gate query validation for search, the
-paid payloads, and the free list's bounds and rate limit.
+paid payloads, the free list's bounds and rate limit, the article route's
+own pre-gate rate limit, and the two paid-but-degraded paths (translations
+lookup failing, search engine failing).
 """
 
 from __future__ import annotations
 
 import json
+import logging
 from types import SimpleNamespace
 from typing import Any, Never
 
@@ -367,6 +370,62 @@ def test_a_settled_payment_returns_the_full_article_and_marks_it_fulfilled(
     assert fulfilled == [("TX123", "x402-news-article")]
 
 
+@pytest.mark.usefixtures("fake_redis")
+def test_a_failed_translations_lookup_still_serves_the_paid_article_and_fulfils_it(
+    engine: NewsEngineService,
+    monkeypatch: pytest.MonkeyPatch,
+    fulfilled: list[tuple[str | None, str]],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The translations list is a nice-to-have read made after payment: when it raises the article body is still served (with an empty list), the settlement is marked fulfilled, and the failure is logged."""
+    monkeypatch.setattr(news_routes, "require_paid_request", lambda *_a, **_kw: _settled_result())
+
+    def _boom(_article_id: str) -> Never:
+        raise RuntimeError("cassandra read timed out")
+
+    monkeypatch.setattr(engine._news, "translation_langs_for", _boom)
+
+    with caplog.at_level(logging.WARNING):
+        response = news_routes.x402_news_article(_request(path_params={"article_id": _LIVE_ID}))
+
+    assert response.status_code == 200
+    assert response.headers["PAYMENT-RESPONSE"] == "ok"
+    body = json.loads(response.description)
+    assert body["body_markdown"].startswith("## Body")
+    assert body["translations_available"] == []
+    assert body["settlement_tx_id"] == "TX123"
+    assert fulfilled == [("TX123", "x402-news-article")]
+    assert any("translation lookup failed" in rec.message for rec in caplog.records)
+
+
+@pytest.mark.usefixtures("engine", "fake_redis")
+def test_the_article_route_is_rate_limited_per_ip_before_the_pre_gate_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The unpaid pre-gate article read is capped per IP on its own counter: over budget is a 429 before the store is read or the gate runs; the headline list's counter is separate."""
+    monkeypatch.setattr(settings, "x402_news_rate_limit_per_hour", 2)
+    monkeypatch.setattr(news_routes, "require_paid_request", lambda *_a, **_kw: _settled_result())
+    monkeypatch.setattr(news_routes, "mark_fulfilled", lambda *_a, **_kw: True)
+
+    def _read(ip: str) -> Response:
+        return news_routes.x402_news_article(
+            _request(headers={"X-Real-IP": ip}, path_params={"article_id": _LIVE_ID})
+        )
+
+    assert _read("203.0.113.7").status_code == 200
+    assert _read("203.0.113.7").status_code == 200
+    # A different IP is unaffected, and so is the limited IP's free headline
+    # list (its own counter).
+    assert _read("203.0.113.9").status_code == 200
+    assert "items" in news_routes.x402_news_list(_request(headers={"X-Real-IP": "203.0.113.7"}))
+
+    monkeypatch.setattr(news_routes, "require_paid_request", _must_not_charge)
+    monkeypatch.setattr(news_routes.news_engine, "resolve_article", _must_not_charge)
+    limited = _read("203.0.113.7")
+    assert limited.status_code == 429
+    assert "rate_limited" in limited.description
+
+
 # --------------------------------------------------------------------------- #
 # The paid search
 # --------------------------------------------------------------------------- #
@@ -425,8 +484,9 @@ def test_a_search_whose_engine_failed_is_a_503_and_not_marked_fulfilled(
     engine: NewsEngineService,
     monkeypatch: pytest.MonkeyPatch,
     fulfilled: list[tuple[str | None, str]],
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """An engine failure after payment is a 503 with the ledger row left unfulfilled -- an empty result is never passed off as "no matches"."""
+    """An engine failure after payment is a 503 with the ledger row left unfulfilled -- an empty result is never passed off as "no matches". The payer still gets the settlement headers (the receipt) and the failure is logged with the payment txid so the operator can find the row."""
     monkeypatch.setattr(news_routes, "require_paid_request", lambda *_a, **_kw: _settled_result())
     monkeypatch.setattr(
         engine,
@@ -434,11 +494,16 @@ def test_a_search_whose_engine_failed_is_a_503_and_not_marked_fulfilled(
         lambda query, *, limit: {"query": query, "engine": "error", "items": [], "limit": limit},
     )
 
-    response = news_routes.x402_news_search(_request(query={"q": "governance"}))
+    with caplog.at_level(logging.ERROR):
+        response = news_routes.x402_news_search(_request(query={"q": "governance"}))
 
     assert response.status_code == 503
     assert "search_unavailable" in response.description
+    assert response.headers["PAYMENT-RESPONSE"] == "ok"
+    assert response.headers["Content-Type"] == "application/json"
     assert fulfilled == []
+    errors = [rec for rec in caplog.records if rec.levelno >= logging.ERROR]
+    assert any("TX123" in rec.getMessage() for rec in errors)
 
 
 # --------------------------------------------------------------------------- #

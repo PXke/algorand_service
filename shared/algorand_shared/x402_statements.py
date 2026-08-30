@@ -47,9 +47,11 @@ class X402ProbeStmts:
 
     # The probe sweep's input: the newest-first recency feed, LIMITed and
     # bound (CLAUDE.md section 4). Term expiry is filtered by the caller.
+    # `category` (migration 099) is read so the badge write below can reach
+    # the listing's reserved `category:<name>` row in x402_listings_by_tag.
     LIST_LIVE_LISTINGS = _Stmt(
         "SELECT url_hash, url, created_at, tags, term_end, payer, "
-        "verified_wallet, verified_at "
+        "verified_wallet, verified_at, category "
         "FROM algorand_platform.x402_listings_by_recency "
         "WHERE directory = ? LIMIT ?"
     )

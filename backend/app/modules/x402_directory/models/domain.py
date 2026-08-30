@@ -49,9 +49,13 @@ def category_tag(category: str) -> str:
 class DirectoryError(PlatformError):
     """A directory-flow error mapped to an HTTP status."""
 
-    def __init__(self, code: str, message: str) -> None:
-        """Map a directory error code to its HTTP status via http_status_for_code."""
-        super().__init__(code, message, http_status=http_status_for_code(code))
+    def __init__(self, code: str, message: str, *, http_status: int | None = None) -> None:
+        """Map a directory error code to its HTTP status via http_status_for_code, unless given explicitly."""
+        super().__init__(
+            code,
+            message,
+            http_status=http_status if http_status is not None else http_status_for_code(code),
+        )
 
 
 @dataclass

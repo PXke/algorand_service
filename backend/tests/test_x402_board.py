@@ -798,3 +798,127 @@ def test_a_counter_failure_does_not_break_the_redirect(store: InMemoryPlacementS
     placement = _placed(store)
 
     assert BoardService(store).click(placement.entry_id) == "https://agent.example.com/home"
+
+
+# --------------------------------------------------------------------------- #
+# Renew: an unattributable placement is refused BEFORE the gate
+# --------------------------------------------------------------------------- #
+@pytest.mark.usefixtures("testnet_settings", "fake_redis")
+def test_renewing_an_ownerless_placement_is_a_409_that_never_reaches_the_gate(
+    store: InMemoryPlacementStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A tile with no payer can never pass the owner check, so nobody is charged to find that out."""
+    monkeypatch.setattr(board_routes, "board_service", BoardService(store))
+    ownerless = BoardService(store).create(
+        normalized_link="https://agent.example.com/home",
+        name="Agent",
+        pitch="anon",
+        payer="",
+        settlement_tx_id="TXANON",
+    )
+    assert ownerless.payer == ""
+
+    def _must_not_charge(*_args: object, **_kwargs: object) -> Never:
+        raise AssertionError("the payment gate must not run for an unrenewable placement")
+
+    monkeypatch.setattr(board_routes, "require_paid_request", _must_not_charge)
+
+    response = board_routes.x402_board_renew(_request(path_params={"entry_id": ownerless.entry_id}))
+
+    assert response.status_code == 409
+    assert "not_renewable" in response.description
+    assert store.get(ownerless.entry_id) == ownerless
+
+
+# --------------------------------------------------------------------------- #
+# /go redirect hygiene
+# --------------------------------------------------------------------------- #
+@pytest.mark.usefixtures("fake_redis")
+def test_click_through_is_noindex_and_sends_no_referrer(
+    store: InMemoryPlacementStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The open redirect must not lend ranking to, or leak visitor paths to, the tile's link."""
+    monkeypatch.setattr(board_routes, "board_service", BoardService(store))
+    placement = _placed(store)
+
+    response = board_routes.x402_board_go(
+        _request(method="GET", path_params={"entry_id": placement.entry_id})
+    )
+
+    assert response.status_code == 302
+    assert response.headers["X-Robots-Tag"] == "noindex"
+    assert response.headers["Referrer-Policy"] == "no-referrer"
+    assert response.headers["Cache-Control"] == "no-store"
+
+
+# --------------------------------------------------------------------------- #
+# Probe / self wallets are never served
+# --------------------------------------------------------------------------- #
+_PROBE = "B" * 58
+
+
+@pytest.mark.usefixtures("fake_redis")
+def test_a_probe_payers_placement_is_stored_but_never_served_on_the_board(
+    store: InMemoryPlacementStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Our own wallet's tile exists (the probe's round-trip works) but is dropped from the feed in code."""
+    monkeypatch.setattr(settings, "x402_probe_payers", f"{_PROBE.lower()},{_OTHER_PAYER}")
+    monkeypatch.setattr(board_routes, "board_service", BoardService(store))
+    probe_tile = _placed(store, payer=_PROBE)
+    real_tile = _placed(store, payer=_PAYER)
+
+    assert store.get(probe_tile.entry_id) is not None
+    feed = board_routes.x402_board_read(_request(method="GET"))
+    assert [item["entry_id"] for item in feed["items"]] == [real_tile.entry_id]
+    assert [p.entry_id for p in BoardService(store).list_active(limit=10)] == [real_tile.entry_id]
+
+
+# --------------------------------------------------------------------------- #
+# Admin delete
+# --------------------------------------------------------------------------- #
+def _delete_request(entry_id: str, headers: dict[str, str] | None = None) -> Request:
+    return _request(
+        method="DELETE",
+        headers=headers,
+        query={"entry_id": entry_id},
+        path="/api/v1/admin/x402/board",
+    )
+
+
+def test_admin_board_delete_without_admin_session_is_rejected(
+    store: InMemoryPlacementStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The real require_admin_wallet runs first; a self-asserted header proves nothing."""
+    monkeypatch.setattr(board_routes, "board_service", BoardService(store))
+    placement = _placed(store)
+
+    response = board_routes.x402_admin_delete_placement(
+        _delete_request(placement.entry_id, headers={"X-Admin-Wallet": _PAYER})
+    )
+
+    assert getattr(response, "status_code", 200) != 200
+    assert store.get(placement.entry_id) is not None
+
+
+@pytest.mark.usefixtures("fake_redis")
+def test_admin_board_delete_removes_the_tile_from_get_and_feed(
+    store: InMemoryPlacementStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An authorized delete removes the placement outright; a repeat is a 404."""
+    monkeypatch.setattr(board_routes, "board_service", BoardService(store))
+    monkeypatch.setattr(board_routes, "require_admin_wallet", lambda _request: None)
+    placement = _placed(store)
+    store.increment_clicks(placement.entry_id)
+
+    response = board_routes.x402_admin_delete_placement(_delete_request(placement.entry_id))
+
+    assert response == {"deleted": True, "entry_id": placement.entry_id}
+    assert store.get(placement.entry_id) is None
+    assert board_routes.x402_board_read(_request(method="GET"))["items"] == []
+    # The click counter is deliberately left behind (unreachable, harmless).
+    assert store.get_click_counts([placement.entry_id]) == {placement.entry_id: 1}
+    assert (
+        board_routes.x402_admin_delete_placement(_delete_request(placement.entry_id)).status_code
+        == 404
+    )
+    assert board_routes.x402_admin_delete_placement(_delete_request("")).status_code == 400

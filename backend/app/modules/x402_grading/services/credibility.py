@@ -62,6 +62,15 @@ The right long-run shape is still a by-payer projection of the ledger,
 dual-written where record_settlement writes the canonical row. That lives in
 modules/x402/settlement.py, which this change is not authorized to modify, so
 it is flagged rather than done here.
+
+## Our own wallets earn nothing
+
+A payer listed in `x402_probe_payers` (the probe beat's wallet, anything else
+we pay our own endpoints from) always reads as spend 0 from both lookups,
+whatever the ledger holds: probe payments are real settlements but they must
+not become influence in any ranking (CLAUDE.md section 9). Its grades are
+already dropped by GradingService._scan; this makes sure that even if one
+slipped through it would carry only the base weight.
 """
 
 from __future__ import annotations
@@ -78,6 +87,7 @@ from app.core.statements import X402GradingStmts
 from app.core.store_factory import StoreFactory
 from app.modules.x402.assets import USDC, AcceptedAsset, asset_for_asa_id
 from app.modules.x402.price_oracle import get_usd_rate
+from app.modules.x402.probe_payers import is_probe_payer
 from app.modules.x402.settlement import get_settlement_store
 
 logger = logging.getLogger(__name__)
@@ -204,8 +214,9 @@ class InMemorySpendLookup:
                 type(store).__name__,
             )
             return None
-        wanted = set(payers)
-        totals = dict.fromkeys(wanted, 0)
+        # Probe/self wallets are answered as 0 without summing (module docstring).
+        wanted = {payer for payer in payers if not is_probe_payer(payer)}
+        totals = dict.fromkeys(payers, 0)
         for record in settlements:
             if record.payer in wanted and record.network == settings.x402_network:
                 totals[record.payer] += _normalized_spend_atomic(
@@ -247,8 +258,9 @@ class CassandraSpendLookup:
         than guessed at here. Latency only, not correctness: still bounded,
         still answers for every payer in one pass.
         """
-        wanted = set(payers)
-        totals = dict.fromkeys(wanted, 0)
+        # Probe/self wallets are answered as 0 without summing (module docstring).
+        wanted = {payer for payer in payers if not is_probe_payer(payer)}
+        totals = dict.fromkeys(payers, 0)
         if not wanted:
             return totals
         lookback = max(1, settings.x402_grading_spend_lookback_days)

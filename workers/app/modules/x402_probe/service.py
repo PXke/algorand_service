@@ -21,12 +21,21 @@ from datetime import UTC, datetime
 from typing import Protocol
 
 from algorand_shared.x402_statements import DIRECTORY_PARTITION, X402ProbeStmts
+from celery.exceptions import SoftTimeLimitExceeded
 
 from app.core.cassandra import get_cassandra_session
 from app.core.config import X402_PROBE_MAX_LISTINGS
 from app.modules.x402_probe.probe import Fetcher, ProbeResult, fetch_unpaid, probe_url
 
 logger = logging.getLogger(__name__)
+
+# The directory projects each listing's category into x402_listings_by_tag
+# under this reserved tag (migration 099). Mirrors backend's
+# x402_directory.models.domain.CATEGORY_TAG_PREFIX / DEFAULT_CATEGORY /
+# category_tag(), which workers cannot import; the badge must land on that
+# row too or `?category=` searches keep serving the stale badge.
+CATEGORY_TAG_PREFIX = "category:"
+DEFAULT_CATEGORY = "other"
 
 
 @dataclass(frozen=True)
@@ -40,6 +49,11 @@ class ListingRow:
     term_end: datetime
     payer: str
     verified_wallet: str
+    category: str = DEFAULT_CATEGORY
+
+    def projection_tags(self) -> tuple[str, ...]:
+        """Every by-tag partition this listing has a row in: real tags plus the reserved category tag."""
+        return (*self.tags, f"{CATEGORY_TAG_PREFIX}{self.category or DEFAULT_CATEGORY}")
 
 
 class ProbeRepository(Protocol):
@@ -84,6 +98,8 @@ class CassandraProbeRepository:
                     term_end=term_end,
                     payer=getattr(row, "payer", None) or "",
                     verified_wallet=getattr(row, "verified_wallet", None) or "",
+                    # Pre-099 rows read back null: DEFAULT_CATEGORY by definition.
+                    category=getattr(row, "category", None) or DEFAULT_CATEGORY,
                 )
             )
         return listings
@@ -106,14 +122,14 @@ class CassandraProbeRepository:
         session.execute(X402ProbeStmts.INSERT_LATEST, params)
 
     def set_verified(self, listing: ListingRow, wallet: str, at: datetime | None) -> None:
-        """Canonical row first, then projections; every UPDATE is IF EXISTS (no phantom rows)."""
+        """Canonical row first, then projections (recency, real tags, category row); every UPDATE is IF EXISTS (no phantom rows)."""
         session = get_cassandra_session()
         session.execute(X402ProbeStmts.SET_VERIFIED_LISTING, (wallet, at, listing.url_hash))
         session.execute(
             X402ProbeStmts.SET_VERIFIED_RECENCY,
             (wallet, at, DIRECTORY_PARTITION, listing.created_at, listing.url_hash),
         )
-        for tag in listing.tags:
+        for tag in listing.projection_tags():
             session.execute(
                 X402ProbeStmts.SET_VERIFIED_BY_TAG,
                 (wallet, at, tag, listing.created_at, listing.url_hash),
@@ -143,7 +159,14 @@ def run_probe_sweep(
     now: datetime | None = None,
     limit: int = X402_PROBE_MAX_LISTINGS,
 ) -> dict[str, object]:
-    """Probe every live listing once; return counts. Never pays, never aborts on one URL."""
+    """Probe every live listing once; return counts. Never pays, never aborts on one URL.
+
+    The one exception to per-URL isolation is Celery's SoftTimeLimitExceeded
+    (a plain Exception subclass): it is re-raised immediately so the task
+    ends at the soft limit instead of sweeping on until the hard kill
+    (CLAUDE.md invariant 6). The single_flight lock on the task releases in
+    its own `finally`, so the re-raise leaves no lock behind.
+    """
     repo = repo or CassandraProbeRepository()
     moment = now or datetime.now(tz=UTC)
     listings = repo.list_live_listings(now=moment, limit=limit)
@@ -171,6 +194,13 @@ def run_probe_sweep(
                     listing.verified_wallet,
                     result.payto_seen,
                 )
+        except SoftTimeLimitExceeded:
+            logger.warning(
+                "x402 probe sweep hit the soft time limit after %d/%d listings",
+                probed,
+                len(listings),
+            )
+            raise
         except Exception:
             failed += 1
             logger.warning(

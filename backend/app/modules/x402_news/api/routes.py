@@ -6,6 +6,8 @@ to this backend on the API host (deploy/nginx/algorand-platform.conf).
 
 from __future__ import annotations
 
+import logging
+
 from app.core import serialization
 from app.core.config import settings
 from app.core.http import Request, Response, Router
@@ -14,7 +16,12 @@ from app.core.query_params import query_param
 from app.modules.x402.discovery import describe_json_endpoint
 from app.modules.x402.paid_request import mark_fulfilled, require_paid_request
 from app.modules.x402_news.services.news_engine_service import NewsEngineService
-from app.modules.x402_news.services.rate_limit import news_list_rate_limited
+from app.modules.x402_news.services.rate_limit import (
+    news_article_rate_limited,
+    news_list_rate_limited,
+)
+
+logger = logging.getLogger(__name__)
 
 # The stores behind the news/search services are resolved lazily on first
 # use, so this is safe as a module-level singleton shared by all routes.
@@ -103,10 +110,20 @@ def x402_news_article(request: Request) -> Response:
     The id (or slug) is resolved BEFORE the payment gate: an unknown, deleted
     or unpublished article is a 404 and nobody is charged for it. The article
     read itself happens once, pre-gate, and is what the settled payment buys.
+    Because that read is free and unpaid, it sits behind a per-IP hourly
+    rate limit (its own counter, same budget as the headline list).
+
+    The translations list is a nice-to-have: if its lookup fails after
+    payment the article is still served, with an empty list, and fulfilled.
     """
     raw = request.path_params.get("article_id", "")
     if not raw:
         return json_error_response(400, "invalid_request", "article_id required")
+
+    if news_article_rate_limited(request):
+        return json_error_response(
+            429, "rate_limited", "Too many article requests — please try again later"
+        )
 
     detail = news_engine.resolve_article(raw)
     if detail is None:
@@ -162,7 +179,9 @@ def x402_news_search(request: Request) -> Response:
     the payment gate, so a malformed query is a 400 and never charged. A
     search whose engine failed outright (engine="error") is a 503 and is NOT
     marked fulfilled: the ledger row stays unfulfilled as the record that this
-    payment bought nothing, for an operator to reconcile.
+    payment bought nothing, for an operator to reconcile -- the failure is
+    logged with the payment txid so that row can be found, and the payer
+    still receives the settlement (receipt) headers on the 503.
     """
     query = query_param(request.query_params.get("q", ""))
     if not (_MIN_QUERY_LENGTH <= len(query) <= _MAX_QUERY_LENGTH):
@@ -208,9 +227,18 @@ def x402_news_search(request: Request) -> Response:
 
     payload = news_engine.search(query, limit=limit)
     if payload["engine"] == "error":
-        return json_error_response(
+        logger.error(
+            "x402 news search: engine failed after payment; ledger row left unfulfilled "
+            "(payment_txid=%s payer=%s q=%r)",
+            result.payment_txid,
+            result.payer,
+            query,
+        )
+        response = json_error_response(
             503, "search_unavailable", "Search is temporarily unavailable — please retry"
         )
+        response.headers.update(result.settlement_headers)
+        return response
     mark_fulfilled(result.payment_txid, resource=_SEARCH_RESOURCE)
     return Response(
         status_code=200,

@@ -180,3 +180,25 @@ class CassandraFeatureStore:
                     count=len(rows), latest_claimer=rows[0].claimer or ""
                 )
         return summaries
+
+    def delete(self, request_id: str) -> bool:
+        """Remove one request, its recency row and its claims. False if it did not exist.
+
+        Point deletes only: the recency row needs the created_at read from the
+        canonical row (it is a clustering column), the claims are one whole
+        partition. Projection and claims go first, the canonical row last, so
+        a crash mid-way leaves the request gone from the public feed but still
+        resolvable by id -- the safer half-done state. The vote counter and
+        audit log are kept (see the Protocol).
+        """
+        session = get_cassandra_session()
+        existing = self.get(request_id)
+        if existing is None:
+            return False
+        session.execute(
+            X402FeaturesStmts.DELETE_RECENCY,
+            (FEATURES_PARTITION, _dt(existing.created_at_epoch), request_id),
+        )
+        session.execute(X402FeaturesStmts.DELETE_CLAIMS, (request_id,))
+        session.execute(X402FeaturesStmts.DELETE_REQUEST, (request_id,))
+        return True

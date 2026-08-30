@@ -232,6 +232,21 @@ def test_every_paid_route_has_a_real_price_setting_and_resource() -> None:
                 assert route.resource, route.path
 
 
+def test_owner_only_renew_routes_say_a_non_owner_payment_is_still_taken() -> None:
+    """Every owner-gated renew entry tells the agent up front that a non-owner's payment settles and is refused -- the 402 says it, so the catalog must too."""
+    renew_routes = [
+        route
+        for product in catalog_service.PRODUCTS
+        for route in product.routes
+        if route.path.endswith("/renew")
+    ]
+    assert len(renew_routes) >= 2
+    for route in renew_routes:
+        text = route.description.lower()
+        assert "settles" in text, route.path
+        assert "refused" in text, route.path
+
+
 def test_assets_follow_the_network(monkeypatch: pytest.MonkeyPatch) -> None:
     """The advertised assets are the ones that exist on the configured network, USDC first."""
     _configure(monkeypatch)

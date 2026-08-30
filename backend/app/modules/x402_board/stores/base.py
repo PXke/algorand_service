@@ -45,3 +45,12 @@ class PlacementStore(Protocol):
         clicks may be omitted; the caller treats a missing id as 0.
         """
         ...
+
+    def delete(self, entry_id: str) -> bool:
+        """Remove one placement, recency projection included. False if it did not exist.
+
+        Admin-only. The click counter is left in place: it is keyed on the
+        entry id, so it is unreachable once the placement is gone, and a
+        counter row cannot be safely deleted then re-incremented in Cassandra.
+        """
+        ...

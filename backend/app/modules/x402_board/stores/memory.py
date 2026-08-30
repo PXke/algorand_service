@@ -47,3 +47,7 @@ class InMemoryPlacementStore:
         """Return click totals for many placements at once, keyed by entry id."""
         with self._lock:
             return {eid: self._clicks[eid] for eid in entry_ids if eid in self._clicks}
+
+    def delete(self, entry_id: str) -> bool:
+        """Remove one placement. False if it did not exist. Clicks are kept, as in Cassandra."""
+        return self._items.pop(entry_id, None) is not None

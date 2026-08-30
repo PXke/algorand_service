@@ -8,11 +8,15 @@ the translation-language list, and bounded result sizes.
 
 from __future__ import annotations
 
+import logging
+
 from app.core.config import settings
 from app.modules.news.models.schemas import ArticleDetail, ArticleFeedItem
 from app.modules.news.services.news_service import NewsService
 from app.modules.search.services.search_service import SearchService
 from app.modules.seo.render import article_url
+
+logger = logging.getLogger(__name__)
 
 
 class NewsEngineService:
@@ -48,6 +52,24 @@ class NewsEngineService:
         article_id = self._news.resolve_slug(raw_id) or raw_id
         return self._news.get_article(article_id)
 
+    def translation_langs(self, article_id: str) -> list[str]:
+        """Language codes a translation exists for, or [] when that lookup fails.
+
+        This is a second store read, made after the caller has already paid
+        for the article body: a failure here is logged and degrades to an
+        empty list rather than turning a paid, already-resolved article into
+        a 500 with the payment taken.
+        """
+        try:
+            return self._news.translation_langs_for(article_id)
+        except Exception:
+            logger.warning(
+                "x402 news: translation lookup failed for article %s; serving without translations",
+                article_id,
+                exc_info=True,
+            )
+            return []
+
     def article_json(self, detail: ArticleDetail) -> dict:
         """The full paid article payload: body markdown plus every source and translation the caller can follow up on."""
         sources = [detail.source_url] if detail.source_url else []
@@ -65,7 +87,7 @@ class NewsEngineService:
             "published_at_epoch": detail.published_at_epoch,
             "updated_at_epoch": detail.updated_at_epoch,
             "url": article_url(detail.article_id, slug=detail.slug),
-            "translations_available": self._news.translation_langs_for(detail.article_id),
+            "translations_available": self.translation_langs(detail.article_id),
         }
 
     def search(self, query: str, *, limit: int) -> dict:

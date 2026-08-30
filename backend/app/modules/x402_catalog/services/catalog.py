@@ -126,7 +126,8 @@ PRODUCTS: tuple[Product, ...] = (
                 description=(
                     "Extend an existing listing by x402_listing_term_days more days from "
                     "the later of now and its term end (JSON body: url); owner only while "
-                    "the listing is live."
+                    "the listing is live -- a payment from any other wallet settles but is "
+                    "refused (403) and changes nothing."
                 ),
                 price_setting="x402_listing_price",
                 resource="x402-directory-renew",

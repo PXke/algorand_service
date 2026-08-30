@@ -58,6 +58,16 @@ def _row_to_probe(row: object) -> StoredProbe:
     )
 
 
+def _badge_params(item: StoredListing) -> tuple:
+    """The verified_wallet / verified_at bind params every listing INSERT ends with.
+
+    Written on every write so the canonical row and both projections always
+    agree on the badge: a same-owner relist carries it, an ownership change
+    writes it empty (the service sets the fields; see ListingService.create).
+    """
+    return (item.verified_wallet, _dt(item.verified_at_epoch) if item.verified_at_epoch else None)
+
+
 def _canonical_params(item: StoredListing) -> tuple:
     """Bind params shared by UPSERT_LISTING and INSERT_LISTING_IF_ABSENT."""
     return (
@@ -73,6 +83,7 @@ def _canonical_params(item: StoredListing) -> tuple:
         _dt(item.created_at_epoch),
         item.payer,
         item.category,
+        *_badge_params(item),
     )
 
 
@@ -92,6 +103,7 @@ def _projection_params(partition: str, item: StoredListing) -> tuple:
         item.settlement_tx_id,
         item.payer,
         item.category,
+        *_badge_params(item),
     )
 
 

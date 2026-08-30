@@ -243,12 +243,14 @@ def x402_renew(request: Request) -> Response:
     Decoded, normalized and looked up BEFORE the payment gate: a malformed
     body, an invalid url and a url that is not listed are all free 400s/404s.
     Ownership cannot be checked before the gate -- the payer is only known
-    once the payment has settled -- so a renewal of a live listing by a
-    wallet other than its owner is refused with the payment already taken and
-    the listing untouched (403, receipt headers served). Same accepted
-    tradeoff as x402_list's relist check and the board's renew, and the 402
-    offer says so before the payer commits. See listing_service.renew() for
-    the term arithmetic and what a renewal does and does not change.
+    once the payment has settled -- so a renewal by a wallet other than the
+    one that listed the url is refused with the payment already taken and
+    the listing untouched (403 listing_owned_by_another_payer while the term
+    runs, 409 renew_requires_relist once it has expired; receipt headers
+    served either way). Same accepted tradeoff as x402_list's relist check
+    and the board's renew, and the 402 offer says so before the payer
+    commits. See listing_service.renew() for the term arithmetic and what a
+    renewal does and does not change.
     """
     try:
         payload = serialization.decode(request.body, X402ListingRenewRequest)
@@ -269,10 +271,11 @@ def x402_renew(request: Request) -> Response:
         description=(
             f"Extend an existing PXke x402 directory listing by {term_days} more days, "
             f"from the later of now and its current term end; nothing else about the "
-            f"listing changes. Only the wallet that listed the url may renew it while "
-            f"its term is running: a payment from any other wallet settles but is "
-            f"refused and changes nothing. An expired or unowned listing may be "
-            f"renewed, and thereby claimed, by any wallet."
+            f"listing changes. Only the wallet that listed the url may renew it, "
+            f"before or after its term ends: a payment from any other wallet settles "
+            f"but is refused and changes nothing (403 while the term is running, 409 "
+            f"renew_requires_relist once it has expired). To take over an expired "
+            f"or unowned url, POST /api/v1/x402/list to relist it under your wallet."
         ),
         extensions=describe_json_endpoint(
             body_type="json",

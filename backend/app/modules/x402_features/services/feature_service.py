@@ -18,6 +18,7 @@ import uuid
 from datetime import UTC, datetime
 
 from app.core.config import settings
+from app.modules.x402.probe_payers import is_probe_payer
 from app.modules.x402_features.models.domain import (
     ClaimSummary,
     FeatureError,
@@ -107,9 +108,8 @@ class FeatureService:
 
         Called BEFORE the vote route's payment gate, so a vote for a request
         that does not exist is a 404 rather than a payment taken for an
-        increment that can never land. There is no delete path in this module,
-        so a request that exists at this check still exists when the payment
-        settles.
+        increment that can never land. Only an admin delete (see `delete`)
+        can remove a request between this check and settlement.
         """
         return self.store.get(request_id) is not None
 
@@ -153,9 +153,22 @@ class FeatureService:
         that settled concurrently; it is a courtesy echo for the payer, not the
         ranking. The stored total is always exact -- see the store's
         increment_vote_total.
+
+        A vote paid by one of OUR wallets (x402_probe_payers) is charged and
+        audit-logged like any other but is NOT counted: the demand total is a
+        counter, so it cannot be filtered at read time, and probe traffic
+        must never move a ranking (CLAUDE.md section 9). Skipping the
+        increment at write time is the only place that exclusion can live.
         """
         moment = now or datetime.now(tz=UTC)
-        self.store.increment_vote_total(request_id)
+        if is_probe_payer(voter):
+            logger.info(
+                "x402 features: vote on %s by probe payer not counted (settlement_tx_id=%s)",
+                request_id,
+                settlement_tx_id,
+            )
+        else:
+            self.store.increment_vote_total(request_id)
         try:
             self.store.append_vote(
                 StoredVote(
@@ -225,6 +238,18 @@ class FeatureService:
                 exc_info=True,
             )
             return {}
+
+    def delete(self, request_id: str) -> bool:
+        """Admin-only: remove a request, its recency row and its claims outright.
+
+        Returns False if there was nothing to delete, so the admin route can
+        tell a real removal from a no-op. Vote counter and audit log stay
+        (see the store Protocol). Note `exists()`'s docstring: this is the
+        one path that can remove a request between a vote's pre-gate
+        existence check and its settlement -- the vote's increment still
+        lands on the orphaned counter, which is harmless (nothing reads it).
+        """
+        return bool(request_id) and self.store.delete(request_id)
 
     def list_recent(self, *, limit: int) -> list[StoredFeatureRequest]:
         """Return requests newest-first, clamped to the configured maximum.

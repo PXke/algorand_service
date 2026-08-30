@@ -17,6 +17,7 @@ from app.core.errors import PlatformError
 from app.core.http import Request, Response, Router
 from app.core.http_errors import json_error_from_platform, json_error_response
 from app.core.query_params import query_param
+from app.modules.admin.auth import require_admin_wallet
 from app.modules.x402.discovery import describe_json_endpoint
 from app.modules.x402.paid_request import mark_fulfilled, require_paid_request
 
@@ -39,12 +40,14 @@ from app.modules.x402_grading.models.domain import (
     WeightedGrade,
 )
 from app.modules.x402_grading.services.grading_service import (
+    MIN_LEADERBOARD_GRADES,
     TOP_CANDIDATE_LIMIT,
     GradingService,
 )
 from app.modules.x402_grading.services.rate_limit import (
     grading_index_rate_limited,
     grading_summary_rate_limited,
+    grading_top_rate_limited,
 )
 from app.schemas import X402GradeSubmission
 
@@ -56,9 +59,9 @@ logger = logging.getLogger(__name__)
 listing_service = ListingService()
 
 
-def _listed_urls_for_tag(tag: str, limit: int) -> list[str]:
-    """TagCandidateLookup bound to the directory: live listings carrying `tag`, newest first."""
-    return [item.url for item in listing_service.search(limit=limit, tag=tag)]
+def _listed_urls_for_tag(tag: str, limit: int) -> list[tuple[str, str]]:
+    """TagCandidateLookup bound to the directory: (url, owner payer) of live listings carrying `tag`, newest first."""
+    return [(item.url, item.payer) for item in listing_service.search(limit=limit, tag=tag)]
 
 
 grading_service = GradingService(tag_lookup=_listed_urls_for_tag)
@@ -431,15 +434,22 @@ def x402_grade_top(request: Request) -> Response:
     TOP_CANDIDATE_LIMIT listings, aggregated with ONE batched ledger lookup.
 
     Checked for FREE before the gate: the tag is usable (400) and at least one
-    listing with that tag has a grade (404) -- the second check reads only
-    what the free index and the free directory search already give away, so
-    nobody pays for an empty leaderboard.
+    listing with that tag is rankable (404) -- at least MIN_LEADERBOARD_GRADES
+    grades not counting the lister's own or a probe's (see
+    GradingService.leaderboard_candidates), so nobody pays for an empty
+    leaderboard. That pre-gate check scans up to TOP_CANDIDATE_LIMIT grade
+    partitions, so the whole route is rate-limited per IP FIRST: the free
+    part must not be a free scan surface.
     """
+    if grading_top_rate_limited(request):
+        return json_error_response(
+            429, "rate_limited", "Too many leaderboard requests — please try again later"
+        )
     raw_tag = query_param(request.query_params.get("tag", ""))
     if not raw_tag:
         return json_error_response(400, "invalid_request", "tag is required")
     try:
-        candidates = grading_service.graded_candidates_for_tag(raw_tag)
+        candidates = grading_service.leaderboard_candidates(raw_tag)
     except PlatformError as exc:
         # The directory's invalid-tag error (DirectoryError) or this module's
         # own "no lookup bound" -- both PlatformErrors, both pre-gate.
@@ -448,8 +458,9 @@ def x402_grade_top(request: Request) -> Response:
         return json_error_response(
             404,
             "not_found",
-            "No graded endpoint is listed under that tag. GET /api/v1/x402/search?tag= "
-            "lists the tag's endpoints and GET /api/v1/x402/grades the graded ones, free.",
+            f"No endpoint listed under that tag has {MIN_LEADERBOARD_GRADES} or more "
+            f"independent grades. GET /api/v1/x402/search?tag= lists the tag's endpoints "
+            f"and GET /api/v1/x402/grades/summary?url= each one's grade count, free.",
         )
 
     result = require_paid_request(
@@ -459,7 +470,9 @@ def x402_grade_top(request: Request) -> Response:
         description=(
             f"Read the top graded x402 endpoints listed under one directory tag, ranked "
             f"by credibility-weighted mean grade, with each endpoint's plain mean and "
-            f"grader count. Considers at most {TOP_CANDIDATE_LIMIT} listings per tag. "
+            f"grader count. Considers at most {TOP_CANDIDATE_LIMIT} listings per tag; an "
+            f"endpoint needs at least {MIN_LEADERBOARD_GRADES} grades to be ranked, and a "
+            f"lister's grade of their own listing is not counted. "
             f"Per-grader opinions are not included -- GET /api/v1/x402/grades/score "
             f"sells those per endpoint."
         ),
@@ -494,8 +507,7 @@ def x402_grade_top(request: Request) -> Response:
     if result.error:
         return result.error
 
-    aggregates = grading_service.aggregate_many(candidates)
-    aggregates.sort(key=lambda item: (-item.weighted_mean, -item.count, item.url_hash))
+    aggregates = grading_service.rank_leaderboard(candidates)
     mark_fulfilled(result.payment_txid, resource="x402-grading-top")
     return Response(
         status_code=200,
@@ -515,10 +527,39 @@ def x402_grade_top(request: Request) -> Response:
     )
 
 
+def x402_admin_delete_grade(request: Request) -> Response | dict:
+    """Admin: remove one wallet's grade of one URL outright.
+
+    For a grade that is abuse (a bought or coerced rating). Same shape as the
+    directory's admin delist: url and grader as query params, session wallet
+    verified first -- the X-Admin-Wallet header is never trusted. The URL is
+    normalized with the write path's rule so the admin does not have to
+    reproduce our normalization to hit the stored key.
+    """
+    denied = require_admin_wallet(request)
+    if denied is not None:
+        return denied
+
+    raw_url = query_param(request.query_params.get("url", ""))
+    grader = query_param(request.query_params.get("grader", "")).strip()
+    if not raw_url or not grader:
+        return json_error_response(400, "invalid_request", "url and grader are required")
+    try:
+        _, hashed = grading_service.resolve_url(raw_url)
+    except GradingError as exc:
+        return json_error_from_platform(exc)
+
+    deleted = grading_service.delete(url_hash_value=hashed, grader=grader)
+    if not deleted:
+        return json_error_response(404, "not_found", "No grade of that url by that grader")
+    return {"deleted": True, "url_hash": hashed, "grader": grader}
+
+
 def register_x402_grading_routes(app: Router) -> None:
-    """Register the paid routes (grade, score, tag leaderboard) and the free ones (index, summary)."""
+    """Register the paid routes (grade, score, tag leaderboard), the free ones (index, summary) and the admin delete."""
     app.post("/api/v1/x402/grades")(x402_grade_submit)
     app.get("/api/v1/x402/grades")(x402_grade_index)
     app.get("/api/v1/x402/grades/score")(x402_grade_score)
     app.get("/api/v1/x402/grades/summary")(x402_grade_summary)
     app.get("/api/v1/x402/grades/top")(x402_grade_top)
+    app.delete("/api/v1/admin/x402/grades")(x402_admin_delete_grade)

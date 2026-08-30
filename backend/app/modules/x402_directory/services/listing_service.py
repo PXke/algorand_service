@@ -232,6 +232,14 @@ class ListingService:
         ownership rule as any relist -- refused if the winner is a different
         live payer, otherwise allowed through the relist path. The relist
         path (same owner, unowned, or expired) is a plain upsert.
+
+        Verified badge (097): every store write persists verified_wallet /
+        verified_at on the canonical row and both projections, so a relist by
+        the SAME payer carries the existing badge through (the endpoint's
+        payTo has not been re-checked, but the wallet it attests to is
+        unchanged), while a relist that changes the payer writes the badge
+        empty everywhere -- the previous owner's attestation must not sit in
+        storage under the new owner's name, whatever is_verified would say.
         """
         moment = now or datetime.now(tz=UTC)
         if not normalized_url.strip():
@@ -280,6 +288,12 @@ class ListingService:
                 "listing_owned_by_another_payer",
                 "This url is already listed by a different payer. Payment has "
                 "settled but the existing listing was not changed.",
+            )
+        if existing is not None and existing.payer and existing.payer == payer:
+            listing = replace(
+                listing,
+                verified_wallet=existing.verified_wallet,
+                verified_at_epoch=existing.verified_at_epoch,
             )
         self.store.upsert(listing)
         return listing
@@ -354,28 +368,32 @@ class ListingService:
     ) -> StoredListing:
         """Extend a listing's term by one more configured term and return it.
 
-        Ownership follows create()'s rule exactly: a listing whose term is
-        still running and whose non-empty payer is not this payer may not be
-        renewed (listing_owned_by_another_payer, 403); an unowned (empty
-        payer) or expired listing may be renewed -- and thereby claimed -- by
-        anyone, since the previous payer only bought the term they paid for.
-        Like create(), no `and payer` guard on the new side: an
-        unattributable payment cannot prove it is the owner of a live
-        listing. The payer is only known after settlement, so a refusal here
-        comes with the payment already taken -- the same accepted tradeoff
-        as create() and the board's renew, stated in the 402 offer.
+        Only the wallet that paid for the listing's current term may renew
+        it, whether or not that term has ended. A renewal keeps everything
+        the listing says about the endpoint (price, description, assets,
+        tags, schema, category) exactly as it was, so letting a different
+        wallet renew an expired listing would put the previous payer's
+        description of the endpoint under the new wallet's name. A live
+        listing renewed by another wallet is refused with
+        listing_owned_by_another_payer (403); an expired or unowned (empty
+        payer) listing renewed by a different wallet is refused with
+        renew_requires_relist (409): the url is free to take, but only via
+        POST /list, which makes the new owner state its own price and
+        description. Like create(), no `and payer` guard on the new side:
+        an unattributable payment cannot prove it is the owner. The payer
+        is only known after settlement, so either refusal comes with the
+        payment already taken -- the same accepted tradeoff as create() and
+        the board's renew, stated in the 402 offer.
 
         The new term runs from max(now, current term_end): renewing early
         adds a full term on top of what is left, renewing after expiry
         starts a fresh one from now, and neither shortens what was already
         paid for. created_at is NOT re-stamped -- a renewal buys time, not a
         jump back to the front of the newest-first feed (that is what a
-        relist buys). settlement_tx_id and payer are replaced so the listing
-        traces to the payment that bought its current term; the verified
-        badge (097) survives only if the payer is unchanged, since it
-        attests that THAT wallet controls the endpoint. Everything the
-        listing says about the endpoint (price, description, assets, tags,
-        schema, category) is left exactly as it was.
+        relist buys). settlement_tx_id is replaced so the listing traces to
+        the payment that bought its current term; payer and the verified
+        badge (097) are unchanged, since the payer is by construction the
+        same wallet.
 
         Raises not_found if the url is not listed; the route checks this
         before the gate, this is the guard for any other caller.
@@ -385,14 +403,22 @@ class ListingService:
         if existing is None:
             raise DirectoryError("not_found", "No listing for that url")
         cutoff = int(moment.timestamp())
-        if existing.payer and existing.payer != payer and existing.term_end_epoch > cutoff:
+        if existing.payer != payer:
+            if existing.payer and existing.term_end_epoch > cutoff:
+                raise DirectoryError(
+                    "listing_owned_by_another_payer",
+                    "Only the wallet that listed this url may renew it. Payment has "
+                    "settled but the existing listing was not changed.",
+                )
             raise DirectoryError(
-                "listing_owned_by_another_payer",
-                "Only the wallet that listed this url may renew it. Payment has "
-                "settled but the existing listing was not changed.",
+                "renew_requires_relist",
+                "This listing has expired (or has no owner) and can only be renewed by "
+                "the wallet that listed it. POST /api/v1/x402/list to relist the url "
+                "under your wallet. Payment has settled but the existing listing was "
+                "not changed.",
+                http_status=409,
             )
         base = max(cutoff, existing.term_end_epoch)
-        same_payer = existing.payer == payer
         renewed = replace(
             existing,
             term_end_epoch=int(
@@ -402,9 +428,6 @@ class ListingService:
                 ).timestamp()
             ),
             settlement_tx_id=settlement_tx_id,
-            payer=payer,
-            verified_wallet=existing.verified_wallet if same_payer else "",
-            verified_at_epoch=existing.verified_at_epoch if same_payer else 0,
         )
         self.store.upsert(renewed)
         return renewed

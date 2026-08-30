@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime
 
 from app.core.config import settings
+from app.modules.x402.probe_payers import is_probe_payer
 from app.modules.x402_grading.models.domain import (
     MAX_COMMENT_LENGTH,
     MAX_SCORE,
@@ -35,13 +37,39 @@ logger = logging.getLogger(__name__)
 # not a catalogue. Raise here, deliberately, if a tag ever needs more.
 TOP_CANDIDATE_LIMIT = 25
 
+# The fewest independent grades an endpoint needs before it can be RANKED on
+# a tag leaderboard. With a threshold of 1 the top slot is bought for the
+# price of one grade -- list an endpoint, grade it 5 from a second wallet,
+# done. Two is the smallest number that makes that cost a second, unrelated
+# wallet's paid opinion; it is a floor on rankability, not on the per-URL
+# score lookup, which still serves a single grade honestly with count=1.
+MIN_LEADERBOARD_GRADES = 2
+
 # The ONE seam through which this module sees the directory: given a raw tag
-# and a bound, return the URLs of live listings carrying that tag (at most
-# `limit`). Raising is allowed for an unusable tag -- the route maps a
-# PlatformError to its status. Defined as a callable, not an import, so this
-# service never depends on x402_directory; api/routes.py binds it to the
-# directory's public ListingService.search and nothing else does.
-TagCandidateLookup = Callable[[str, int], list[str]]
+# and a bound, return (url, owner payer) for the live listings carrying that
+# tag (at most `limit`). The owner is the wallet that paid for the listing's
+# current term, "" when unowned; the leaderboard excludes that wallet's own
+# grade of its own listing. Raising is allowed for an unusable tag -- the
+# route maps a PlatformError to its status. Defined as a callable, not an
+# import, so this service never depends on x402_directory; api/routes.py
+# binds it to the directory's public ListingService.search and nothing else
+# does.
+TagCandidateLookup = Callable[[str, int], list[tuple[str, str]]]
+
+
+@dataclass(frozen=True)
+class LeaderboardCandidate:
+    """One tag-listed endpoint with its eligible grades already scanned.
+
+    Built BEFORE the leaderboard's payment gate (so the route can 404 an
+    empty board for free) and aggregated AFTER it, so the partition is read
+    once, not twice. `rows` already excludes the listing owner's own grade
+    and every probe payer's.
+    """
+
+    endpoint: GradedEndpoint
+    rows: list[StoredGrade]
+    truncated: bool
 
 
 class GradingService:
@@ -103,11 +131,15 @@ class GradingService:
         reads -- it runs BEFORE the leaderboard route's payment gate. The
         lookup's own error for an unusable tag propagates unchanged.
         """
+        return [endpoint for endpoint, _owner in self._graded_listings_for_tag(tag)]
+
+    def _graded_listings_for_tag(self, tag: str) -> list[tuple[GradedEndpoint, str]]:
+        """(graded endpoint, listing owner) for the tag's listings that have grades."""
         if self._tag_lookup is None:
             raise GradingError("not_found", "Tag leaderboards are not available on this server")
-        candidates: list[GradedEndpoint] = []
+        candidates: list[tuple[GradedEndpoint, str]] = []
         seen: set[str] = set()
-        for url in self._tag_lookup(tag, TOP_CANDIDATE_LIMIT)[:TOP_CANDIDATE_LIMIT]:
+        for url, owner in self._tag_lookup(tag, TOP_CANDIDATE_LIMIT)[:TOP_CANDIDATE_LIMIT]:
             try:
                 _, hashed = self.resolve_url(url)
             except GradingError:
@@ -119,8 +151,50 @@ class GradingService:
             seen.add(hashed)
             endpoint = self.graded_endpoint(hashed)
             if endpoint is not None:
-                candidates.append(endpoint)
+                candidates.append((endpoint, (owner or "").strip()))
         return candidates
+
+    def leaderboard_candidates(self, tag: str) -> list[LeaderboardCandidate]:
+        """The tag's rankable endpoints, each with its eligible grades scanned once.
+
+        Two exclusions make a leaderboard slot cost more than one grade:
+
+        * **The listing owner's own grade of their own listing does not
+          count.** The wallet that paid to list an endpoint can grade it, and
+          that grade still shows in the per-URL score lookup, but it is
+          removed from the ranking -- otherwise every lister would buy their
+          own top slot for the grade fee. The owner is the listing's `payer`
+          as the directory reports it; an unowned listing ("" payer) excludes
+          nothing.
+        * **Fewer than MIN_LEADERBOARD_GRADES eligible grades is unranked.**
+          See the constant.
+
+        Probe payers' grades are already gone from `_scan`. Runs BEFORE the
+        payment gate, bounded to TOP_CANDIDATE_LIMIT partition scans, and is
+        why the route rate-limits its pre-gate path per IP.
+        """
+        candidates: list[LeaderboardCandidate] = []
+        for endpoint, owner in self._graded_listings_for_tag(tag):
+            rows, truncated = self._scan(endpoint)
+            if owner:
+                rows = [row for row in rows if row.grader != owner]
+            if len(rows) < MIN_LEADERBOARD_GRADES:
+                continue
+            candidates.append(
+                LeaderboardCandidate(endpoint=endpoint, rows=rows, truncated=truncated)
+            )
+        return candidates
+
+    def rank_leaderboard(self, candidates: list[LeaderboardCandidate]) -> list[GradeAggregate]:
+        """Aggregate pre-scanned candidates with ONE ledger lookup and order them for a leaderboard.
+
+        By credibility-weighted mean, ties broken by grader count then
+        url_hash so the order is stable. `aggregate_many` is the same fold
+        without the sort, for callers that want input order.
+        """
+        aggregates = self._aggregate_scanned(candidates)
+        aggregates.sort(key=lambda item: (-item.weighted_mean, -item.count, item.url_hash))
+        return aggregates
 
     # ----------------------------------------------------------------- #
     # Writes
@@ -226,15 +300,36 @@ class GradingService:
         a single batch and the per-URL aggregates are built from that one
         answer. Output is in input order. The caller bounds N.
         """
-        scanned = [self._scan(endpoint) for endpoint in endpoints]
-        all_rows = [row for rows, _truncated in scanned for row in rows]
+        scanned: list[LeaderboardCandidate] = []
+        for endpoint in endpoints:
+            rows, truncated = self._scan(endpoint)
+            scanned.append(LeaderboardCandidate(endpoint=endpoint, rows=rows, truncated=truncated))
+        return self._aggregate_scanned(scanned)
+
+    def _aggregate_scanned(self, scanned: list[LeaderboardCandidate]) -> list[GradeAggregate]:
+        """Fold already-scanned rows into aggregates, resolving every grader's weight in one batch."""
+        all_rows = [row for candidate in scanned for row in candidate.rows]
         weights, weights_resolved = self._weights(all_rows)
         return [
             self._build_aggregate(
-                endpoint, rows, weights=weights, weights_resolved=weights_resolved, truncated=trunc
+                candidate.endpoint,
+                candidate.rows,
+                weights=weights,
+                weights_resolved=weights_resolved,
+                truncated=candidate.truncated,
             )
-            for endpoint, (rows, trunc) in zip(endpoints, scanned, strict=True)
+            for candidate in scanned
         ]
+
+    def delete(self, *, url_hash_value: str, grader: str) -> bool:
+        """Admin-only: remove one grader's grade of one URL outright.
+
+        Returns False if there was nothing to delete, so the admin route can
+        tell a real removal from a no-op. The index entry goes with the last
+        grade (see GradeStore.delete).
+        """
+        grader = grader.strip()
+        return bool(url_hash_value) and bool(grader) and self.store.delete(url_hash_value, grader)
 
     def summary(self, endpoint: GradedEndpoint) -> GradeSummary:
         """The free existence-tier summary: grader count and last-graded time, no scores.
@@ -253,7 +348,14 @@ class GradingService:
         )
 
     def _scan(self, endpoint: GradedEndpoint) -> tuple[list[StoredGrade], bool]:
-        """One URL's grades over the bounded scan, plus whether the scan hit its bound."""
+        """One URL's grades over the bounded scan, plus whether the scan hit its bound.
+
+        Grades by our own wallets (x402_probe_payers) are dropped here, at the
+        one place every aggregate, summary and leaderboard reads grades from:
+        a probe may pay to grade an endpoint to prove the route works, but its
+        opinion is not signal and must not move any number another agent pays
+        for (CLAUDE.md section 9). The row itself stays stored.
+        """
         scan_limit = max(1, settings.x402_grading_scan_limit)
         # One extra row is asked for purely to detect truncation: a reader who
         # paid for a number must be told when it is over a partial sample.
@@ -266,7 +368,7 @@ class GradingService:
                 endpoint.url_hash,
                 scan_limit,
             )
-        return rows[:scan_limit], truncated
+        return [row for row in rows[:scan_limit] if not is_probe_payer(row.grader)], truncated
 
     def _build_aggregate(
         self,

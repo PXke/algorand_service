@@ -34,6 +34,8 @@ def _ip_is_public(ip: str) -> bool:
         addr = ipaddress.ip_address(ip)
     except ValueError:
         return False
+    # is_global additionally rejects the IANA special-purpose ranges the
+    # flags above miss, notably 100.64.0.0/10 (CGNAT shared address space).
     return not (
         addr.is_private
         or addr.is_loopback
@@ -41,6 +43,7 @@ def _ip_is_public(ip: str) -> bool:
         or addr.is_multicast
         or addr.is_reserved
         or addr.is_unspecified
+        or not addr.is_global
     )
 
 

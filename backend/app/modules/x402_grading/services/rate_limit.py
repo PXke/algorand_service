@@ -1,4 +1,4 @@
-"""Per-IP rate limits for the free graded-listing index and the free per-URL summary."""
+"""Per-IP rate limits for the free grading reads and the tag leaderboard's pre-gate work."""
 
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ from app.core.request_headers import client_ip
 
 _KEY_PREFIX = "algorand:x402:grading_rl:"
 _SUMMARY_KEY_PREFIX = "algorand:x402:grading_summary_rl:"
+_TOP_KEY_PREFIX = "algorand:x402:grading_top_rl:"
 _WINDOW_SECONDS = 3600
 
 
@@ -30,6 +31,21 @@ def grading_summary_rate_limited(request: Request) -> bool:
     outside this change's scope (config.py). Fails open like the index's.
     """
     return _over_budget(request, prefix=_SUMMARY_KEY_PREFIX)
+
+
+def grading_top_rate_limited(request: Request) -> bool:
+    """Return True when this IP has exceeded the hourly tag-leaderboard budget.
+
+    The leaderboard route does real work BEFORE its payment gate -- a
+    directory tag read plus up to TOP_CANDIDATE_LIMIT grade-partition scans --
+    so that nobody pays for an empty board. That pre-gate work is free to the
+    caller, which makes it a free scan surface unless it is budgeted like the
+    other free reads. Own key prefix, same hourly budget setting, fails open
+    like the index's. Paid, successful reads count against it too: the budget
+    is per hour of leaderboard *requests*, and an agent that legitimately
+    buys 120 leaderboards an hour is not the case this exists for.
+    """
+    return _over_budget(request, prefix=_TOP_KEY_PREFIX)
 
 
 def grading_index_rate_limited(request: Request) -> bool:

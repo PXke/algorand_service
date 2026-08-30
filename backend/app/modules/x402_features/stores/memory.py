@@ -93,6 +93,13 @@ class InMemoryFeatureStore:
                 summaries[rid] = ClaimSummary(count=len(ordered), latest_claimer=ordered[0].claimer)
             return summaries
 
+    def delete(self, request_id: str) -> bool:
+        """Remove one request and its claims; keep its vote total and audit log (as Cassandra does)."""
+        with self._lock:
+            existed = self._items.pop(request_id, None) is not None
+            self._claims.pop(request_id, None)
+        return existed
+
     def claims_for(self, request_id: str) -> list[StoredClaim]:
         """Return a request's claims. Test/dev helper -- not on the Protocol."""
         with self._lock:

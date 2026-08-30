@@ -55,3 +55,13 @@ class GradeStore(Protocol):
     def list_graded_endpoints(self, *, limit: int) -> list[GradedEndpoint]:
         """Return URLs that have at least one grade, at most `limit` of them."""
         ...
+
+    def delete(self, url_hash: str, grader: str) -> bool:
+        """Remove one grader's grade of one URL. False if there was none.
+
+        Admin-only. When that was the URL's last grade, its index entry is
+        removed too, so the free index never advertises a URL with nothing
+        behind it; while other grades remain the index row (and its
+        last_graded_at) is left as is.
+        """
+        ...

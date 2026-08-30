@@ -257,5 +257,17 @@ this marketplace originates toward listed endpoints. Nothing in the codebase
 pays this marketplace's own routes from its own wallets, and probe data is
 excluded from every ranking.
 
+## Fair use / what is excluded
+
+Rankings, grades and volume figures only count third-party payments. Any
+payment that does originate from an operator-controlled wallet (the probe's
+own wallet, or any wallet the operator declares as such) is excluded from
+every ranking, score and summary in code, not by convention: it is recorded
+in the settlement ledger like any other payment, then ignored wherever
+positions are computed. Abusive content or traffic -- spam listings,
+placements, feature requests or grades that misrepresent an endpoint, or
+attempts to inflate an entry's position -- can be removed by an operator
+through the admin routes; a removed entry is not refunded.
+
 Admin-only routes (`/api/v1/admin/...`) exist for operators and are not part
 of the marketplace surface.

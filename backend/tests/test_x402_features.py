@@ -928,3 +928,91 @@ def test_unreadable_claim_summaries_do_not_take_the_free_browse_down(
 
     assert len(result["items"]) == 1
     assert result["items"][0]["claims_count"] == 0
+
+
+# --------------------------------------------------------------------------- #
+# Probe / self wallets: charged, audited, never counted
+# --------------------------------------------------------------------------- #
+_PROBE = "B" * 58
+
+
+def test_a_probe_payers_vote_is_audited_but_not_counted(
+    wired: InMemoryFeatureStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Our own wallet's paid vote keeps its audit row and its receipt, and moves no demand total."""
+    monkeypatch.setattr(settings, "x402_probe_payers", f" {_PROBE.lower()} ")
+    request_id = _file_request(FeatureService(wired))
+    monkeypatch.setattr(
+        feature_routes,
+        "require_paid_request",
+        lambda *_a, **_kw: _settled_result(payer=_PROBE, txid="TXPROBE"),
+    )
+    fulfilled: list[str] = []
+    monkeypatch.setattr(
+        feature_routes,
+        "mark_fulfilled",
+        lambda txid, *, resource: fulfilled.append(txid) or resource,
+    )
+
+    response = feature_routes.x402_features_vote(_request(path_params={"request_id": request_id}))
+
+    assert response.status_code == 200
+    assert json.loads(response.description)["vote_total"] == 0
+    assert fulfilled == ["TXPROBE"]
+    assert wired.get_vote_total(request_id) == 0
+    assert [v.voter for v in wired.votes_for(request_id)] == [_PROBE]
+    # A real wallet's vote right after still counts as one.
+    FeatureService(wired).vote(request_id=request_id, voter=_PAYER, settlement_tx_id="TXV")
+    assert wired.get_vote_total(request_id) == 1
+
+
+# --------------------------------------------------------------------------- #
+# Admin delete
+# --------------------------------------------------------------------------- #
+def _delete_request(request_id: str, headers: dict[str, str] | None = None) -> Request:
+    return _request(
+        method="DELETE",
+        headers=headers,
+        query={"request_id": request_id},
+        path="/api/v1/admin/x402/features",
+    )
+
+
+def test_admin_feature_delete_without_admin_session_is_rejected(
+    wired: InMemoryFeatureStore,
+) -> None:
+    """The real require_admin_wallet runs first; a self-asserted header proves nothing."""
+    request_id = _file_request(FeatureService(wired))
+
+    response = feature_routes.x402_admin_delete_feature_request(
+        _delete_request(request_id, headers={"X-Admin-Wallet": _PAYER})
+    )
+
+    assert getattr(response, "status_code", 200) != 200
+    assert wired.get(request_id) is not None
+
+
+@pytest.mark.usefixtures("fake_redis")
+def test_admin_feature_delete_removes_the_request_and_its_claims_but_keeps_vote_records(
+    wired: InMemoryFeatureStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An authorized delete drops the request and claims; the counter and audit log stay for forensics."""
+    monkeypatch.setattr(feature_routes, "require_admin_wallet", lambda _request: None)
+    service = FeatureService(wired)
+    request_id = _file_request(service)
+    service.vote(request_id=request_id, voter=_PAYER, settlement_tx_id="TXV")
+    service.claim(request_id=request_id, claimer=_OTHER_PAYER, settlement_tx_id="TXC")
+
+    response = feature_routes.x402_admin_delete_feature_request(_delete_request(request_id))
+
+    assert response == {"deleted": True, "request_id": request_id}
+    assert wired.get(request_id) is None
+    assert wired.claims_for(request_id) == []
+    assert feature_routes.x402_features_browse(_request(method="GET"))["items"] == []
+    assert wired.get_vote_total(request_id) == 1
+    assert len(wired.votes_for(request_id)) == 1
+    assert (
+        feature_routes.x402_admin_delete_feature_request(_delete_request(request_id)).status_code
+        == 404
+    )
+    assert feature_routes.x402_admin_delete_feature_request(_delete_request("")).status_code == 400

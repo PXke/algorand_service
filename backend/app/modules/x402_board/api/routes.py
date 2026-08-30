@@ -14,6 +14,7 @@ from app.core.config import settings
 from app.core.http import Request, Response, Router
 from app.core.http_errors import json_error_from_platform, json_error_response
 from app.core.query_params import query_param
+from app.modules.admin.auth import require_admin_wallet
 from app.modules.x402.discovery import describe_json_endpoint
 from app.modules.x402.paid_request import mark_fulfilled, require_paid_request
 from app.modules.x402_board.models.domain import BoardError, StoredPlacement
@@ -181,11 +182,24 @@ def x402_board_renew(request: Request) -> Response:
     tradeoff as the directory's relist ownership check, and the 402 offer
     says so before the payer commits. Priced at the placement price: a
     renewal buys exactly one more term.
+
+    A placement with no attributed payer (placed by an unattributable
+    payment, keyed on its txid) can never pass the ownership check, so it is
+    refused here, BEFORE the gate, with a 409 -- charging for it would settle
+    a payment that is guaranteed to end in the 403 above. Re-placing the
+    link buys a fresh tile instead.
     """
     entry_id = query_param(request.path_params.get("entry_id", ""))
     placement = board_service.get(entry_id)
     if placement is None:
         return json_error_response(404, "not_found", "No board placement with that id")
+    if not placement.payer.strip():
+        return json_error_response(
+            409,
+            "not_renewable",
+            "This placement has no attributed owner wallet and cannot be renewed. "
+            "Re-place the link with POST /api/v1/x402/board instead.",
+        )
 
     term_days = settings.x402_board_term_days
     result = require_paid_request(
@@ -266,14 +280,45 @@ def x402_board_go(request: Request) -> Response:
         status_code=302,
         # Never cached: a cached redirect would skip the counter on every
         # repeat visit and, worse, keep redirecting after the term ends.
-        headers={"Location": link, "Cache-Control": "no-store"},
+        # This is an open redirect to a payer-chosen link by design, so it
+        # is kept out of search indexes and sends no referrer to the target:
+        # the redirect must not lend our domain's ranking or reveal our
+        # visitors' paths to whatever the tile links to.
+        headers={
+            "Location": link,
+            "Cache-Control": "no-store",
+            "X-Robots-Tag": "noindex",
+            "Referrer-Policy": "no-referrer",
+        },
         description="",
     )
 
 
+def x402_admin_delete_placement(request: Request) -> Response | dict:
+    """Admin: remove a placement outright, without waiting out its paid term.
+
+    For an abuse report or a link that must come down now. Same shape as the
+    directory's admin delist: the entry id is a query param, and the session
+    wallet is verified first -- the X-Admin-Wallet header is never trusted.
+    """
+    denied = require_admin_wallet(request)
+    if denied is not None:
+        return denied
+
+    entry_id = query_param(request.query_params.get("entry_id", ""))
+    if not entry_id:
+        return json_error_response(400, "invalid_request", "entry_id is required")
+
+    deleted = board_service.delete(entry_id)
+    if not deleted:
+        return json_error_response(404, "not_found", "No board placement with that id")
+    return {"deleted": True, "entry_id": entry_id}
+
+
 def register_x402_board_routes(app: Router) -> None:
-    """Register the board's paid routes (place, renew) and free routes (feed, click-through)."""
+    """Register the board's paid routes (place, renew), free routes (feed, click-through) and the admin delete."""
     app.post("/api/v1/x402/board")(x402_board_place)
     app.get("/api/v1/x402/board")(x402_board_read)
     app.post("/api/v1/x402/board/:entry_id/renew")(x402_board_renew)
     app.get("/api/v1/x402/board/:entry_id/go")(x402_board_go)
+    app.delete("/api/v1/admin/x402/board")(x402_admin_delete_placement)

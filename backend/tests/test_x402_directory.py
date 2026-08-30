@@ -1861,9 +1861,9 @@ def test_cassandra_store_projects_the_category_row_and_reads_a_null_category_as_
     assert cass.insert_if_absent(listing) is True
     by_tag = [p for s, p in executed if "INSERT INTO algorand_platform.x402_listings_by_tag" in s]
     assert [p[0] for p in by_tag] == ["fx", "category:ai"]
-    assert all(p[-1] == "ai" for p in by_tag)
+    assert all(p[12] == "ai" for p in by_tag)
     canonical = next(p for s, p in executed if "IF NOT EXISTS" in s)
-    assert canonical[-1] == "ai"
+    assert canonical[11] == "ai"
 
     # A pre-099 row: null category reads back as the default.
     assert cass.get("h").category == "other"
@@ -1996,10 +1996,15 @@ def test_renew_of_a_live_listing_by_another_wallet_is_refused_and_changes_nothin
     assert store.get(original.url_hash) == original
 
 
-def test_renew_of_an_expired_or_unowned_listing_claims_it_and_drops_the_old_badge(
+def test_renew_of_an_expired_or_unowned_listing_by_another_wallet_is_refused_with_409(
     store: InMemoryListingStore, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """After expiry (or with no payer) anyone may renew: the term restarts from now, the payer changes, the previous owner's badge is dropped."""
+    """After expiry (or with no payer) a different wallet may NOT renew: 409 renew_requires_relist, storage untouched (price/description/badge stay the previous owner's).
+
+    Regression: renew used to let any wallet renew -- and thereby claim -- an
+    expired listing, keeping the previous payer's price, description, schema
+    and tags under the new wallet's name.
+    """
     monkeypatch.setattr(settings, "x402_listing_term_days", 30)
     service = ListingService(store)
     base = datetime(2026, 8, 1, tzinfo=UTC)
@@ -2014,31 +2019,200 @@ def test_renew_of_an_expired_or_unowned_listing_claims_it_and_drops_the_old_badg
         payer="AGENT1",
         now=base,
     )
-    store.upsert(replace(original, verified_wallet="AGENT1", verified_at_epoch=7))
+    badged = replace(original, verified_wallet="AGENT1", verified_at_epoch=7)
+    store.upsert(badged)
 
     later = base + timedelta(days=45)
+    with pytest.raises(DirectoryError, match="POST /api/v1/x402/list") as excinfo:
+        service.renew(
+            normalized_url="https://api.example.com/q",
+            payer="AGENT2",
+            settlement_tx_id="TX2",
+            now=later,
+        )
+    assert excinfo.value.code == "renew_requires_relist"
+    assert excinfo.value.http_status == 409
+    assert store.get(original.url_hash) == badged
+
+    unowned = replace(badged, payer="", verified_wallet="", verified_at_epoch=0)
+    store.upsert(unowned)
+    with pytest.raises(DirectoryError) as excinfo:
+        service.renew(
+            normalized_url="https://api.example.com/q",
+            payer="AGENT3",
+            settlement_tx_id="TX3",
+            now=later,
+        )
+    assert excinfo.value.code == "renew_requires_relist"
+    assert store.get(original.url_hash) == unowned
+
+    # The owner itself can still renew after expiry: fresh term from now, badge kept.
+    store.upsert(badged)
     renewed = service.renew(
         normalized_url="https://api.example.com/q",
-        payer="AGENT2",
-        settlement_tx_id="TX2",
+        payer="AGENT1",
+        settlement_tx_id="TX4",
         now=later,
     )
-
-    assert renewed.payer == "AGENT2"
     assert renewed.term_end_epoch == int((later + timedelta(days=30)).timestamp())
     assert renewed.created_at_epoch == original.created_at_epoch
-    assert renewed.verified_wallet == ""
-    assert renewed.verified_at_epoch == 0
+    assert renewed.is_verified
+    assert renewed.settlement_tx_id == "TX4"
 
-    store.upsert(replace(renewed, payer=""))
-    claimed = service.renew(
-        normalized_url="https://api.example.com/q",
-        payer="AGENT3",
-        settlement_tx_id="TX3",
-        now=later,
+
+@pytest.mark.usefixtures("fake_redis")
+def test_renew_route_serves_409_with_receipt_headers_for_an_expired_listing_of_another_wallet(
+    store: InMemoryListingStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The 409 refusal reaches the wire with the settlement headers and is NOT marked fulfilled."""
+    monkeypatch.setattr(settings, "x402_listing_term_days", 30)
+    service = ListingService(store)
+    original = _listed(store, "https://api.example.com/q", payer="AGENT-OTHER")
+    store.upsert(replace(original, term_end_epoch=int(datetime.now(tz=UTC).timestamp()) - 1))
+    monkeypatch.setattr(directory_routes, "listing_service", service)
+    monkeypatch.setattr(
+        directory_routes, "require_paid_request", lambda *_a, **_kw: _settled_result()
     )
-    assert claimed.payer == "AGENT3"
-    assert claimed.term_end_epoch == int((later + timedelta(days=60)).timestamp())
+    fulfilled: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        directory_routes,
+        "mark_fulfilled",
+        lambda txid, *, resource: fulfilled.append((txid, resource)),
+    )
+
+    refused = directory_routes.x402_renew(_renew_request("https://api.example.com/q"))
+
+    assert refused.status_code == 409
+    assert refused.headers["PAYMENT-RESPONSE"] == "ok"
+    assert json.loads(refused.description)["error"]["code"] == "renew_requires_relist"
+    assert fulfilled == []
+    assert store.get(original.url_hash).payer == "AGENT-OTHER"
+
+
+# --------------------------------------------------------------------------- #
+# Verified badge on relist (097): carried for the same owner, blanked on change
+# --------------------------------------------------------------------------- #
+def test_same_owner_relist_carries_the_badge_into_every_projection(
+    store: InMemoryListingStore,
+) -> None:
+    """A relist by the wallet that owns the badge keeps it on the canonical row AND the recency/tag/category projections.
+
+    Regression: the projection rows were rewritten without the badge columns,
+    so /search said unverified while /listings?url= said verified until the
+    next probe sweep.
+    """
+    service = ListingService(store)
+    listing = _listed(store, "https://api.example.com/q")
+    store.upsert(replace(listing, verified_wallet="AGENT1", verified_at_epoch=42))
+
+    relisted = service.create(
+        normalized_url="https://api.example.com/q",
+        price="$0.02",
+        description="new text",
+        assets=[],
+        tags=["fx", "new"],
+        schema_json="",
+        settlement_tx_id="TX2",
+        payer="AGENT1",
+        category="finance",
+    )
+    assert relisted.is_verified
+    assert relisted.verified_at_epoch == 42
+    assert store.get(listing.url_hash).verified_wallet == "AGENT1"
+    for item in (
+        service.search(limit=10)[0],
+        service.search(limit=10, tag="new")[0],
+        service.search(limit=10, category="finance")[0],
+    ):
+        assert (item.verified_wallet, item.verified_at_epoch) == ("AGENT1", 42)
+
+
+def test_relist_by_a_new_owner_of_an_expired_listing_stores_an_empty_badge(
+    store: InMemoryListingStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When the payer changes on relist, the stored verified_wallet is "" everywhere -- not the previous owner's wallet masked at read time."""
+    monkeypatch.setattr(settings, "x402_listing_term_days", 30)
+    service = ListingService(store)
+    base = datetime(2026, 8, 1, tzinfo=UTC)
+    original = service.create(
+        normalized_url="https://api.example.com/q",
+        price="$0.01",
+        description="lapsed",
+        assets=[],
+        tags=["fx"],
+        schema_json="",
+        settlement_tx_id="TX1",
+        payer="AGENT1",
+        now=base,
+    )
+    store.upsert(replace(original, verified_wallet="AGENT1", verified_at_epoch=7))
+
+    relisted = service.create(
+        normalized_url="https://api.example.com/q",
+        price="$0.05",
+        description="mine now",
+        assets=[],
+        tags=["fx"],
+        schema_json="",
+        settlement_tx_id="TX2",
+        payer="AGENT2",
+        now=base + timedelta(days=45),
+    )
+    assert relisted.payer == "AGENT2"
+    assert relisted.verified_wallet == ""
+    assert relisted.verified_at_epoch == 0
+    stored = store.get(original.url_hash)
+    assert (stored.verified_wallet, stored.verified_at_epoch) == ("", 0)
+    assert store.list_by_tag("fx", limit=10)[0].verified_wallet == ""
+
+
+def test_cassandra_store_writes_the_badge_columns_on_every_listing_insert(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Canonical INSERT (both variants) and both projection INSERTs name and bind verified_wallet/verified_at; an empty badge binds ("", None)."""
+    from app.modules.x402_directory.stores import cassandra as cassandra_store
+
+    now = datetime(2026, 8, 30, tzinfo=UTC)
+    executed: list[tuple[str, tuple]] = []
+
+    class _Session:
+        def execute(self, stmt: str, params: tuple) -> SimpleNamespace:
+            executed.append((stmt, params))
+            return SimpleNamespace(one=lambda: None, was_applied=True)
+
+    monkeypatch.setattr("app.core.cassandra.prepare_cached", lambda cql: cql)
+    monkeypatch.setattr(cassandra_store, "get_cassandra_session", lambda: _Session())
+    cass = cassandra_store.CassandraListingStore()
+    listing = StoredListing(
+        url_hash="h",
+        url="https://api.example.com/q",
+        price="$0.01",
+        description="",
+        schema_json="",
+        settlement_tx_id="TX",
+        term_end_epoch=int(now.timestamp()),
+        created_at_epoch=int(now.timestamp()),
+        tags=["fx"],
+        payer="AGENT1",
+        verified_wallet="AGENT1",
+        verified_at_epoch=int(now.timestamp()),
+    )
+
+    cass.upsert(listing)
+    inserts = [(s, p) for s, p in executed if s.startswith("INSERT")]
+    assert len(inserts) == 4  # canonical, recency, tag fx, category:other
+    for stmt, params in inserts:
+        assert "verified_wallet, verified_at" in stmt
+        assert stmt.count("?") == len(params)
+        assert params[-2:] == ("AGENT1", now)
+
+    executed.clear()
+    assert cass.insert_if_absent(replace(listing, verified_wallet="", verified_at_epoch=0)) is True
+    inserts = [(s, p) for s, p in executed if s.startswith("INSERT")]
+    assert "IF NOT EXISTS" in inserts[0][0]
+    for stmt, params in inserts:
+        assert "verified_wallet, verified_at" in stmt
+        assert params[-2:] == ("", None)
 
 
 @pytest.mark.usefixtures("fake_redis")

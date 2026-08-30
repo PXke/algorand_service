@@ -110,3 +110,20 @@ class CassandraGradeStore:
         session = get_cassandra_session()
         rows = session.execute(X402GradingStmts.LIST_GRADED_ENDPOINTS, (GRADING_PARTITION, limit))
         return [_row_to_indexed(row) for row in rows]
+
+    def delete(self, url_hash: str, grader: str) -> bool:
+        """Remove one grade; drop the URL's index entry once no grade of it remains.
+
+        Two point deletes on full primary keys. The grade goes first; the
+        index row is only removed after a LIMIT 1 re-read of the partition
+        finds it empty, so a concurrent grade landing in between keeps its
+        index entry (the next grade of that URL rewrites it anyway).
+        """
+        session = get_cassandra_session()
+        if self.get(url_hash, grader) is None:
+            return False
+        session.execute(X402GradingStmts.DELETE_GRADE, (url_hash, grader))
+        remaining = session.execute(X402GradingStmts.LIST_GRADES, (url_hash, 1)).one()
+        if remaining is None:
+            session.execute(X402GradingStmts.DELETE_GRADED_ENDPOINT, (GRADING_PARTITION, url_hash))
+        return True

@@ -75,3 +75,13 @@ class FeatureStore(Protocol):
         no claims may be omitted; the caller treats a missing id as none.
         """
         ...
+
+    def delete(self, request_id: str) -> bool:
+        """Remove one request, its recency row and its claims. False if it did not exist.
+
+        Admin-only. The vote counter and the vote audit log are deliberately
+        kept: a Cassandra counter cannot be safely deleted and re-incremented,
+        and the audit log exists for abuse forensics -- a removed request is
+        exactly the case where "who paid to vote on this" still matters.
+        """
+        ...

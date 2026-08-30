@@ -124,3 +124,24 @@ class CassandraPlacementStore:
             if row is not None:
                 counts[entry_id] = int(row.clicks or 0)
         return counts
+
+    def delete(self, entry_id: str) -> bool:
+        """Remove one placement, recency projection included. False if it did not exist.
+
+        Same shape as the directory's admin delist: the recency row is keyed
+        on (board, created_at, entry_id), so the canonical row is read first
+        for its created_at, the projection row is deleted, and the canonical
+        row last -- a crash between the two leaves the tile gone from the
+        public feed but still resolvable by id, the safer half-done state.
+        The x402_board_clicks counter row is left untouched (see the Protocol).
+        """
+        session = get_cassandra_session()
+        existing = self.get(entry_id)
+        if existing is None:
+            return False
+        session.execute(
+            X402BoardStmts.DELETE_RECENCY,
+            (BOARD_PARTITION, _dt(existing.created_at_epoch), entry_id),
+        )
+        session.execute(X402BoardStmts.DELETE_PLACEMENT, (entry_id,))
+        return True

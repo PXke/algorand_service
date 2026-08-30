@@ -167,6 +167,16 @@ class Settings(msgspec.Struct, kw_only=True):
     x402_network: str = "algorand:SGO1GKSzyE7IEPItTxCByw9x8FmnrCDexi9/cOUJOiI="
     # Public address only — no private key is held by this module.
     x402_pay_to_address: str = ""
+    # ── Probe / self wallets, excluded from every ranking in code ──────────
+    # Comma-separated Algorand addresses of OUR payers (the probe beat's hot
+    # wallet and anything else we pay our own endpoints from). CLAUDE.md
+    # section 9: probe traffic is the one allowed exception to "no wash
+    # volume" and must be excluded from every ranking. Read through
+    # modules/x402/probe_payers.py; each product drops these wallets where
+    # their payment would otherwise become signal (grades, votes,
+    # credibility spend, board tiles). Empty = nothing is excluded.
+    x402_probe_payers: str = ""
+    # ── end probe / self wallets ────────────────────────────────────────────
 
     # Know Your Agent (KYA, the x402 challenge's actual product): free wallet
     # enrollment + trust-signal computation, then a paid x402 lookup that

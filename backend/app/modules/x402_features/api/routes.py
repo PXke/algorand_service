@@ -21,6 +21,7 @@ from app.core.config import settings
 from app.core.http import Request, Response, Router
 from app.core.http_errors import json_error_from_platform, json_error_response
 from app.core.query_params import query_param
+from app.modules.admin.auth import require_admin_wallet
 from app.modules.x402.discovery import describe_json_endpoint
 from app.modules.x402.paid_request import mark_fulfilled, require_paid_request
 from app.modules.x402_features.models.domain import (
@@ -352,8 +353,30 @@ def x402_features_demand(request: Request) -> Response:
     )
 
 
+def x402_admin_delete_feature_request(request: Request) -> Response | dict:
+    """Admin: remove a feature request, its recency row and its claims outright.
+
+    For spam or abuse on the free filing surface. Same shape as the
+    directory's admin delist: id as a query param, session wallet verified
+    first -- the X-Admin-Wallet header is never trusted. The request's vote
+    counter and vote audit log are kept (see FeatureStore.delete).
+    """
+    denied = require_admin_wallet(request)
+    if denied is not None:
+        return denied
+
+    request_id = query_param(request.query_params.get("request_id", ""))
+    if not request_id:
+        return json_error_response(400, "invalid_request", "request_id is required")
+
+    deleted = feature_service.delete(request_id)
+    if not deleted:
+        return json_error_response(404, "not_found", "No feature request with that id")
+    return {"deleted": True, "request_id": request_id}
+
+
 def register_x402_features_routes(app: Router) -> None:
-    """Register the feature board's two free routes (file, browse) and three paid ones (vote, claim, demand)."""
+    """Register the feature board's two free routes (file, browse), three paid ones (vote, claim, demand) and the admin delete."""
     app.post("/api/v1/x402/features")(x402_features_submit)
     app.get("/api/v1/x402/features")(x402_features_browse)
     # /features/demand does not collide with /features/:request_id/vote: the
@@ -362,3 +385,4 @@ def register_x402_features_routes(app: Router) -> None:
     app.get("/api/v1/x402/features/demand")(x402_features_demand)
     app.post("/api/v1/x402/features/:request_id/vote")(x402_features_vote)
     app.post("/api/v1/x402/features/:request_id/claim")(x402_features_claim)
+    app.delete("/api/v1/admin/x402/features")(x402_admin_delete_feature_request)

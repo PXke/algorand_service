@@ -53,3 +53,11 @@ class InMemoryGradeStore:
         """Return graded endpoints ordered by url hash, at most `limit` of them."""
         ordered = sorted(self._index.values(), key=lambda entry: entry.url_hash)
         return ordered[: max(0, limit)]
+
+    def delete(self, url_hash: str, grader: str) -> bool:
+        """Remove one grade; drop the URL's index entry once no grade of it remains."""
+        if self._grades.pop((url_hash, grader), None) is None:
+            return False
+        if not any(key[0] == url_hash for key in self._grades):
+            self._index.pop(url_hash, None)
+        return True

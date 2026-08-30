@@ -11,6 +11,19 @@ Network safety mirrors app.core.net_guard.guarded_get, which cannot be used
 directly because it buffers the whole response: every hop (the URL and each
 redirect target) goes through assert_public_url, redirects are followed by
 hand, and the body is streamed and cut at max_body_bytes.
+
+Time safety: httpx's timeout is per read, so an endpoint trickling one byte
+per few seconds (or bouncing through slow redirects) could hold one probe
+for as long as it liked. fetch_unpaid therefore also enforces a wall-clock
+deadline of DEADLINE_FACTOR x X402_PROBE_TIMEOUT_SECONDS over the whole
+fetch -- every hop and every body chunk -- and gives up with
+ProbeDeadlineExceeded, which probe_url records as reachable with
+error="deadline" (the endpoint answered; it just never finished).
+
+The recorded payTo is only ever a syntactically valid Algorand address
+(algosdk's checksum check): payto_seen is served verbatim on free routes,
+so anything else the offer carried is stored as "". served_valid_402 still
+reflects whether the offer itself parsed.
 """
 
 from __future__ import annotations
@@ -24,6 +37,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 
 import httpx
+from algosdk.encoding import is_valid_address
 
 from app.core.config import (
     X402_PROBE_MAX_BODY_BYTES,
@@ -42,6 +56,14 @@ PROBE_USER_AGENT = (
 )
 _PAYMENT_REQUIRED_HEADER = "payment-required"
 _MAX_REDIRECTS = 3
+# Whole-fetch wall-clock budget, as a multiple of the per-read timeout.
+DEADLINE_FACTOR = 2
+# Seam for tests: the clock the deadline is measured on.
+_monotonic = time.monotonic
+
+
+class ProbeDeadlineExceeded(Exception):
+    """The whole fetch (hops + body) outran DEADLINE_FACTOR x the probe timeout."""
 
 
 @dataclass(frozen=True)
@@ -70,10 +92,16 @@ class ProbeResult:
 Fetcher = Callable[[str], RawResponse]
 
 
-def _stream_body(response: httpx.Response, cap: int) -> bytes:
+def _check_deadline(deadline: float) -> None:
+    if _monotonic() > deadline:
+        raise ProbeDeadlineExceeded("probe deadline exceeded")
+
+
+def _stream_body(response: httpx.Response, cap: int, deadline: float) -> bytes:
     chunks: list[bytes] = []
     read = 0
     for chunk in response.iter_bytes():
+        _check_deadline(deadline)
         chunks.append(chunk)
         read += len(chunk)
         if read >= cap:
@@ -82,17 +110,21 @@ def _stream_body(response: httpx.Response, cap: int) -> bytes:
 
 
 def fetch_unpaid(url: str) -> RawResponse:
-    """GET `url` with no payment, SSRF-guarded on every hop, body capped.
+    """GET `url` with no payment, SSRF-guarded on every hop, body capped, wall-clock bounded.
 
     A 405 is retried once as a POST with an empty JSON object, since many
-    x402 resources only answer POST. Raises UnsafeUrlError or an httpx
-    error; the caller turns those into an unreachable ProbeResult.
+    x402 resources only answer POST. Raises UnsafeUrlError, an httpx error
+    or ProbeDeadlineExceeded (the whole fetch, redirects and body included,
+    took longer than DEADLINE_FACTOR x X402_PROBE_TIMEOUT_SECONDS); the
+    caller turns those into a ProbeResult.
     """
     client = get_http_client(timeout=X402_PROBE_TIMEOUT_SECONDS, follow_redirects=False)
     headers = {"User-Agent": PROBE_USER_AGENT, "Accept": "application/json"}
+    deadline = _monotonic() + DEADLINE_FACTOR * X402_PROBE_TIMEOUT_SECONDS
     current = url
     method = "GET"
     for _ in range(_MAX_REDIRECTS + 1):
+        _check_deadline(deadline)
         assert_public_url(current)
         with client.stream(
             method, current, headers=headers, content=b"{}" if method == "POST" else None
@@ -104,7 +136,7 @@ def fetch_unpaid(url: str) -> RawResponse:
             if response.status_code == 405 and method == "GET":
                 method = "POST"
                 continue
-            body = _stream_body(response, X402_PROBE_MAX_BODY_BYTES)
+            body = _stream_body(response, X402_PROBE_MAX_BODY_BYTES, deadline)
             return RawResponse(
                 status=response.status_code, headers=dict(response.headers), body=body
             )
@@ -138,7 +170,10 @@ def parse_offer(raw: RawResponse) -> tuple[bool, str]:
 
     Valid means: HTTP 402, an offer object that parses, and a non-empty
     `accepts` list of objects. payTo is the first `payTo` (or `pay_to`)
-    found in accepts, "" when none.
+    found in accepts, "" when none -- or when the first one found is not a
+    syntactically valid Algorand address (it is stored and served as-is on
+    free routes, so nothing else is let through; the offer itself still
+    counts as valid).
     """
     if raw.status != 402:
         return False, ""
@@ -153,7 +188,11 @@ def parse_offer(raw: RawResponse) -> tuple[bool, str]:
     for option in accepts:
         payto = option.get("payTo") or option.get("pay_to")
         if isinstance(payto, str) and payto.strip():
-            return True, payto.strip()
+            candidate = payto.strip()
+            if is_valid_address(candidate):
+                return True, candidate
+            logger.info("x402 probe ignoring non-Algorand payTo=%r", candidate[:80])
+            return True, ""
     return True, ""
 
 
@@ -165,6 +204,19 @@ def probe_url(
     started = time.monotonic()
     try:
         raw = fetch(url)
+    except ProbeDeadlineExceeded:
+        latency = int((time.monotonic() - started) * 1000)
+        logger.info("x402 probe deadline exceeded url=%s latency_ms=%s", url, latency)
+        return ProbeResult(
+            url=url,
+            probed_at=probed_at,
+            reachable=True,
+            http_status=0,
+            latency_ms=latency,
+            served_valid_402=False,
+            payto_seen="",
+            error="deadline",
+        )
     except (UnsafeUrlError, httpx.HTTPError, OSError, ValueError) as exc:
         latency = int((time.monotonic() - started) * 1000)
         logger.info("x402 probe unreachable url=%s error=%s", url, exc)

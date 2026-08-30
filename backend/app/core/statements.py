@@ -794,11 +794,18 @@ class X402DirectoryStmts:
     # Full INSERT, never a partial UPDATE: a partial write to either listing
     # table would upsert a row whose unwritten columns read back as null, the
     # same phantom-row class articles_feed hit (CLAUDE.md section 3).
+    # verified_wallet / verified_at (migration 097) are carried by every
+    # listing INSERT (canonical and both projections) so a relist or renewal
+    # writes the same badge everywhere: the service decides what they hold
+    # (the existing badge when the payer is unchanged, empty otherwise) and
+    # the workers probe beat (algorand_shared.x402_statements.X402ProbeStmts)
+    # sets or clears them between writes.
     UPSERT_LISTING = _Stmt(
         "INSERT INTO algorand_platform.x402_listings ("
         "url_hash, url, price, assets, description, schema_json, tags, "
-        "term_end, settlement_tx_id, created_at, payer, category"
-        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        "term_end, settlement_tx_id, created_at, payer, category, "
+        "verified_wallet, verified_at"
+        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
     )
     # First-time listing path: a lightweight transaction, so two concurrent
     # first-time listers of the same url cannot both observe "not listed" and
@@ -808,14 +815,10 @@ class X402DirectoryStmts:
     INSERT_LISTING_IF_ABSENT = _Stmt(
         "INSERT INTO algorand_platform.x402_listings ("
         "url_hash, url, price, assets, description, schema_json, tags, "
-        "term_end, settlement_tx_id, created_at, payer, category"
-        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) IF NOT EXISTS"
+        "term_end, settlement_tx_id, created_at, payer, category, "
+        "verified_wallet, verified_at"
+        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) IF NOT EXISTS"
     )
-    # verified_wallet / verified_at (migration 097) are read on every listing
-    # SELECT but written only by the workers probe beat (algorand_shared.
-    # x402_statements.X402ProbeStmts), never by the INSERTs above -- a
-    # relist leaves the canonical row's badge in place for the reader's
-    # verified_wallet == payer check to honour or ignore.
     GET_LISTING = _Stmt(
         "SELECT url_hash, url, price, assets, description, schema_json, tags, "
         "term_end, settlement_tx_id, created_at, payer, verified_wallet, verified_at, category "
@@ -824,8 +827,9 @@ class X402DirectoryStmts:
     INSERT_RECENCY = _Stmt(
         "INSERT INTO algorand_platform.x402_listings_by_recency ("
         "directory, created_at, url_hash, url, price, assets, description, "
-        "schema_json, tags, term_end, settlement_tx_id, payer, category"
-        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        "schema_json, tags, term_end, settlement_tx_id, payer, category, "
+        "verified_wallet, verified_at"
+        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
     )
     # Deletes the row a re-listing supersedes. Needs the exact created_at of
     # the previous listing (read from x402_listings first), since created_at is
@@ -855,8 +859,9 @@ class X402DirectoryStmts:
     INSERT_BY_TAG = _Stmt(
         "INSERT INTO algorand_platform.x402_listings_by_tag ("
         "tag, created_at, url_hash, url, price, assets, description, "
-        "schema_json, tags, term_end, settlement_tx_id, payer, category"
-        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        "schema_json, tags, term_end, settlement_tx_id, payer, category, "
+        "verified_wallet, verified_at"
+        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
     )
     # Same addressing rule as DELETE_RECENCY: created_at is a clustering
     # column, so the previous listing's exact created_at is needed.
@@ -916,6 +921,11 @@ class X402BoardStmts:
         "UPDATE algorand_platform.x402_board_clicks SET clicks = clicks + 1 WHERE entry_id = ?"
     )
     GET_CLICKS = _Stmt("SELECT clicks FROM algorand_platform.x402_board_clicks WHERE entry_id = ?")
+    # Admin removal of one placement: a point delete of the canonical row.
+    # The recency projection row is removed with DELETE_RECENCY (which needs
+    # the created_at read from this row first). The click counter is left in
+    # place -- see CassandraPlacementStore.delete.
+    DELETE_PLACEMENT = _Stmt("DELETE FROM algorand_platform.x402_board_entries WHERE entry_id = ?")
 
 
 class X402FeaturesStmts:
@@ -980,6 +990,21 @@ class X402FeaturesStmts:
         "SELECT request_id, claimed_at, claimer, settlement_tx_id "
         "FROM algorand_platform.x402_feature_claims WHERE request_id = ? LIMIT ?"
     )
+    # Admin removal of one request (see CassandraFeatureStore.delete): point
+    # deletes only. The recency row is addressed by its full clustering key
+    # (created_at read from x402_feature_requests first); the claims are one
+    # whole partition, so a partition-key delete removes them all without any
+    # filtering. The vote counter and the vote audit log are deliberately NOT
+    # deleted -- a counter delete cannot be safely re-incremented afterwards
+    # and the audit log exists for abuse forensics.
+    DELETE_REQUEST = _Stmt(
+        "DELETE FROM algorand_platform.x402_feature_requests WHERE request_id = ?"
+    )
+    DELETE_RECENCY = _Stmt(
+        "DELETE FROM algorand_platform.x402_feature_requests_by_recency "
+        "WHERE board = ? AND created_at = ? AND request_id = ?"
+    )
+    DELETE_CLAIMS = _Stmt("DELETE FROM algorand_platform.x402_feature_claims WHERE request_id = ?")
 
 
 class X402Stmts:
@@ -1063,6 +1088,15 @@ class X402GradingStmts:
     LIST_GRADED_ENDPOINTS = _Stmt(
         "SELECT registry, url_hash, url, last_graded_at "
         "FROM algorand_platform.x402_graded_endpoints WHERE registry = ? LIMIT ?"
+    )
+    # Admin removal of one grader's grade of one URL (see
+    # CassandraGradeStore.delete): both point deletes on full primary keys.
+    # The index row is only deleted once the URL has no grades left.
+    DELETE_GRADE = _Stmt(
+        "DELETE FROM algorand_platform.x402_grades WHERE url_hash = ? AND grader = ?"
+    )
+    DELETE_GRADED_ENDPOINT = _Stmt(
+        "DELETE FROM algorand_platform.x402_graded_endpoints WHERE registry = ? AND url_hash = ?"
     )
     # Reads the SHARED settlement ledger (x402_settlements, migration 090) to
     # total how much a grader has paid this marketplace, which is the weight
