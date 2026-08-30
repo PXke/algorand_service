@@ -29,3 +29,7 @@ class InMemoryListingStore:
         """
         ordered = sorted(self._items.values(), key=lambda i: (-i.created_at_epoch, i.url_hash))
         return ordered[: max(0, limit)]
+
+    def delete(self, url_hash: str) -> bool:
+        """Remove the listing for a URL hash. False if it did not exist."""
+        return self._items.pop(url_hash, None) is not None

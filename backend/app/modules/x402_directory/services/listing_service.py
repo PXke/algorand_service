@@ -113,12 +113,19 @@ class ListingService:
         not for an extension of whatever the previous term was.
 
         Ownership check (migration 094): if this url already has a listing
-        owned by a DIFFERENT non-empty payer, this raises rather than
-        overwriting. A directory entry states a fact about a real third-party
-        endpoint -- letting any payer take over any listing by paying the fee
-        would let anyone quietly misrepresent someone else's endpoint. An
-        empty existing payer (pre-migration data) is unowned and gets claimed
-        by whoever relists it next, so old listings aren't locked forever.
+        owned by a DIFFERENT non-empty payer AND that listing's paid term has
+        not yet ended, this raises rather than overwriting. A directory entry
+        states a fact about a real third-party endpoint -- letting any payer
+        take over any listing by paying the fee would let anyone quietly
+        misrepresent someone else's endpoint. An empty existing payer
+        (pre-migration data) is unowned and gets claimed by whoever relists it
+        next, so old listings aren't locked forever -- and the same must hold
+        for a listing whose term_end_epoch has already passed: the payer only
+        bought protection for the term they paid for, not forever, so an
+        expired listing is unowned the same way an empty-payer one is. Without
+        this, one $0.10 listing fee would permanently squat a url against
+        every future payer, long after the directory has stopped showing it
+        (search() already excludes expired listings from results).
 
         This check runs AFTER payment already settled (the route already
         collected it before calling create()), so a blocked hijack attempt
@@ -150,7 +157,13 @@ class ListingService:
             )
         key = url_hash(normalized_url)
         existing = self.store.get(key)
-        if existing is not None and existing.payer and existing.payer != payer:
+        existing_is_owned = (
+            existing is not None
+            and existing.payer
+            and existing.payer != payer
+            and existing.term_end_epoch > int(moment.timestamp())
+        )
+        if existing_is_owned:
             raise DirectoryError(
                 "listing_owned_by_another_payer",
                 "This url is already listed by a different payer. Payment has "
@@ -204,3 +217,13 @@ class ListingService:
         return [
             item for item in self.store.list_recent(limit=clamped) if item.term_end_epoch > cutoff
         ]
+
+    def delete(self, normalized_url: str) -> bool:
+        """Admin-only: remove a listing outright, feed projection included.
+
+        Takes the URL already normalized, same convention create() uses --
+        the route owns normalize_url() and its DirectoryError, this just
+        hashes and delegates to the store. Returns False if there was nothing
+        to delete, so the admin route can tell a real removal from a no-op.
+        """
+        return self.store.delete(url_hash(normalized_url))

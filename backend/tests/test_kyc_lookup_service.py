@@ -20,7 +20,11 @@ def test_lookup_not_enrolled_charges_but_never_pays_out() -> None:
     )
 
     result = service.lookup(
-        wallet_address=WALLET, payer_address=PAYER, payment_txid="TX1", amount_atomic="1000000"
+        wallet_address=WALLET,
+        payer_address=PAYER,
+        payment_txid="TX1",
+        amount_atomic="1000000",
+        asset_id="10458941",
     )
 
     assert result == {"enrolled": False, "wallet_address": WALLET}
@@ -50,7 +54,11 @@ def test_lookup_enrolled_fires_payout_to_the_looked_up_wallet_not_the_payer() ->
     service = LookupService(store=store, payout_fn=_fake_payout)
 
     result = service.lookup(
-        wallet_address=WALLET, payer_address=PAYER, payment_txid="TX1", amount_atomic="1000000"
+        wallet_address=WALLET,
+        payer_address=PAYER,
+        payment_txid="TX1",
+        amount_atomic="1000000",
+        asset_id="10458941",
     )
 
     assert result["enrolled"] is True
@@ -61,6 +69,9 @@ def test_lookup_enrolled_fires_payout_to_the_looked_up_wallet_not_the_payer() ->
     # product design, not ambiguous.
     assert calls[0]["receiver"] == WALLET
     assert calls[0]["amount_atomic"] == "1000000"
+    # ...and in the SAME asset the payment actually settled in, not a
+    # hardcoded default — this is the payout-asset-fidelity fix.
+    assert calls[0]["asset_id"] == "10458941"
 
 
 def test_lookup_records_payout_failure_but_still_returns_the_kyc_level() -> None:
@@ -85,7 +96,11 @@ def test_lookup_records_payout_failure_but_still_returns_the_kyc_level() -> None
     )
 
     result = service.lookup(
-        wallet_address=WALLET, payer_address=PAYER, payment_txid="TX1", amount_atomic="1000000"
+        wallet_address=WALLET,
+        payer_address=PAYER,
+        payment_txid="TX1",
+        amount_atomic="1000000",
+        asset_id="10458941",
     )
 
     assert result["enrolled"] is True

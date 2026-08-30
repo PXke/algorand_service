@@ -529,6 +529,55 @@ def test_an_unowned_legacy_listing_can_be_claimed_by_anyone(store: InMemoryListi
     assert items[0].description == "claimed"
 
 
+def test_a_listing_whose_term_has_ended_can_be_relisted_by_a_different_payer(
+    store: InMemoryListingStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An expired listing is unowned, the same way an empty-payer one is -- one paid term does not squat a url against every future payer forever.
+
+    Regression: create()'s ownership check used to look only at
+    existing.payer, ignoring existing.term_end_epoch, so a listing whose paid
+    term had already ended still permanently blocked a different payer from
+    relisting the same url even though search() had already stopped serving
+    it.
+    """
+    term_days = 30
+    monkeypatch.setattr(settings, "x402_listing_term_days", term_days)
+    service = ListingService(store)
+    base = datetime(2026, 8, 1, tzinfo=UTC)
+    service.create(
+        normalized_url="https://api.example.com/v1/quote",
+        price="$0.01",
+        description="the original, now-expired listing",
+        assets=[],
+        tags=[],
+        schema_json="",
+        settlement_tx_id="TX1",
+        payer="AGENT1",
+        now=base,
+    )
+
+    # AGENT1's term ended after 30 days; this relist happens well after that,
+    # by a DIFFERENT payer, and must succeed rather than raise.
+    after_expiry = base + timedelta(days=term_days + 1)
+    relisted = service.create(
+        normalized_url="https://api.example.com/v1/quote",
+        price="$0.02",
+        description="relisted after the original term lapsed",
+        assets=[],
+        tags=[],
+        schema_json="",
+        settlement_tx_id="TX2",
+        payer="AGENT2",
+        now=after_expiry,
+    )
+
+    assert relisted.payer == "AGENT2"
+    items = service.search(limit=50, now=after_expiry)
+    assert len(items) == 1
+    assert items[0].description == "relisted after the original term lapsed"
+    assert items[0].payer == "AGENT2"
+
+
 def test_an_unattributable_payer_cannot_overwrite_an_owned_listing(
     store: InMemoryListingStore,
 ) -> None:
@@ -755,6 +804,34 @@ def test_search_serves_live_listings_and_drops_expired_ones(
 
 
 @pytest.mark.usefixtures("fake_redis")
+def test_search_results_expose_the_payer(
+    store: InMemoryListingStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A search result includes the listing's payer wallet.
+
+    Regression: _listing_json() omitted `payer` even though the arguably more
+    sensitive settlement_tx_id was already included, so a search caller could
+    not tell who currently owns a listing.
+    """
+    monkeypatch.setattr(directory_routes, "listing_service", ListingService(store))
+    service = ListingService(store)
+    service.create(
+        normalized_url="https://api.example.com/v1/quote",
+        price="$0.01",
+        description="live",
+        assets=[],
+        tags=[],
+        schema_json="",
+        settlement_tx_id="TX1",
+        payer="AGENT1",
+    )
+
+    result = directory_routes.x402_search(_request(method="GET", path="/api/v1/x402/search"))
+
+    assert result["items"][0]["payer"] == "AGENT1"
+
+
+@pytest.mark.usefixtures("fake_redis")
 def test_search_returns_listings_newest_first(
     store: InMemoryListingStore, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -873,3 +950,103 @@ def test_search_fails_open_when_redis_is_down(
     )
 
     assert "items" in result
+
+
+# --------------------------------------------------------------------------- #
+# Admin delist
+# --------------------------------------------------------------------------- #
+def _delete_request(url: str) -> Request:
+    return _request(method="DELETE", query={"url": url}, path="/api/v1/admin/x402/listings")
+
+
+def test_admin_delist_without_admin_wallet_is_rejected(
+    store: InMemoryListingStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No admin session at all -> whatever require_admin_wallet returns, never a check result.
+
+    The real require_admin_wallet is left in place here (unlike the other
+    admin-delist tests, which patch it to simulate an authorized caller): with
+    no ADMIN_WALLET_ADDRESSES configured in the test environment it 503s, the
+    same shape test_admin_health_checks.py's requires_admin_wallet test
+    exercises for another admin route.
+    """
+    monkeypatch.setattr(directory_routes, "listing_service", ListingService(store))
+
+    response = directory_routes.x402_admin_delete_listing(
+        _delete_request("https://api.example.com/v1/quote")
+    )
+
+    assert getattr(response, "status_code", 200) != 200
+
+
+def test_admin_delist_wrong_wallet_is_rejected(
+    store: InMemoryListingStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A caller whose session resolves to a non-admin wallet is refused, and nothing is deleted."""
+    from app.core.http_errors import json_error_response
+
+    service = ListingService(store)
+    service.create(
+        normalized_url="https://api.example.com/v1/quote",
+        price="$0.01",
+        description="still here",
+        assets=[],
+        tags=[],
+        schema_json="",
+        settlement_tx_id="TX1",
+        payer="AGENT1",
+    )
+    monkeypatch.setattr(directory_routes, "listing_service", service)
+    monkeypatch.setattr(
+        directory_routes,
+        "require_admin_wallet",
+        lambda _request: json_error_response(403, "forbidden", "not an admin wallet"),
+    )
+
+    response = directory_routes.x402_admin_delete_listing(
+        _delete_request("https://api.example.com/v1/quote")
+    )
+
+    assert response.status_code == 403
+    assert store.get(url_hash("https://api.example.com/v1/quote")) is not None
+
+
+def test_admin_delist_removes_the_listing_from_get_and_search(
+    store: InMemoryListingStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An authorized admin delist removes the listing outright, not just hides it until term end."""
+    service = ListingService(store)
+    service.create(
+        normalized_url="https://api.example.com/v1/quote",
+        price="$0.01",
+        description="a squatted or disputed listing",
+        assets=[],
+        tags=[],
+        schema_json="",
+        settlement_tx_id="TX1",
+        payer="AGENT1",
+    )
+    monkeypatch.setattr(directory_routes, "listing_service", service)
+    monkeypatch.setattr(directory_routes, "require_admin_wallet", lambda _request: None)
+
+    response = directory_routes.x402_admin_delete_listing(
+        _delete_request("https://api.example.com/v1/quote")
+    )
+
+    assert getattr(response, "status_code", 200) == 200
+    assert store.get(url_hash("https://api.example.com/v1/quote")) is None
+    assert service.search(limit=50) == []
+
+
+def test_admin_delist_nonexistent_listing_returns_404(
+    store: InMemoryListingStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Deleting a url that was never listed is a 404, not a silent no-op success."""
+    monkeypatch.setattr(directory_routes, "listing_service", ListingService(store))
+    monkeypatch.setattr(directory_routes, "require_admin_wallet", lambda _request: None)
+
+    response = directory_routes.x402_admin_delete_listing(
+        _delete_request("https://never-listed.example.com/x")
+    )
+
+    assert response.status_code == 404

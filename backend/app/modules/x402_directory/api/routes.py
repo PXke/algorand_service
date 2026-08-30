@@ -14,6 +14,7 @@ from app.core.config import settings
 from app.core.http import Request, Response, Router
 from app.core.http_errors import json_error_from_platform, json_error_response
 from app.core.query_params import query_param
+from app.modules.admin.auth import require_admin_wallet
 from app.modules.x402.discovery import describe_json_endpoint
 from app.modules.x402.paid_request import require_paid_request
 from app.modules.x402_directory.models.domain import DirectoryError, StoredListing
@@ -51,6 +52,7 @@ def _listing_json(item: StoredListing) -> dict:
         "term_end_epoch": item.term_end_epoch,
         "created_at_epoch": item.created_at_epoch,
         "settlement_tx_id": item.settlement_tx_id,
+        "payer": item.payer,
     }
 
 
@@ -189,7 +191,36 @@ def x402_search(request: Request) -> Response | dict:
     return {"items": [_listing_json(item) for item in items]}
 
 
+def x402_admin_delete_listing(request: Request) -> Response | dict:
+    """Admin: delist a url outright, without waiting out its paid term.
+
+    For an ownership dispute or an abuse report -- the only other way a
+    listing currently leaves the directory is its term expiring (see
+    listing_service.search()). Takes the url as a query param, not a path
+    segment: a full url contains slashes and query characters that a REST
+    path segment cannot carry cleanly, and not a body: DELETE requests carry
+    no body convention elsewhere in this backend.
+    """
+    denied = require_admin_wallet(request)
+    if denied is not None:
+        return denied
+
+    raw_url = query_param(request.query_params.get("url", ""))
+    if not raw_url:
+        return json_error_response(400, "invalid_request", "url is required")
+    try:
+        normalized_url = normalize_url(raw_url)
+    except DirectoryError as exc:
+        return json_error_from_platform(exc)
+
+    deleted = listing_service.delete(normalized_url)
+    if not deleted:
+        return json_error_response(404, "not_found", "No listing for that url")
+    return {"deleted": True, "url": normalized_url}
+
+
 def register_x402_directory_routes(app: Router) -> None:
-    """Register the paid directory-listing route and the free search route."""
+    """Register the paid directory-listing route, the free search route, and the admin delist route."""
     app.post("/api/v1/x402/list")(x402_list)
     app.get("/api/v1/x402/search")(x402_search)
+    app.delete("/api/v1/admin/x402/listings")(x402_admin_delete_listing)

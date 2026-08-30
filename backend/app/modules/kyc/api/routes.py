@@ -142,6 +142,7 @@ def kyc_verify(request: Request) -> Response:
         payer_address=result.payer or "",
         payment_txid=result.payment_txid or "",
         amount_atomic=result.amount_atomic or "0",
+        asset_id=result.asset_id or "",
     )
     return Response(
         status_code=200,
@@ -166,6 +167,7 @@ def kyc_payout_retry(request: Request) -> Response:
     result = send_payout(
         receiver=payload.wallet_address,
         amount_atomic=payload.amount_atomic,
+        asset_id=payload.asset_id,
     )
     return {
         "wallet_address": payload.wallet_address,

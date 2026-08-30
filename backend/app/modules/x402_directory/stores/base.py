@@ -26,3 +26,7 @@ class ListingStore(Protocol):
     def list_recent(self, *, limit: int) -> list[StoredListing]:
         """Return listings newest-first, at most `limit` of them."""
         ...
+
+    def delete(self, url_hash: str) -> bool:
+        """Remove the listing for a URL hash, feed projection included. False if it did not exist."""
+        ...

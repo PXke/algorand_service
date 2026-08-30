@@ -357,6 +357,11 @@ class KycPayoutRetryRequest(msgspec.Struct, kw_only=True):
 
     wallet_address: Annotated[str, Meta(min_length=58, max_length=58)]
     amount_atomic: Annotated[str, Meta(min_length=1, max_length=32)]
+    # ASA id of the asset the ORIGINAL payment settled in (as a string, matching
+    # x402.guard.PaymentResult.asset_id) — required, not defaulted to USDC,
+    # because guessing it would risk paying out the wrong asset. Look it up from
+    # the settlement ledger or the failed kyc_lookup_event by payment_txid.
+    asset_id: Annotated[str, Meta(min_length=1, max_length=32)]
 
 
 # ── x402 directory ────────────────────────────────────────────────────────────

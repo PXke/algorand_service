@@ -102,3 +102,26 @@ class CassandraListingStore:
         session = get_cassandra_session()
         rows = session.execute(X402DirectoryStmts.LIST_RECENT, (DIRECTORY_PARTITION, limit))
         return [_row_to_listing(row) for row in rows]
+
+    def delete(self, url_hash: str) -> bool:
+        """Remove the listing for a URL hash, feed projection included. False if it did not exist.
+
+        Mirrors upsert()'s two-table write: the recency projection is keyed
+        on (directory, created_at, url_hash), so deleting it needs the exact
+        created_at of the row being removed, read from x402_listings first
+        (same reason upsert() reads `previous` before writing). The canonical
+        x402_listings row is deleted last -- if a crash lands between the two
+        deletes, the listing is gone from the free-search feed but the
+        canonical row (and its owner-still-set payer) still exists, which is
+        the safer of the two half-done states for an admin removal.
+        """
+        session = get_cassandra_session()
+        existing = self.get(url_hash)
+        if existing is None:
+            return False
+        session.execute(
+            X402DirectoryStmts.DELETE_RECENCY,
+            (DIRECTORY_PARTITION, _dt(existing.created_at_epoch), url_hash),
+        )
+        session.execute(X402DirectoryStmts.DELETE_LISTING, (url_hash,))
+        return True

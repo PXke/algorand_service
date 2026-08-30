@@ -19,8 +19,10 @@ from __future__ import annotations
 
 import ast
 import json
+import logging
 from collections.abc import Iterator
 from datetime import UTC, datetime
+from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Never
@@ -29,7 +31,12 @@ import pytest
 
 pytest.importorskip("x402")
 
-from x402.mechanisms.avm.constants import ALGORAND_TESTNET_CAIP2
+from x402.mechanisms.avm.constants import (
+    ALGORAND_MAINNET_CAIP2,
+    ALGORAND_TESTNET_CAIP2,
+    USDC_MAINNET_ASA_ID,
+    USDC_TESTNET_ASA_ID,
+)
 from x402.schemas.payments import PaymentRequirements
 from x402.schemas.responses import SupportedKind, SupportedResponse
 from x402.schemas.v1 import PaymentRequirementsV1
@@ -43,6 +50,7 @@ from app.core.http import QueryParams, Request, Response
 from app.modules.x402 import client as x402_client
 from app.modules.x402 import guard as x402_guard
 from app.modules.x402 import replay as replay_module
+from app.modules.x402.assets import EURQ
 from app.modules.x402.settlement import (
     InMemorySettlementStore,
     SettlementRecord,
@@ -50,6 +58,7 @@ from app.modules.x402.settlement import (
 )
 from app.modules.x402_grading.api import routes as grading_routes
 from app.modules.x402_grading.models.domain import GradedEndpoint, GradingError, StoredGrade
+from app.modules.x402_grading.services import credibility as credibility_module
 from app.modules.x402_grading.services.credibility import (
     CassandraSpendLookup,
     InMemorySpendLookup,
@@ -68,6 +77,14 @@ _THIRD_PAYER = "R" * 58
 # http(s) URL, so every test grades something the directory has never heard of.
 _URL = "https://api.unlisted-example.com/v1/quote"
 _MAINNET = "algorand:wGHE2Pwdvd7S12BL5FaOP20EGYesN73k/QCSD3JhBfE="
+
+# TestNet USDC's ASA id, as a string the way the settlement ledger's text
+# column carries it. This is what _settled_result and _spent already paid
+# with implicitly; naming it lets the new cross-asset tests below contrast it
+# against EURQ's mainnet-only ASA id explicitly.
+_USDC_TESTNET_ASSET_ID = str(USDC_TESTNET_ASA_ID)
+_USDC_MAINNET_ASSET_ID = str(USDC_MAINNET_ASA_ID)
+_EURQ_MAINNET_ASSET_ID = str(EURQ.asa_ids[ALGORAND_MAINNET_CAIP2])
 
 
 # --------------------------------------------------------------------------- #
@@ -224,12 +241,18 @@ def _spent(
     amount_atomic: str,
     resource: str = "x402-directory-list",
     network: str = ALGORAND_TESTNET_CAIP2,
+    asset_id: str = _USDC_TESTNET_ASSET_ID,
 ) -> None:
-    """Record that `payer` settled a payment with this marketplace for some product."""
+    """Record that `payer` settled a payment with this marketplace for some product.
+
+    Defaults to TestNet USDC, the asset every pre-existing test in this file
+    implicitly paid in; `asset_id` is overridable so the cross-asset
+    credibility tests can record a settlement in EURQ instead.
+    """
     ledger.record_settlement(
         SettlementRecord(
             tx_id=f"PAID_{payer[:4]}_{amount_atomic}",
-            asset_id="10458941",
+            asset_id=asset_id,
             amount_atomic=amount_atomic,
             payer=payer,
             resource=resource,
@@ -676,7 +699,14 @@ def test_the_spend_lookup_reads_a_bounded_number_of_bounded_day_partitions(
     monkeypatch.setattr(settings, "x402_grading_spend_scan_limit", 250)
     monkeypatch.setattr(cassandra_core, "prepare_cached", lambda cql: cql)
     session = _FakeCassandraSession(
-        [SimpleNamespace(payer=_PAYER, amount_atomic="1000", network=ALGORAND_TESTNET_CAIP2)]
+        [
+            SimpleNamespace(
+                payer=_PAYER,
+                amount_atomic="1000",
+                network=ALGORAND_TESTNET_CAIP2,
+                asset_id=_USDC_TESTNET_ASSET_ID,
+            )
+        ]
     )
 
     totals = CassandraSpendLookup(session_provider=lambda: session).spend_by_payer([_PAYER])
@@ -699,10 +729,23 @@ def test_the_spend_lookup_costs_the_same_number_of_queries_however_many_graders(
     monkeypatch.setattr(cassandra_core, "prepare_cached", lambda cql: cql)
     session = _FakeCassandraSession(
         [
-            SimpleNamespace(payer=_PAYER, amount_atomic="1000", network=ALGORAND_TESTNET_CAIP2),
-            SimpleNamespace(payer=_OTHER_PAYER, amount_atomic="7", network=ALGORAND_TESTNET_CAIP2),
             SimpleNamespace(
-                payer="somebody-else", amount_atomic="99", network=ALGORAND_TESTNET_CAIP2
+                payer=_PAYER,
+                amount_atomic="1000",
+                network=ALGORAND_TESTNET_CAIP2,
+                asset_id=_USDC_TESTNET_ASSET_ID,
+            ),
+            SimpleNamespace(
+                payer=_OTHER_PAYER,
+                amount_atomic="7",
+                network=ALGORAND_TESTNET_CAIP2,
+                asset_id=_USDC_TESTNET_ASSET_ID,
+            ),
+            SimpleNamespace(
+                payer="somebody-else",
+                amount_atomic="99",
+                network=ALGORAND_TESTNET_CAIP2,
+                asset_id=_USDC_TESTNET_ASSET_ID,
             ),
         ]
     )
@@ -737,6 +780,103 @@ def test_an_unparseable_settlement_amount_does_not_break_a_paid_read(
     _spent(ledger, payer=_PAYER, amount_atomic="4000")
 
     assert InMemorySpendLookup().spend_by_payer([_PAYER]) == {_PAYER: 4000}
+
+
+@pytest.mark.usefixtures("ledger")
+def test_spend_across_different_assets_is_normalized_before_summing_not_treated_as_equal_units(
+    ledger: InMemorySettlementStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The bug this guards: atomic units of different assets are not commensurate.
+
+    A wallet that pays 0.50 USDC and 0.50 EURQ has not spent "1.00" with us --
+    EURQ is worth more than USDC per unit. Naively summing raw atomic amounts
+    (the pre-fix behaviour) would give 500_000 + 500_000 = 1_000_000. The
+    correct, price-normalized total prices the EURQ leg at its USD rate before
+    adding it: 500_000 (USDC) + 540_000 (0.50 EURQ @ $1.08) = 1_040_000.
+    """
+    monkeypatch.setattr(settings, "x402_network", ALGORAND_MAINNET_CAIP2)
+    monkeypatch.setattr(
+        credibility_module,
+        "get_usd_rate",
+        lambda coingecko_id: Decimal("1.08") if coingecko_id == EURQ.coingecko_id else None,
+    )
+    _spent(
+        ledger,
+        payer=_PAYER,
+        amount_atomic="500000",
+        network=ALGORAND_MAINNET_CAIP2,
+        asset_id=_USDC_MAINNET_ASSET_ID,
+    )
+    _spent(
+        ledger,
+        payer=_PAYER,
+        amount_atomic="500000",
+        network=ALGORAND_MAINNET_CAIP2,
+        asset_id=_EURQ_MAINNET_ASSET_ID,
+    )
+
+    totals = InMemorySpendLookup().spend_by_payer([_PAYER])
+
+    assert totals == {_PAYER: 1_040_000}
+
+
+@pytest.mark.usefixtures("ledger")
+def test_a_settlement_in_an_asset_with_no_available_price_right_now_is_excluded_and_logged(
+    ledger: InMemorySettlementStore,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """price_oracle is fail-closed: a missing rate excludes that settlement.
+
+    It is excluded from the credibility sum (never priced as zero-value,
+    never crashes the read) and the exclusion is logged.
+    """
+    monkeypatch.setattr(settings, "x402_network", ALGORAND_MAINNET_CAIP2)
+    monkeypatch.setattr(credibility_module, "get_usd_rate", lambda _coingecko_id: None)
+    _spent(
+        ledger,
+        payer=_PAYER,
+        amount_atomic="500000",
+        network=ALGORAND_MAINNET_CAIP2,
+        asset_id=_USDC_MAINNET_ASSET_ID,
+    )
+    _spent(
+        ledger,
+        payer=_PAYER,
+        amount_atomic="999999",
+        network=ALGORAND_MAINNET_CAIP2,
+        asset_id=_EURQ_MAINNET_ASSET_ID,
+    )
+
+    with caplog.at_level(logging.WARNING):
+        totals = InMemorySpendLookup().spend_by_payer([_PAYER])
+
+    # Only the USDC leg counts; the unpriceable EURQ leg is excluded, not
+    # summed in as zero-value spend and not summed in raw.
+    assert totals == {_PAYER: 500_000}
+    assert any("no USD rate available" in record.message for record in caplog.records)
+
+
+@pytest.mark.usefixtures("ledger")
+def test_a_settlement_in_an_unrecognized_asset_is_excluded_and_logged(
+    ledger: InMemorySettlementStore,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """An asset_id naming no currently accepted asset is excluded, not misread as USDC.
+
+    Covers a stale/retired asset or a data error on this network -- it is
+    excluded from the sum rather than silently priced as USDC.
+    """
+    monkeypatch.setattr(settings, "x402_network", ALGORAND_TESTNET_CAIP2)
+    _spent(ledger, payer=_PAYER, amount_atomic="500000")
+    _spent(ledger, payer=_PAYER, amount_atomic="123456", asset_id="999999999")
+
+    with caplog.at_level(logging.WARNING):
+        totals = InMemorySpendLookup().spend_by_payer([_PAYER])
+
+    assert totals == {_PAYER: 500_000}
+    assert any("not a currently accepted asset" in record.message for record in caplog.records)
 
 
 # --------------------------------------------------------------------------- #

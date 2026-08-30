@@ -818,6 +818,10 @@ class X402DirectoryStmts:
         "DELETE FROM algorand_platform.x402_listings_by_recency "
         "WHERE directory = ? AND created_at = ? AND url_hash = ?"
     )
+    # Admin delist (no term/expiry to wait out). url_hash is the sole primary
+    # key of x402_listings, so this is a direct point delete -- no ALLOW
+    # FILTERING involved.
+    DELETE_LISTING = _Stmt("DELETE FROM algorand_platform.x402_listings WHERE url_hash = ?")
     # Newest-first by clustering order; the LIMIT is bound, never interpolated,
     # and the caller clamps it (no unbounded listings, CLAUDE.md section 4).
     LIST_RECENT = _Stmt(
@@ -978,9 +982,11 @@ class X402GradingStmts:
     # total how much a grader has paid this marketplace, which is the weight
     # their grade carries. A read of another module's table, deliberately: the
     # ledger is the one place settlements are recorded and duplicating it would
-    # be worse. It selects only the three columns the sum needs -- network
+    # be worse. It selects only the four columns the sum needs -- network
     # included because TestNet and MainNet spend must never be summed together
-    # (modules/x402/settlement.py records it per row for exactly this reason).
+    # (modules/x402/settlement.py records it per row for exactly this reason),
+    # asset_id because credibility.py normalizes each row to a common unit
+    # before summing (USDC, EURQ and USDQ are not commensurate atomic-for-atomic).
     #
     # Whole day partitions, summed in Python, because payer is not a key column
     # and CLAUDE.md section 4 forbids ALLOW FILTERING on non-key columns.
@@ -988,7 +994,7 @@ class X402GradingStmts:
     # bounded, but see CassandraSpendLookup for why a by-payer projection of
     # the ledger is the real answer.
     LIST_SETTLEMENTS_FOR_DAY = _Stmt(
-        "SELECT payer, amount_atomic, network FROM algorand_platform.x402_settlements "
+        "SELECT payer, amount_atomic, network, asset_id FROM algorand_platform.x402_settlements "
         "WHERE day = ? LIMIT ?"
     )
 

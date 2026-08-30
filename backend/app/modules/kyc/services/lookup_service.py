@@ -30,8 +30,14 @@ class LookupService:
         payer_address: str,
         payment_txid: str,
         amount_atomic: str,
+        asset_id: str,
     ) -> dict[str, object]:
-        """Look up a wallet's enrollment and pay out to it on a hit; always records the lookup event."""
+        """Look up a wallet's enrollment and pay out to it on a hit; always records the lookup event.
+
+        `asset_id` is the settled payment's ASA id (as a string, see
+        x402.guard.PaymentResult.asset_id) — the payout goes out in this SAME
+        asset, never a hardcoded default.
+        """
         enrollment = self._store.get(wallet_address)
 
         if enrollment is None:
@@ -49,7 +55,9 @@ class LookupService:
 
         # The payment is already captured before this runs, and x402 has no
         # refund mechanism — a payout failure must never fail this response.
-        payout = self._send_payout(receiver=wallet_address, amount_atomic=amount_atomic)
+        payout = self._send_payout(
+            receiver=wallet_address, amount_atomic=amount_atomic, asset_id=asset_id
+        )
         self._store.record_lookup_event(
             wallet_address=wallet_address,
             payer_address=payer_address,

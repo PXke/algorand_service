@@ -24,11 +24,24 @@ this honours that. The consequence -- flipping x402_network resets every
 wallet's weight to the base -- is correct, not a bug: MainNet credibility
 should not be inherited from free money.
 
-Atomic units are summed across whatever assets appear on that network. That is
-exact while one payment asset is enabled (USDC today), and becomes wrong the
-day a second asset with different decimals is enabled, because atomic units of
-two assets are not commensurate. See "Observed, not fixed": normalizing per
-asset needs a decimals source this module does not have.
+Every settlement is normalized to atomic USD-equivalent units (USDC's 6
+decimals -- the unit `x402_grading_base_weight_atomic` and
+`x402_grading_max_weight_atomic` are already denominated in) before it is
+summed. Raw atomic units of two different assets are not commensurate: 1
+atomic EURQ and 1 atomic USDC are not the same value, so summing them as if
+they were would make the weight meaningless the moment a second asset
+settles. The normalization reuses modules/x402/assets.py (which asset an
+asa_id on this network is, and its decimals) and modules/x402/price_oracle.py
+(that asset's USD rate) -- the same pricing machinery the payment gate itself
+uses to build a 402 offer, not a second copy of it.
+
+A settlement this cannot price -- an asset_id that is not currently accepted
+on this network, or one whose price_oracle rate is unavailable right now
+(price_oracle is fail-closed: it omits rather than guesses) -- contributes 0
+to the sum and is logged. That under-counts the wallet's spend by the value
+of that one payment, which is the same trade-off `_atomic` already makes for
+an unparseable amount: a smaller, honest miss beats crashing a paid read or
+mixing incommensurate units.
 
 ## Reading the shared ledger
 
@@ -56,12 +69,15 @@ from __future__ import annotations
 import logging
 from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
+from decimal import ROUND_DOWN, Decimal
 from typing import Protocol
 
 from app.core.cassandra import get_cassandra_session
 from app.core.config import settings
 from app.core.statements import X402GradingStmts
 from app.core.store_factory import StoreFactory
+from app.modules.x402.assets import ACCEPTED_ASSETS, USDC, AcceptedAsset
+from app.modules.x402.price_oracle import get_usd_rate
 from app.modules.x402.settlement import get_settlement_store
 
 logger = logging.getLogger(__name__)
@@ -81,6 +97,92 @@ def _atomic(raw: str | None) -> int:
     except ValueError:
         logger.warning("x402 grading credibility: unparseable settlement amount_atomic %r", raw)
         return 0
+
+
+def _asset_for(asset_id: str | None, network: str) -> AcceptedAsset | None:
+    """Which currently-accepted asset an on-ledger asset_id names on `network`, if any.
+
+    None covers both an unparseable asset_id and one that names no accepted
+    asset on this network (a retired asset, a foreign ASA, a data error) --
+    the caller cannot price either, so both are "cannot normalize this row",
+    not "this row is worth zero".
+    """
+    try:
+        wanted = int(str(asset_id or "").strip())
+    except ValueError:
+        return None
+    for asset in ACCEPTED_ASSETS:
+        if asset.asa_id_for(network) == wanted:
+            return asset
+    return None
+
+
+def _normalize_to_usd_atomic(asset: AcceptedAsset, raw_atomic: int) -> int | None:
+    """Convert one settlement's raw atomic amount to atomic USD-equivalent units.
+
+    The reference unit is USDC's own decimals: that is what
+    `x402_grading_base_weight_atomic` and `x402_grading_max_weight_atomic` are
+    already denominated in (see config.py), so USDC itself needs no oracle
+    round-trip -- it IS the unit of account, per assets.py's `coingecko_id is
+    None` convention. Every other asset is priced via price_oracle.get_usd_rate
+    and rescaled by its own decimals. Floors rather than rounds, on purpose:
+    this feeds a reputation weight, and over-crediting a wallet's spend is the
+    wrong direction to round in.
+
+    Returns None when `asset` needs a price and price_oracle has none
+    available right now -- fail-closed, the same as price_oracle's own
+    contract for building a 402 offer.
+    """
+    if raw_atomic <= 0:
+        return 0
+    if asset.coingecko_id is None:
+        if asset.decimals == USDC.decimals:
+            return raw_atomic
+        scale = Decimal(10) ** (USDC.decimals - asset.decimals)
+        return int((Decimal(raw_atomic) * scale).to_integral_value(rounding=ROUND_DOWN))
+    rate = get_usd_rate(asset.coingecko_id)
+    if rate is None:
+        return None
+    whole_units = Decimal(raw_atomic) / (Decimal(10) ** asset.decimals)
+    usd_atomic = whole_units * rate * (Decimal(10) ** USDC.decimals)
+    return int(usd_atomic.to_integral_value(rounding=ROUND_DOWN))
+
+
+def _normalized_spend_atomic(
+    *, amount_atomic: str | None, asset_id: str | None, network: str
+) -> int:
+    """One settlement row's contribution to a credibility sum, in atomic USD-equivalent units.
+
+    This is the one place amounts from possibly-different assets become
+    commensurate before `spend_by_payer` adds them together -- see the module
+    docstring. A row this cannot price contributes 0 and is logged rather than
+    raising, the same fail-excluded shape `_atomic` already uses for a
+    malformed amount.
+    """
+    raw = _atomic(amount_atomic)
+    if raw == 0:
+        return 0
+    asset = _asset_for(asset_id, network)
+    if asset is None:
+        logger.warning(
+            "x402 grading credibility: settlement asset_id %r on network %s is not a "
+            "currently accepted asset; excluding %s raw atomic units from the credibility sum",
+            asset_id,
+            network,
+            raw,
+        )
+        return 0
+    normalized = _normalize_to_usd_atomic(asset, raw)
+    if normalized is None:
+        logger.warning(
+            "x402 grading credibility: no USD rate available for %s (%s) right now; "
+            "excluding a %s-atomic settlement from the credibility sum",
+            asset.symbol,
+            asset.coingecko_id,
+            raw,
+        )
+        return 0
+    return normalized
 
 
 class SpendLookup(Protocol):
@@ -124,7 +226,11 @@ class InMemorySpendLookup:
         totals = dict.fromkeys(wanted, 0)
         for record in settlements:
             if record.payer in wanted and record.network == settings.x402_network:
-                totals[record.payer] += _atomic(record.amount_atomic)
+                totals[record.payer] += _normalized_spend_atomic(
+                    amount_atomic=record.amount_atomic,
+                    asset_id=record.asset_id,
+                    network=record.network,
+                )
         return totals
 
 
@@ -173,7 +279,11 @@ class CassandraSpendLookup:
                 rows = session.execute(X402GradingStmts.LIST_SETTLEMENTS_FOR_DAY, (day, scan_limit))
                 for row in rows:
                     if row.payer in wanted and row.network == settings.x402_network:
-                        totals[row.payer] += _atomic(row.amount_atomic)
+                        totals[row.payer] += _normalized_spend_atomic(
+                            amount_atomic=row.amount_atomic,
+                            asset_id=row.asset_id,
+                            network=row.network,
+                        )
         except Exception:
             # Undeterminable, not "never spent" -- see SpendLookup.spend_by_payer.
             logger.exception(
