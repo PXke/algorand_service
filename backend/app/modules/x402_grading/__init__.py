@@ -9,8 +9,13 @@ fee to read that endpoint's aggregate score.
 
 **Any URL can be graded.** The grader names the endpoint, and that is the whole
 input. It does not have to be listed in x402_directory, or known to this
-backend at all -- this module has NO dependency on x402_directory, does not
-import it, and does not look anything up in it.
+backend at all -- grades are keyed on this module's own hash of its own
+normalized URL, and neither the write path nor the per-URL reads touch the
+directory. The ONE read of x402_directory is the paid tag leaderboard
+(GET /api/v1/x402/grades/top?tag=), which asks the directory's public
+ListingService which listed URLs carry a tag and then aggregates this
+module's own grades of those URLs; it lives in api/routes.py only and is
+read-only.
 
 **Credibility comes from the grader's track record with US.** There is no
 proof-of-payment-to-the-graded-endpoint gate, because there cannot be one: a
@@ -35,8 +40,9 @@ is where a real escrow primitive would live -- behind a smart contract, not
 started. If a future change to this module starts tracking a payment pending
 some later outcome, that change is out of scope by construction.
 
-The only cross-module read is modules/x402/settlement.py's ledger, through
-services/credibility.py. That dependency is READ-ONLY and one-directional:
-nothing here writes to, imports routes from, or otherwise mutates another
-module.
+The cross-module reads are modules/x402/settlement.py's ledger (through
+services/credibility.py) and, for the tag leaderboard only, x402_directory's
+ListingService.search (from api/routes.py). Both are READ-ONLY and
+one-directional: nothing here writes to, imports routes from, or otherwise
+mutates another module.
 """

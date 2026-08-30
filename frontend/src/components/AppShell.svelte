@@ -84,6 +84,12 @@
       icon: 'mail' as const,
       match: (p: string) => p === '/contact',
     },
+    {
+      href: '/x402',
+      label: t($messages, 'navX402'),
+      icon: 'hub' as const,
+      match: (p: string) => p === '/x402' || p.startsWith('/x402/'),
+    },
   ])
 
   const drawerNav = $derived([...sections, ...moreNav])
@@ -104,6 +110,13 @@
           p.startsWith('/topic/') ||
           p === '/about' ||
           p === '/contact',
+      },
+      {
+        href: '/x402',
+        label: t($messages, 'navX402'),
+        tagline: t($messages, 'x402ProductTagline'),
+        icon: 'hub' as const,
+        active: (p: string) => p === '/x402' || p.startsWith('/x402/'),
       },
       ...(config.suggestionsEnabled
         ? [

@@ -451,18 +451,30 @@ def test_grading_an_arbitrary_unlisted_url_succeeds_on_payment_alone(
     assert stored.score == 5
 
 
-def test_the_grading_module_does_not_import_the_directory_at_all() -> None:
-    """The decoupling is structural, not just behavioural: no file in this module may import x402_directory.
+def test_the_grading_module_does_not_import_the_directory_outside_its_routes() -> None:
+    """The decoupling is structural, not just behavioural: no file in this module may import x402_directory -- except api/routes.py.
 
     Parsed rather than grepped, so that prose EXPLAINING why the dependency was
     removed does not read as the dependency itself -- several docstrings here
     name x402_directory precisely to say this module does not use it. Only
     x402_grading's own files are checked: modules/x402 (the shared payment gate
     and ledger) is a deliberate and documented read-only dependency.
+
+    The single allowed exception is api/routes.py, and only there: the paid
+    tag leaderboard (GET /grades/top?tag=) was explicitly specified to take
+    its candidate URLs from the directory's PUBLIC ListingService.search
+    rather than from cross-module CQL. routes.py binds that one call into
+    GradingService as a plain callable (TagCandidateLookup), so the service,
+    stores and models remain directory-free and this test keeps guarding
+    them; a second importing file, or an import of anything but the public
+    service, is still a failure here.
     """
     module_root = Path(grading_package.__file__).parent
+    allowed = {"api/routes.py"}
     offenders: list[str] = []
     for path in sorted(module_root.rglob("*.py")):
+        if path.relative_to(module_root).as_posix() in allowed:
+            continue
         tree = ast.parse(path.read_text(encoding="utf-8"))
         for node in ast.walk(tree):
             imported: list[str] = []
@@ -473,6 +485,15 @@ def test_the_grading_module_does_not_import_the_directory_at_all() -> None:
             if any("x402_directory" in name for name in imported):
                 offenders.append(f"{path.relative_to(module_root).as_posix()}:{node.lineno}")
     assert offenders == []
+
+    # And the one allowed file may import only the directory's public service.
+    routes_tree = ast.parse((module_root / "api" / "routes.py").read_text(encoding="utf-8"))
+    directory_imports = [
+        node.module
+        for node in ast.walk(routes_tree)
+        if isinstance(node, ast.ImportFrom) and "x402_directory" in (node.module or "")
+    ]
+    assert directory_imports == ["app.modules.x402_directory.services.listing_service"]
 
 
 @pytest.mark.usefixtures("ledger")
@@ -1044,3 +1065,273 @@ def test_the_free_index_fails_open_when_redis_is_down(
     )
 
     assert "items" in result
+
+
+# --------------------------------------------------------------------------- #
+# GET /grades/summary — free per-URL existence-tier summary
+# --------------------------------------------------------------------------- #
+@pytest.mark.usefixtures("fake_redis", "ledger")
+def test_the_free_summary_serves_count_and_recency_but_never_a_score(
+    store: InMemoryGradeStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Free is existence: how many graded and when, with no mean, distribution or opinion anywhere in the payload."""
+    service = _service(store)
+    _grade(service, grader=_PAYER, score=5, comment="excellent")
+    _grade(service, grader=_OTHER_PAYER, score=1)
+    monkeypatch.setattr(grading_routes, "grading_service", service)
+
+    result = grading_routes.x402_grade_summary(
+        _request(method="GET", query={"url": _URL}, path="/api/v1/x402/grades/summary")
+    )
+
+    assert set(result) == {"url", "url_hash", "count", "last_graded_at_epoch", "truncated"}
+    assert result["count"] == 2
+    assert result["last_graded_at_epoch"] > 0
+    assert "mean" not in json.dumps(result)
+    assert "excellent" not in json.dumps(result)
+
+
+@pytest.mark.usefixtures("fake_redis", "ledger")
+@pytest.mark.parametrize(
+    ("query", "status"),
+    [({}, 400), ({"url": "ftp://nope.example/x"}, 400), ({"url": _URL}, 404)],
+)
+def test_the_free_summary_rejects_bad_urls_and_404s_ungraded_ones(
+    store: InMemoryGradeStore, monkeypatch: pytest.MonkeyPatch, query: dict[str, Any], status: int
+) -> None:
+    """A missing or unusable URL is a 400, an ungraded one a 404."""
+    monkeypatch.setattr(grading_routes, "grading_service", _service(store))
+
+    result = grading_routes.x402_grade_summary(
+        _request(method="GET", query=query, path="/api/v1/x402/grades/summary")
+    )
+
+    assert result.status_code == status
+
+
+@pytest.mark.usefixtures("fake_redis", "ledger")
+def test_the_free_summary_is_rate_limited_per_ip_on_its_own_counter(
+    store: InMemoryGradeStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An IP over the hourly summary budget gets a 429; the index budget is separate."""
+    monkeypatch.setattr(settings, "x402_grading_rate_limit_per_hour", 1)
+    service = _service(store)
+    _grade(service, grader=_PAYER, score=5)
+    monkeypatch.setattr(grading_routes, "grading_service", service)
+    headers = {"X-Real-IP": "203.0.113.7"}
+
+    def _summary() -> Response | dict:
+        return grading_routes.x402_grade_summary(
+            _request(method="GET", headers=headers, query={"url": _URL})
+        )
+
+    assert "count" in _summary()
+    assert _summary().status_code == 429
+    assert "items" in grading_routes.x402_grade_index(_request(method="GET", headers=headers))
+
+
+# --------------------------------------------------------------------------- #
+# GET /grades/top?tag= — paid tag leaderboard over directory listings
+# --------------------------------------------------------------------------- #
+_TAGGED = [
+    "https://api.alpha.example/v1/quote",
+    "https://api.beta.example/v1/quote",
+    "https://api.gamma.example/v1/quote",
+]
+
+
+def _directory_with(urls: list[str], *, tag: str = "pricing") -> object:
+    """A directory holding live listings of `urls` under `tag`, via the directory's public service."""
+    from app.modules.x402_directory.models.domain import StoredListing
+    from app.modules.x402_directory.services.listing_service import url_hash as dir_hash
+    from app.modules.x402_directory.stores.memory import InMemoryListingStore
+
+    listing_store = InMemoryListingStore()
+    now = int(datetime.now(tz=UTC).timestamp())
+    for index, url in enumerate(urls):
+        listing_store.upsert(
+            StoredListing(
+                url_hash=dir_hash(url),
+                url=url,
+                price="$0.01",
+                description="",
+                schema_json="",
+                settlement_tx_id=f"TXL{index}",
+                term_end_epoch=now + 86400,
+                created_at_epoch=now - index,
+                tags=[tag],
+                payer=_PAYER,
+            )
+        )
+    return listing_store
+
+
+def _leaderboard_service(store: InMemoryGradeStore, listing_store: object) -> GradingService:
+    from app.modules.x402_directory.services.listing_service import ListingService
+
+    directory = ListingService(listing_store)  # type: ignore[arg-type]
+    return GradingService(
+        store,
+        lookup=InMemorySpendLookup(),
+        tag_lookup=lambda tag, limit: [i.url for i in directory.search(limit=limit, tag=tag)],
+    )
+
+
+def _must_not_charge(*_args: object, **_kwargs: object) -> Never:
+    raise AssertionError("the payment gate must not run for a doomed leaderboard request")
+
+
+@pytest.mark.usefixtures("testnet_settings", "fake_redis", "ledger")
+@pytest.mark.parametrize("query", [{}, {"tag": ""}, {"tag": "   "}, {"tag": "x" * 65}])
+def test_a_missing_or_unusable_tag_is_a_400_before_the_gate(
+    store: InMemoryGradeStore, monkeypatch: pytest.MonkeyPatch, query: dict[str, Any]
+) -> None:
+    """The directory's tag validation runs pre-gate and its error maps to a free 400."""
+    monkeypatch.setattr(
+        grading_routes, "grading_service", _leaderboard_service(store, _directory_with([]))
+    )
+    monkeypatch.setattr(grading_routes, "require_paid_request", _must_not_charge)
+
+    response = grading_routes.x402_grade_top(
+        _request(method="GET", query=query, path="/api/v1/x402/grades/top")
+    )
+
+    assert response.status_code == 400
+    assert "invalid_request" in response.description
+
+
+@pytest.mark.usefixtures("testnet_settings", "fake_redis", "ledger")
+def test_a_tag_with_no_graded_listing_is_a_404_before_the_gate(
+    store: InMemoryGradeStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Listed but ungraded, or an unknown tag: nobody pays for an empty leaderboard."""
+    monkeypatch.setattr(
+        grading_routes, "grading_service", _leaderboard_service(store, _directory_with(_TAGGED))
+    )
+    monkeypatch.setattr(grading_routes, "require_paid_request", _must_not_charge)
+
+    for tag in ("pricing", "unknown-tag"):
+        response = grading_routes.x402_grade_top(
+            _request(method="GET", query={"tag": tag}, path="/api/v1/x402/grades/top")
+        )
+        assert response.status_code == 404
+        assert "not_found" in response.description
+
+
+@pytest.mark.usefixtures("testnet_settings", "fake_redis", "ledger")
+def test_a_graded_tag_costs_the_score_price_and_declares_discovery(
+    store: InMemoryGradeStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Once a tag has a graded listing, the leaderboard is a 402 at the score price with a query-params Bazaar extension."""
+    from x402.http.utils import decode_payment_required_header
+
+    monkeypatch.setattr(settings, "x402_grading_score_price", "$0.03")
+    service = _leaderboard_service(store, _directory_with(_TAGGED))
+    _grade(service, grader=_PAYER, score=4, url=_TAGGED[0])
+    monkeypatch.setattr(grading_routes, "grading_service", service)
+
+    response = grading_routes.x402_grade_top(
+        _request(method="GET", query={"tag": "pricing"}, path="/api/v1/x402/grades/top")
+    )
+
+    assert response.status_code == 402
+    payment_required = decode_payment_required_header(response.headers["PAYMENT-REQUIRED"])
+    assert payment_required.accepts[0].amount == "30000"
+    bazaar = (payment_required.extensions or {}).get("bazaar")
+    assert bazaar is not None
+    assert "body" not in json.dumps(bazaar)
+
+
+@pytest.mark.usefixtures("testnet_settings", "fake_redis", "weights")
+def test_the_paid_leaderboard_ranks_tagged_listings_by_weighted_mean_and_marks_fulfilled(
+    store: InMemoryGradeStore, ledger: InMemorySettlementStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only tag-listed, graded endpoints appear, ordered by weighted mean, without per-grader rows; the settlement is marked fulfilled after the read."""
+    _spent(ledger, payer=_PAYER, amount_atomic="500000")
+    service = _leaderboard_service(store, _directory_with(_TAGGED))
+    # alpha: spender says 5, nobody says 1 -> weighted 5.0
+    _grade(service, grader=_PAYER, score=5, url=_TAGGED[0])
+    # beta: spender 2, fresh wallet 5 -> weighted well below 5, plain mean 3.5
+    _grade(service, grader=_PAYER, score=2, url=_TAGGED[1])
+    _grade(service, grader=_OTHER_PAYER, score=5, url=_TAGGED[1], comment="secret opinion")
+    # gamma is listed but ungraded; _URL is graded but not listed under the tag.
+    _grade(service, grader=_PAYER, score=5, url=_URL)
+    monkeypatch.setattr(grading_routes, "grading_service", service)
+    monkeypatch.setattr(
+        grading_routes, "require_paid_request", lambda *_a, **_kw: _settled_result(txid="TXT")
+    )
+    fulfilled: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        grading_routes,
+        "mark_fulfilled",
+        lambda txid, *, resource: fulfilled.append((txid, resource)) or True,
+    )
+
+    response = grading_routes.x402_grade_top(
+        _request(method="GET", query={"tag": "pricing"}, path="/api/v1/x402/grades/top")
+    )
+
+    assert response.status_code == 200
+    payload = json.loads(response.description)
+    assert payload["tag"] == "pricing"
+    assert [item["url"] for item in payload["items"]] == [_TAGGED[0], _TAGGED[1]]
+    assert [item["rank"] for item in payload["items"]] == [1, 2]
+    assert payload["items"][0]["weighted_mean"] == 5.0
+    assert payload["items"][1]["mean"] == 3.5
+    assert payload["items"][1]["weighted_mean"] < 3.5
+    assert payload["items"][1]["count"] == 2
+    assert payload["weights_resolved"] is True
+    assert payload["candidates_considered"] == 2
+    assert "grades" not in payload["items"][0]
+    assert "secret opinion" not in response.description
+    assert payload["settlement_tx_id"] == "TXT"
+    assert fulfilled == [("TXT", "x402-grading-top")]
+
+
+@pytest.mark.usefixtures("weights", "ledger")
+def test_the_leaderboard_candidate_set_is_bounded(
+    store: InMemoryGradeStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """At most TOP_CANDIDATE_LIMIT listings are considered, however many carry the tag."""
+    from app.modules.x402_grading.services import grading_service as service_module
+
+    monkeypatch.setattr(service_module, "TOP_CANDIDATE_LIMIT", 2)
+    urls = [f"https://api{i}.example/v1/q" for i in range(5)]
+    service = _leaderboard_service(store, _directory_with(urls))
+    for url in urls:
+        _grade(service, grader=_PAYER, score=4, url=url)
+
+    assert len(service.graded_candidates_for_tag("pricing")) == 2
+
+
+@pytest.mark.usefixtures("weights", "ledger")
+def test_aggregate_many_resolves_every_graders_weight_in_one_ledger_lookup(
+    store: InMemoryGradeStore,
+) -> None:
+    """The leaderboard's ledger cost does not scale with the number of endpoints."""
+    calls: list[list[str]] = []
+
+    class _CountingLookup:
+        def spend_by_payer(self, payers: list[str]) -> dict[str, int]:
+            calls.append(list(payers))
+            return dict.fromkeys(payers, 0)
+
+    service = GradingService(store, lookup=_CountingLookup())
+    for url in _TAGGED:
+        _grade(service, grader=_PAYER, score=4, url=url)
+        _grade(service, grader=_OTHER_PAYER, score=2, url=url)
+
+    aggregates = service.aggregate_many([_endpoint(service, url) for url in _TAGGED])
+
+    assert len(aggregates) == 3
+    assert len(calls) == 1
+    assert sorted(calls[0]) == sorted([_PAYER, _OTHER_PAYER])
+    assert all(item.mean == 3.0 for item in aggregates)
+
+
+def test_a_service_without_a_tag_lookup_cannot_serve_leaderboards(
+    store: InMemoryGradeStore,
+) -> None:
+    """No directory bound means no leaderboard, said explicitly rather than an empty board."""
+    with pytest.raises(GradingError, match="not available"):
+        _service(store).graded_candidates_for_tag("pricing")

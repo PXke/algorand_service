@@ -9,6 +9,7 @@ payment or reaches TestNet.
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any, Never
@@ -34,7 +35,12 @@ from app.modules.x402 import replay as replay_module
 from app.modules.x402 import settlement as settlement_service
 from app.modules.x402.settlement import InMemorySettlementStore, SettlementRecord
 from app.modules.x402_directory.api import routes as directory_routes
-from app.modules.x402_directory.models.domain import DirectoryError, StoredListing
+from app.modules.x402_directory.models.domain import (
+    LISTING_CATEGORIES,
+    DirectoryError,
+    StoredListing,
+    StoredProbe,
+)
 from app.modules.x402_directory.services.listing_service import (
     MAX_SCHEMA_JSON_BYTES,
     ListingService,
@@ -1384,3 +1390,767 @@ def test_admin_delist_removes_the_tag_projection_rows(
     assert store.tag_rows("fx") == []
     assert store.tag_rows("market-data") == []
     assert service.search(limit=50, tag="fx") == []
+
+
+# --------------------------------------------------------------------------- #
+# Probe / verified badge read side (migration 097)
+# --------------------------------------------------------------------------- #
+def _probe(url_hash: str, **overrides: object) -> StoredProbe:
+    base: dict[str, object] = {
+        "url_hash": url_hash,
+        "url": "https://api.example.com/q",
+        "probed_at_epoch": 1_700_000_000,
+        "reachable": True,
+        "http_status": 402,
+        "latency_ms": 120,
+        "served_valid_402": True,
+        "payto_seen": "AGENT1",
+        "error": "",
+    }
+    base.update(overrides)
+    return StoredProbe(**base)  # type: ignore[arg-type]
+
+
+def _listed(store: InMemoryListingStore, url: str, payer: str = "AGENT1") -> StoredListing:
+    return ListingService(store).create(
+        normalized_url=url,
+        price="$0.01",
+        description="probe me",
+        assets=[],
+        tags=["fx"],
+        schema_json="",
+        settlement_tx_id="TX",
+        payer=payer,
+    )
+
+
+@pytest.mark.usefixtures("fake_redis")
+def test_search_serves_the_verified_badge_only_while_it_belongs_to_the_payer(
+    store: InMemoryListingStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """verified_wallet is served when it equals payer and blanked when a new owner relisted."""
+    monkeypatch.setattr(directory_routes, "listing_service", ListingService(store))
+    listing = _listed(store, "https://api.example.com/q")
+    store.upsert(replace(listing, verified_wallet="AGENT1", verified_at_epoch=42))
+    item = directory_routes.x402_search(_request(method="GET", path="/api/v1/x402/search"))[
+        "items"
+    ][0]
+    assert item["verified_wallet"] == "AGENT1"
+    assert item["verified_at_epoch"] == 42
+
+    stale = replace(listing, payer="AGENT2", verified_wallet="AGENT1", verified_at_epoch=42)
+    store.upsert(stale)
+    item = directory_routes.x402_search(_request(method="GET", path="/api/v1/x402/search"))[
+        "items"
+    ][0]
+    assert item["verified_wallet"] == ""
+    assert item["verified_at_epoch"] == 0
+
+
+@pytest.mark.usefixtures("fake_redis")
+def test_probe_status_returns_the_latest_probe_for_a_listed_url(
+    store: InMemoryListingStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """GET /x402/directory/probe?url= serves the newest probe row plus the badge for that listing."""
+    monkeypatch.setattr(directory_routes, "listing_service", ListingService(store))
+    listing = _listed(store, "https://api.example.com/q")
+    store.record_probe(_probe(listing.url_hash, latency_ms=77))
+
+    result = directory_routes.x402_probe_status(
+        _request(
+            method="GET",
+            path="/api/v1/x402/directory/probe",
+            query={"url": "HTTPS://API.example.com/q#frag"},
+        )
+    )
+    assert result["url"] == "https://api.example.com/q"
+    assert result["verified_wallet"] == ""
+    assert result["probe"]["latency_ms"] == 77
+    assert result["probe"]["served_valid_402"] is True
+    assert result["probe"]["payto_seen"] == "AGENT1"
+
+
+@pytest.mark.usefixtures("fake_redis")
+def test_probe_status_is_null_before_the_first_probe_and_404_for_unlisted_urls(
+    store: InMemoryListingStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A listed-but-unprobed URL answers probe=null; an unlisted URL is a 404, a bad URL a 400."""
+    monkeypatch.setattr(directory_routes, "listing_service", ListingService(store))
+    _listed(store, "https://api.example.com/q")
+
+    def _status(url: str) -> Response | dict:
+        return directory_routes.x402_probe_status(
+            _request(method="GET", path="/api/v1/x402/directory/probe", query={"url": url})
+        )
+
+    assert _status("https://api.example.com/q")["probe"] is None
+    assert _status("https://nobody.example.com/q").status_code == 404
+    assert _status("ftp://api.example.com/q").status_code == 400
+    assert _status("").status_code == 400
+
+
+@pytest.mark.usefixtures("fake_redis")
+def test_probe_status_is_rate_limited_per_ip(
+    store: InMemoryListingStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The probe route shares the search route's per-IP hourly budget."""
+    monkeypatch.setattr(settings, "x402_search_rate_limit_per_hour", 1)
+    monkeypatch.setattr(directory_routes, "listing_service", ListingService(store))
+    _listed(store, "https://api.example.com/q")
+
+    def _status(ip: str) -> Response | dict:
+        return directory_routes.x402_probe_status(
+            _request(
+                method="GET",
+                headers={"X-Real-IP": ip},
+                path="/api/v1/x402/directory/probe",
+                query={"url": "https://api.example.com/q"},
+            )
+        )
+
+    assert "probe" in _status("203.0.113.7")
+    assert _status("203.0.113.7").status_code == 429
+    assert "probe" in _status("203.0.113.9")
+
+
+def test_cassandra_store_reads_badge_and_latest_probe_columns(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The Cassandra row mappers pick up verified_wallet/verified_at and the x402_probe_latest columns."""
+    from app.modules.x402_directory.stores import cassandra as cassandra_store
+
+    now = datetime(2026, 8, 30, tzinfo=UTC)
+    listing_row = SimpleNamespace(
+        url_hash="h",
+        url="https://api.example.com/q",
+        price="$0.01",
+        assets=set(),
+        description="",
+        schema_json="",
+        tags=set(),
+        term_end=now,
+        settlement_tx_id="TX",
+        created_at=now,
+        payer="AGENT1",
+        verified_wallet="AGENT1",
+        verified_at=now,
+    )
+    probe_row = SimpleNamespace(
+        url_hash="h",
+        url="https://api.example.com/q",
+        probed_at=now,
+        reachable=True,
+        http_status=402,
+        latency_ms=9,
+        served_valid_402=True,
+        payto_seen="AGENT1",
+        error=None,
+    )
+    executed: list[tuple[str, tuple]] = []
+
+    class _Session:
+        def execute(self, stmt: str, params: tuple) -> SimpleNamespace:
+            executed.append((stmt, params))
+            return SimpleNamespace(one=lambda: probe_row)
+
+    monkeypatch.setattr("app.core.cassandra.prepare_cached", lambda cql: cql)
+    monkeypatch.setattr(cassandra_store, "get_cassandra_session", lambda: _Session())
+
+    listing = cassandra_store._row_to_listing(listing_row)
+    assert listing.is_verified
+    assert listing.verified_at_epoch == int(now.timestamp())
+
+    probe = cassandra_store.CassandraListingStore().latest_probe("h")
+    assert probe is not None
+    assert (probe.http_status, probe.latency_ms, probe.error) == (402, 9, "")
+    assert "x402_probe_latest" in executed[0][0]
+    assert executed[0][1] == ("h",)
+
+
+# --------------------------------------------------------------------------- #
+# Category (migration 099)
+# --------------------------------------------------------------------------- #
+def _never_gate_factory(calls: list[str]) -> Any:  # noqa: ANN401 -- returns a gate stand-in
+    def _never_gate(*_args: object, **_kwargs: object) -> Never:
+        calls.append("gate")
+        raise AssertionError("the payment gate must not run for a doomed request")
+
+    return _never_gate
+
+
+@pytest.mark.usefixtures("testnet_settings", "fake_redis")
+def test_an_unknown_category_is_rejected_before_the_payment_gate(
+    store: InMemoryListingStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A category outside the fixed enum is a 400 nobody pays for -- the gate never runs."""
+    gate_calls: list[str] = []
+    monkeypatch.setattr(directory_routes, "listing_service", ListingService(store))
+    monkeypatch.setattr(directory_routes, "require_paid_request", _never_gate_factory(gate_calls))
+
+    response = directory_routes.x402_list(
+        _request(
+            body=json.dumps(
+                {"url": "https://api.example.com/v1/quote", "price": "$0.01", "category": "memes"}
+            ).encode()
+        )
+    )
+
+    assert response.status_code == 400
+    assert "category must be one of" in response.description
+    assert gate_calls == []
+    assert store.list_recent(limit=50) == []
+
+
+@pytest.mark.usefixtures("testnet_settings", "fake_redis")
+def test_a_reserved_category_tag_is_rejected_before_the_payment_gate(
+    store: InMemoryListingStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A user tag in the `category:` namespace is a 400 before the gate -- a listing cannot forge its way into a category partition."""
+    gate_calls: list[str] = []
+    monkeypatch.setattr(directory_routes, "listing_service", ListingService(store))
+    monkeypatch.setattr(directory_routes, "require_paid_request", _never_gate_factory(gate_calls))
+
+    response = directory_routes.x402_list(
+        _request(
+            body=json.dumps(
+                {
+                    "url": "https://api.example.com/v1/quote",
+                    "price": "$0.01",
+                    "tags": ["fx", " Category:AI "],
+                }
+            ).encode()
+        )
+    )
+
+    assert response.status_code == 400
+    assert "reserved" in response.description
+    assert gate_calls == []
+    assert store.tag_rows("category:ai") == []
+
+
+def test_create_rejects_a_reserved_tag_as_the_durable_guard(store: InMemoryListingStore) -> None:
+    """create() itself refuses the reserved namespace, so no caller can bypass the route's pre-gate check."""
+    with pytest.raises(DirectoryError, match="reserved"):
+        ListingService(store).create(
+            normalized_url="https://api.example.com/v1/quote",
+            price="$0.01",
+            description="",
+            assets=[],
+            tags=["category:finance"],
+            schema_json="",
+            settlement_tx_id="TX1",
+            payer="AGENT1",
+        )
+    assert store.get(url_hash("https://api.example.com/v1/quote")) is None
+
+
+def test_a_listed_category_is_stored_served_and_defaults_to_other(
+    store: InMemoryListingStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The paid route persists a normalized category and serves it back; omitting it means `other`."""
+    monkeypatch.setattr(directory_routes, "listing_service", ListingService(store))
+    monkeypatch.setattr(
+        directory_routes, "require_paid_request", lambda *_a, **_kw: _settled_result()
+    )
+
+    with_category = directory_routes.x402_list(
+        _request(
+            body=json.dumps(
+                {"url": "https://a.example.com/x", "price": "$0.01", "category": " Finance "}
+            ).encode()
+        )
+    )
+    assert json.loads(with_category.description)["listing"]["category"] == "finance"
+    assert store.tag_rows("category:finance") == [url_hash("https://a.example.com/x")]
+    # The category is not one of the listing's tags on the wire.
+    assert json.loads(with_category.description)["listing"]["tags"] == []
+
+    without = directory_routes.x402_list(
+        _request(body=json.dumps({"url": "https://b.example.com/x", "price": "$0.01"}).encode())
+    )
+    assert json.loads(without.description)["listing"]["category"] == "other"
+    assert store.tag_rows("category:other") == [url_hash("https://b.example.com/x")]
+
+
+def _seed_categorized(service: ListingService, *, now: datetime) -> None:
+    for index, (host, category, days_ago) in enumerate(
+        [
+            ("fin1", "finance", 2),
+            ("ai1", "ai", 1),
+            ("fin2", "finance", 0),
+            ("fin-old", "finance", 31),
+        ]
+    ):
+        service.create(
+            normalized_url=f"https://{host}.example.com/x",
+            price="$0.01",
+            description=host,
+            assets=[],
+            tags=["fx"],
+            schema_json="",
+            settlement_tx_id=f"TX{index}",
+            payer=f"AGENT{index}",
+            category=category,
+            now=now - timedelta(days=days_ago),
+        )
+
+
+@pytest.mark.usefixtures("fake_redis")
+def test_search_by_category_returns_only_live_listings_in_that_category(
+    store: InMemoryListingStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`?category=` narrows to listings declared in that category, newest first, expired dropped; bad or combined filters are 400s."""
+    monkeypatch.setattr(settings, "x402_listing_term_days", 30)
+    monkeypatch.setattr(directory_routes, "listing_service", ListingService(store))
+    _seed_categorized(ListingService(store), now=datetime.now(tz=UTC))
+
+    def _search(query: dict[str, str]) -> Response | dict:
+        return directory_routes.x402_search(
+            _request(method="GET", path="/api/v1/x402/search", query=query)
+        )
+
+    assert [i["description"] for i in _search({"category": "Finance"})["items"]] == [
+        "fin2",
+        "fin1",
+    ]
+    assert [i["description"] for i in _search({"category": "ai"})["items"]] == ["ai1"]
+    assert _search({"category": "storage"})["items"] == []
+    assert _search({"category": "memes"}).status_code == 400
+    assert _search({"category": "ai", "tag": "fx"}).status_code == 400
+    # The reserved namespace is not reachable through ?tag= either.
+    assert _search({"tag": "category:ai"}).status_code == 400
+    # Unfiltered search is unchanged and still carries the category.
+    assert [i["category"] for i in _search({})["items"]] == ["finance", "ai", "finance"]
+
+
+def test_relisting_with_a_different_category_moves_the_category_row(
+    store: InMemoryListingStore,
+) -> None:
+    """A relist that changes the category drops the old category row exactly like a dropped tag."""
+    service = ListingService(store)
+    key = url_hash("https://api.example.com/v1/quote")
+    for category in ("data", "ai"):
+        service.create(
+            normalized_url="https://api.example.com/v1/quote",
+            price="$0.01",
+            description=category,
+            assets=[],
+            tags=["fx"],
+            schema_json="",
+            settlement_tx_id="TX",
+            payer="AGENT1",
+            category=category,
+        )
+
+    assert store.tag_rows("category:data") == []
+    assert store.tag_rows("category:ai") == [key]
+    assert [i.description for i in service.search(limit=50, category="ai")] == ["ai"]
+
+
+def test_admin_delist_removes_the_category_row(
+    store: InMemoryListingStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Deleting a listing also removes its reserved category row, so a category search cannot resurrect it."""
+    service = ListingService(store)
+    key = url_hash("https://api.example.com/v1/quote")
+    service.create(
+        normalized_url="https://api.example.com/v1/quote",
+        price="$0.01",
+        description="categorized",
+        assets=[],
+        tags=["fx"],
+        schema_json="",
+        settlement_tx_id="TX1",
+        payer="AGENT1",
+        category="identity",
+    )
+    assert store.tag_rows("category:identity") == [key]
+    monkeypatch.setattr(directory_routes, "listing_service", service)
+    monkeypatch.setattr(directory_routes, "require_admin_wallet", lambda _request: None)
+
+    response = directory_routes.x402_admin_delete_listing(
+        _delete_request("https://api.example.com/v1/quote")
+    )
+
+    assert getattr(response, "status_code", 200) == 200
+    assert store.tag_rows("category:identity") == []
+    assert store.tag_rows("fx") == []
+    assert service.search(limit=50, category="identity") == []
+
+
+def test_the_listing_offer_advertises_category_and_the_category_filter(
+    store: InMemoryListingStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The 402 offer's description and discovery input_schema both tell a payer about `category` and `?category=`."""
+    monkeypatch.setattr(directory_routes, "listing_service", ListingService(store))
+    captured: dict[str, Any] = {}
+
+    def _capture(_request: Request, **kwargs: Any) -> Never:  # noqa: ANN401 -- mirrors the gate's kwargs
+        captured.update(kwargs)
+        raise RuntimeError("stop")
+
+    monkeypatch.setattr(directory_routes, "require_paid_request", _capture)
+    with pytest.raises(RuntimeError, match="stop"):
+        directory_routes.x402_list(
+            _request(
+                body=json.dumps({"url": "https://api.example.com/v1/quote", "price": "$1"}).encode()
+            )
+        )
+
+    assert "?category=" in captured["description"]
+    body_schema = captured["extensions"]["bazaar"]["schema"]["properties"]["input"]["properties"][
+        "body"
+    ]
+    assert body_schema["properties"]["category"]["enum"] == list(LISTING_CATEGORIES)
+    assert "?category=" in body_schema["properties"]["category"]["description"]
+    assert (
+        captured["extensions"]["bazaar"]["schema"]["properties"]["input"]["properties"]["body"][
+            "properties"
+        ]["tags"]["description"].count("category:")
+        == 1
+    )
+
+
+def test_cassandra_store_projects_the_category_row_and_reads_a_null_category_as_other(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every Cassandra write carries the category and one extra by-tag row for it; a pre-099 row reads as `other`; delete removes the category row."""
+    from app.modules.x402_directory.stores import cassandra as cassandra_store
+
+    now = datetime(2026, 8, 30, tzinfo=UTC)
+    executed: list[tuple[str, tuple]] = []
+    stored_row = SimpleNamespace(
+        url_hash="h",
+        url="https://api.example.com/q",
+        price="$0.01",
+        assets=set(),
+        description="",
+        schema_json="",
+        tags={"fx"},
+        term_end=now,
+        settlement_tx_id="TX",
+        created_at=now,
+        payer="AGENT1",
+        verified_wallet=None,
+        verified_at=None,
+        category=None,
+    )
+
+    class _Session:
+        def execute(self, stmt: str, params: tuple) -> SimpleNamespace:
+            executed.append((stmt, params))
+            return SimpleNamespace(one=lambda: stored_row, was_applied=True)
+
+    monkeypatch.setattr("app.core.cassandra.prepare_cached", lambda cql: cql)
+    monkeypatch.setattr(cassandra_store, "get_cassandra_session", lambda: _Session())
+    cass = cassandra_store.CassandraListingStore()
+
+    listing = StoredListing(
+        url_hash="h",
+        url="https://api.example.com/q",
+        price="$0.01",
+        description="",
+        schema_json="",
+        settlement_tx_id="TX",
+        term_end_epoch=int(now.timestamp()),
+        created_at_epoch=int(now.timestamp()),
+        tags=["fx"],
+        payer="AGENT1",
+        category="ai",
+    )
+    assert cass.insert_if_absent(listing) is True
+    by_tag = [p for s, p in executed if "INSERT INTO algorand_platform.x402_listings_by_tag" in s]
+    assert [p[0] for p in by_tag] == ["fx", "category:ai"]
+    assert all(p[-1] == "ai" for p in by_tag)
+    canonical = next(p for s, p in executed if "IF NOT EXISTS" in s)
+    assert canonical[-1] == "ai"
+
+    # A pre-099 row: null category reads back as the default.
+    assert cass.get("h").category == "other"
+
+    executed.clear()
+    assert cass.delete("h") is True
+    deleted_tags = [
+        p[0] for s, p in executed if "DELETE FROM algorand_platform.x402_listings_by_tag" in s
+    ]
+    assert deleted_tags == ["fx", "category:other"]
+
+
+# --------------------------------------------------------------------------- #
+# Renew (POST /x402/list/renew)
+# --------------------------------------------------------------------------- #
+def _renew_request(url: str) -> Request:
+    return _request(body=json.dumps({"url": url}).encode(), path="/api/v1/x402/list/renew")
+
+
+@pytest.mark.usefixtures("testnet_settings", "fake_redis")
+def test_renewing_an_unlisted_url_is_a_free_404(
+    store: InMemoryListingStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An unlisted url (and a malformed one) is refused before the gate -- nobody pays to renew nothing."""
+    gate_calls: list[str] = []
+    monkeypatch.setattr(directory_routes, "listing_service", ListingService(store))
+    monkeypatch.setattr(directory_routes, "require_paid_request", _never_gate_factory(gate_calls))
+
+    assert (
+        directory_routes.x402_renew(_renew_request("https://nobody.example.com/x")).status_code
+        == 404
+    )
+    assert (
+        directory_routes.x402_renew(_renew_request("ftp://nobody.example.com/x")).status_code == 400
+    )
+    assert directory_routes.x402_renew(_request(body=b"{not json")).status_code == 400
+    assert gate_calls == []
+
+
+@pytest.mark.usefixtures("testnet_settings", "fake_redis")
+def test_renew_402_declares_a_json_body_discovery_extension_and_states_the_rule(
+    store: InMemoryListingStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The renew offer reaches the gate with a body-shaped Bazaar declaration, the listing price and the ownership rule in its description."""
+    monkeypatch.setattr(settings, "x402_listing_price", "$0.10")
+    monkeypatch.setattr(settings, "x402_listing_term_days", 30)
+    service = ListingService(store)
+    _listed(store, "https://api.example.com/q")
+    monkeypatch.setattr(directory_routes, "listing_service", service)
+    captured: dict[str, Any] = {}
+
+    def _capture(_request: Request, **kwargs: Any) -> Never:  # noqa: ANN401 -- mirrors the gate's kwargs
+        captured.update(kwargs)
+        raise RuntimeError("stop")
+
+    monkeypatch.setattr(directory_routes, "require_paid_request", _capture)
+    with pytest.raises(RuntimeError, match="stop"):
+        directory_routes.x402_renew(_renew_request("https://api.example.com/q"))
+
+    assert captured["price"] == "$0.10"
+    assert captured["resource"] == "x402-directory-renew"
+    assert "30 more days" in captured["description"]
+    assert "Only the wallet that listed" in captured["description"]
+    assert "body" in json.dumps(captured["extensions"]["bazaar"])
+
+
+def test_renew_by_the_owner_extends_from_the_current_term_end_and_keeps_created_at(
+    store: InMemoryListingStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An early renewal adds a full term on top of what is left; created_at, content and the badge are untouched, the txid is replaced."""
+    monkeypatch.setattr(settings, "x402_listing_term_days", 30)
+    service = ListingService(store)
+    base = datetime(2026, 8, 1, tzinfo=UTC)
+    original = service.create(
+        normalized_url="https://api.example.com/q",
+        price="$0.01",
+        description="mine",
+        assets=["USDC"],
+        tags=["fx"],
+        schema_json="",
+        settlement_tx_id="TX1",
+        payer="AGENT1",
+        category="finance",
+        now=base,
+    )
+    store.upsert(replace(original, verified_wallet="AGENT1", verified_at_epoch=7))
+
+    renewed = service.renew(
+        normalized_url="https://api.example.com/q",
+        payer="AGENT1",
+        settlement_tx_id="TX2",
+        now=base + timedelta(days=10),
+    )
+
+    assert renewed.term_end_epoch == int((base + timedelta(days=60)).timestamp())
+    assert renewed.created_at_epoch == original.created_at_epoch
+    assert renewed.settlement_tx_id == "TX2"
+    assert renewed.payer == "AGENT1"
+    assert renewed.is_verified
+    assert renewed.verified_at_epoch == 7
+    assert (renewed.description, renewed.tags, renewed.category) == ("mine", ["fx"], "finance")
+    assert store.get(original.url_hash) == renewed
+    # Projections carry the new term: the tag and category rows serve it live at day 59.
+    late = base + timedelta(days=59)
+    assert [i.settlement_tx_id for i in service.search(limit=50, tag="fx", now=late)] == ["TX2"]
+    assert [i.settlement_tx_id for i in service.search(limit=50, category="finance", now=late)] == [
+        "TX2"
+    ]
+    assert service.search(limit=50, now=late)[0].term_end_epoch == renewed.term_end_epoch
+
+
+def test_renew_of_a_live_listing_by_another_wallet_is_refused_and_changes_nothing(
+    store: InMemoryListingStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A different (or unattributable) payer cannot renew -- and thereby claim -- a live listing."""
+    monkeypatch.setattr(settings, "x402_listing_term_days", 30)
+    service = ListingService(store)
+    now = datetime.now(tz=UTC)
+    original = _listed(store, "https://api.example.com/q")
+
+    for payer in ("AGENT2", ""):
+        with pytest.raises(DirectoryError, match="Only the wallet that listed") as excinfo:
+            service.renew(
+                normalized_url="https://api.example.com/q",
+                payer=payer,
+                settlement_tx_id="TX-HIJACK",
+                now=now,
+            )
+        assert excinfo.value.http_status == 403
+    assert store.get(original.url_hash) == original
+
+
+def test_renew_of_an_expired_or_unowned_listing_claims_it_and_drops_the_old_badge(
+    store: InMemoryListingStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """After expiry (or with no payer) anyone may renew: the term restarts from now, the payer changes, the previous owner's badge is dropped."""
+    monkeypatch.setattr(settings, "x402_listing_term_days", 30)
+    service = ListingService(store)
+    base = datetime(2026, 8, 1, tzinfo=UTC)
+    original = service.create(
+        normalized_url="https://api.example.com/q",
+        price="$0.01",
+        description="lapsed",
+        assets=[],
+        tags=[],
+        schema_json="",
+        settlement_tx_id="TX1",
+        payer="AGENT1",
+        now=base,
+    )
+    store.upsert(replace(original, verified_wallet="AGENT1", verified_at_epoch=7))
+
+    later = base + timedelta(days=45)
+    renewed = service.renew(
+        normalized_url="https://api.example.com/q",
+        payer="AGENT2",
+        settlement_tx_id="TX2",
+        now=later,
+    )
+
+    assert renewed.payer == "AGENT2"
+    assert renewed.term_end_epoch == int((later + timedelta(days=30)).timestamp())
+    assert renewed.created_at_epoch == original.created_at_epoch
+    assert renewed.verified_wallet == ""
+    assert renewed.verified_at_epoch == 0
+
+    store.upsert(replace(renewed, payer=""))
+    claimed = service.renew(
+        normalized_url="https://api.example.com/q",
+        payer="AGENT3",
+        settlement_tx_id="TX3",
+        now=later,
+    )
+    assert claimed.payer == "AGENT3"
+    assert claimed.term_end_epoch == int((later + timedelta(days=60)).timestamp())
+
+
+@pytest.mark.usefixtures("fake_redis")
+def test_renew_route_stores_marks_fulfilled_and_serves_receipt_headers_on_refusal(
+    store: InMemoryListingStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A settled renewal is stored then marked fulfilled; a refused one is a 403 that still carries the settlement headers and is NOT marked fulfilled."""
+    monkeypatch.setattr(settings, "x402_listing_term_days", 30)
+    service = ListingService(store)
+    original = _listed(store, "https://api.example.com/q", payer="P" * 58)
+    monkeypatch.setattr(directory_routes, "listing_service", service)
+    monkeypatch.setattr(
+        directory_routes, "require_paid_request", lambda *_a, **_kw: _settled_result()
+    )
+    fulfilled: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        directory_routes,
+        "mark_fulfilled",
+        lambda txid, *, resource: fulfilled.append((txid, resource)),
+    )
+
+    response = directory_routes.x402_renew(_renew_request("https://api.example.com/q"))
+
+    assert response.status_code == 200
+    assert response.headers["PAYMENT-RESPONSE"] == "ok"
+    body = json.loads(response.description)
+    assert body["listing"]["settlement_tx_id"] == "TX123"
+    assert body["listing"]["term_end_epoch"] == original.term_end_epoch + 30 * 86400
+    assert body["listing"]["created_at_epoch"] == original.created_at_epoch
+    assert body["term_days"] == 30
+    assert fulfilled == [("TX123", "x402-directory-renew")]
+
+    # Now the listing belongs to someone else: the same settled payer is refused.
+    store.upsert(replace(store.get(original.url_hash), payer="AGENT-OTHER"))
+    refused = directory_routes.x402_renew(_renew_request("https://api.example.com/q"))
+    assert refused.status_code == 403
+    assert refused.headers["PAYMENT-RESPONSE"] == "ok"
+    assert json.loads(refused.description)["error"]["code"] == "listing_owned_by_another_payer"
+    assert fulfilled == [("TX123", "x402-directory-renew")]
+    assert store.get(original.url_hash).payer == "AGENT-OTHER"
+
+
+# --------------------------------------------------------------------------- #
+# Detail view (GET /x402/listings?url=)
+# --------------------------------------------------------------------------- #
+def _detail(url: str, ip: str = "") -> Response | dict:
+    return directory_routes.x402_listing_detail(
+        _request(
+            method="GET",
+            path="/api/v1/x402/listings",
+            query={"url": url},
+            headers={"X-Real-IP": ip} if ip else None,
+        )
+    )
+
+
+@pytest.mark.usefixtures("fake_redis")
+def test_listing_detail_serves_the_search_shape_plus_the_probe(
+    store: InMemoryListingStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The detail view is the search item for that url plus its newest probe (null before the first probe)."""
+    monkeypatch.setattr(directory_routes, "listing_service", ListingService(store))
+    listing = _listed(store, "https://api.example.com/q")
+
+    before = _detail("HTTPS://API.example.com/q#frag")
+    assert before["probe"] is None
+    search_item = directory_routes.x402_search(_request(method="GET", path="/api/v1/x402/search"))[
+        "items"
+    ][0]
+    assert before["listing"] == search_item
+    assert before["listing"]["category"] == "other"
+
+    store.record_probe(_probe(listing.url_hash, latency_ms=55))
+    after = _detail("https://api.example.com/q")
+    assert after["probe"]["latency_ms"] == 55
+    assert after["probe"]["served_valid_402"] is True
+
+
+@pytest.mark.usefixtures("fake_redis")
+def test_listing_detail_is_404_for_unlisted_and_expired_urls(
+    store: InMemoryListingStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Unlisted -> 404, expired -> 404 (search has stopped serving it), bad url -> 400, missing url -> 400."""
+    monkeypatch.setattr(settings, "x402_listing_term_days", 30)
+    monkeypatch.setattr(directory_routes, "listing_service", ListingService(store))
+    ListingService(store).create(
+        normalized_url="https://old.example.com/q",
+        price="$0.01",
+        description="lapsed",
+        assets=[],
+        tags=[],
+        schema_json="",
+        settlement_tx_id="TX",
+        payer="AGENT1",
+        now=datetime.now(tz=UTC) - timedelta(days=31),
+    )
+
+    assert _detail("https://nobody.example.com/q").status_code == 404
+    assert _detail("https://old.example.com/q").status_code == 404
+    assert _detail("ftp://old.example.com/q").status_code == 400
+    assert _detail("").status_code == 400
+
+
+@pytest.mark.usefixtures("fake_redis")
+def test_listing_detail_is_rate_limited_per_ip(
+    store: InMemoryListingStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The detail route shares the search route's per-IP hourly budget."""
+    monkeypatch.setattr(settings, "x402_search_rate_limit_per_hour", 1)
+    monkeypatch.setattr(directory_routes, "listing_service", ListingService(store))
+    _listed(store, "https://api.example.com/q")
+
+    assert "listing" in _detail("https://api.example.com/q", ip="203.0.113.7")
+    assert _detail("https://api.example.com/q", ip="203.0.113.7").status_code == 429
+    assert "listing" in _detail("https://api.example.com/q", ip="203.0.113.9")

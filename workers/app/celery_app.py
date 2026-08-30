@@ -80,6 +80,7 @@ celery_app.conf.imports = (
     "app.tasks.newspaper",
     "app.tasks.search",
     "app.tasks.metrics",
+    "app.tasks.x402_probe",
 )
 
 
@@ -193,6 +194,19 @@ def _build_beat_schedule() -> dict:
     # in place, just unreachable via beat; a manual/admin trigger of the
     # task still works (it re-checks X_SEARCH_ENABLED itself) if this ever
     # needs to be re-enabled.
+    # x402 probe / monitoring (roadmap item 7): unpaid liveness + 402-offer
+    # checks of every live directory listing and the verified badge. Off by
+    # default (config.X402_PROBE_ENABLED) because it sends real requests to
+    # third-party endpoints; the task is single_flight-locked and this
+    # `expires` drops a tick that never found a free worker within one
+    # interval rather than running it stale (same pairing as drain-url-queue).
+    if config.X402_PROBE_ENABLED:
+        _x402_probe_seconds = float(config.X402_PROBE_INTERVAL_SECONDS)
+        schedule["x402-probe-listed-endpoints"] = {
+            "task": "app.tasks.x402_probe.probe_listed_endpoints",
+            "schedule": _x402_probe_seconds,
+            "options": {"expires": _x402_probe_seconds},
+        }
     if is_crawler_enabled(CrawlerType.METRICS):
         schedule["collect-price-metrics"] = {
             "task": "app.tasks.metrics.collect_price_metrics",

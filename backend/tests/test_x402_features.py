@@ -237,7 +237,14 @@ def test_filing_is_free_and_needs_no_payment_header(
     item = body["request"]
     assert item["title"] == "Candles endpoint"
     assert item["description"] == "OHLCV for any ASA."
-    assert set(item) == {"request_id", "title", "description", "created_at_epoch"}
+    assert set(item) == {
+        "request_id",
+        "title",
+        "description",
+        "created_at_epoch",
+        "claims_count",
+        "latest_claimer",
+    }
     stored = wired.get(item["request_id"])
     assert stored is not None
 
@@ -546,7 +553,14 @@ def test_the_free_browse_never_exposes_the_demand_signal(
 
     assert len(result["items"]) == 1
     item = result["items"][0]
-    assert set(item) == {"request_id", "title", "description", "created_at_epoch"}
+    assert set(item) == {
+        "request_id",
+        "title",
+        "description",
+        "created_at_epoch",
+        "claims_count",
+        "latest_claimer",
+    }
     # Belt and braces: the number must not appear anywhere in the payload under
     # any other key name either.
     assert "vote" not in json.dumps(result)
@@ -776,3 +790,141 @@ def test_the_demand_scan_is_bounded(
 
     assert len(ranked) == 2
     assert [r.request.title for r in ranked] == ["newer 2", "newer 1"]
+
+
+# --------------------------------------------------------------------------- #
+# POST /features/:id/claim — paid "I'm building this"
+# --------------------------------------------------------------------------- #
+@pytest.mark.usefixtures("testnet_settings", "fake_redis", "wired")
+def test_claiming_a_missing_request_is_a_404_that_never_reaches_the_gate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Existence is checked before the gate: a claim on an unknown id costs nothing."""
+
+    def _must_not_charge(*_a: object, **_kw: object) -> Never:
+        raise AssertionError("the payment gate must not run for an unknown request")
+
+    monkeypatch.setattr(feature_routes, "require_paid_request", _must_not_charge)
+
+    response = feature_routes.x402_features_claim(
+        _request(path_params={"request_id": "does-not-exist"})
+    )
+
+    assert response.status_code == 404
+    assert "not_found" in response.description
+
+
+@pytest.mark.usefixtures("testnet_settings", "fake_redis")
+def test_claiming_without_payment_is_a_402_at_the_vote_price_with_discovery(
+    wired: InMemoryFeatureStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A claim is priced at the vote fee and the 402 declares Bazaar discovery and the non-exclusive rule."""
+    from x402.http.utils import decode_payment_required_header
+
+    monkeypatch.setattr(settings, "x402_features_vote_price", "$0.02")
+    request_id = _file_request(FeatureService(wired))
+
+    response = feature_routes.x402_features_claim(_request(path_params={"request_id": request_id}))
+
+    assert response.status_code == 402
+    payment_required = decode_payment_required_header(response.headers["PAYMENT-REQUIRED"])
+    assert payment_required.accepts[0].amount == "20000"
+    assert (payment_required.extensions or {}).get("bazaar") is not None
+    assert "Not exclusive" in (payment_required.resource.description or "")
+
+
+def test_a_settled_claim_is_stored_surfaced_on_both_reads_and_marked_fulfilled(
+    wired: InMemoryFeatureStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The claim row is stored under the settled payer, the free browse and the paid demand read both show the count and latest claimer, and the settlement is marked fulfilled after the write."""
+    service = FeatureService(wired)
+    request_id = _file_request(service)
+    monkeypatch.setattr(
+        feature_routes, "require_paid_request", lambda *_a, **_kw: _settled_result(txid="TXC1")
+    )
+    fulfilled: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        feature_routes,
+        "mark_fulfilled",
+        lambda txid, *, resource: fulfilled.append((txid, resource)) or True,
+    )
+
+    response = feature_routes.x402_features_claim(_request(path_params={"request_id": request_id}))
+
+    assert response.status_code == 200
+    body = json.loads(response.description)
+    assert body == {
+        "request_id": request_id,
+        "claims_count": 1,
+        "latest_claimer": _PAYER,
+        "settlement_tx_id": "TXC1",
+    }
+    claims = wired.claims_for(request_id)
+    assert len(claims) == 1
+    assert claims[0].claimer == _PAYER
+    assert claims[0].settlement_tx_id == "TXC1"
+    assert fulfilled == [("TXC1", "x402-features-claim")]
+
+    browse = feature_routes.x402_features_browse(_request(method="GET"))
+    assert browse["items"][0]["claims_count"] == 1
+    assert browse["items"][0]["latest_claimer"] == _PAYER
+    assert "vote" not in json.dumps(browse)
+
+    demand = json.loads(feature_routes.x402_features_demand(_request(method="GET")).description)
+    assert demand["items"][0]["claims_count"] == 1
+    assert demand["items"][0]["latest_claimer"] == _PAYER
+    assert demand["items"][0]["vote_total"] == 0
+
+
+def test_multiple_claims_are_allowed_and_the_latest_claimer_wins_the_label(
+    service: FeatureService, store: InMemoryFeatureStore
+) -> None:
+    """Claims are not exclusive: two builders and a repeat claim all count, and the newest claim names the latest claimer."""
+    request_id = _file_request(service)
+    base = datetime.now(tz=UTC) - timedelta(hours=3)
+    service.claim(request_id=request_id, claimer=_PAYER, settlement_tx_id="C1", now=base)
+    service.claim(
+        request_id=request_id,
+        claimer=_OTHER_PAYER,
+        settlement_tx_id="C2",
+        now=base + timedelta(hours=1),
+    )
+    summary = service.claim(
+        request_id=request_id,
+        claimer=_PAYER,
+        settlement_tx_id="C3",
+        now=base + timedelta(hours=2),
+    )
+
+    assert summary.count == 3
+    assert summary.latest_claimer == _PAYER
+    assert store.get_claim_summaries([request_id])[request_id].latest_claimer == _PAYER
+
+
+def test_an_unclaimed_request_reads_as_zero_claims_and_a_null_claimer(
+    wired: InMemoryFeatureStore,
+) -> None:
+    """No claims is a real answer: zero and null, never a placeholder wallet."""
+    _file_request(FeatureService(wired))
+
+    item = feature_routes.x402_features_browse(_request(method="GET"))["items"][0]
+
+    assert item["claims_count"] == 0
+    assert item["latest_claimer"] is None
+
+
+def test_unreadable_claim_summaries_do_not_take_the_free_browse_down(
+    wired: InMemoryFeatureStore,
+) -> None:
+    """A claims-table blip degrades the annotation, not the surface."""
+
+    def _boom(_ids: list[str]) -> Never:
+        raise ConnectionError("cassandra down")
+
+    _file_request(FeatureService(wired))
+    wired.get_claim_summaries = _boom  # type: ignore[method-assign]
+
+    result = feature_routes.x402_features_browse(_request(method="GET"))
+
+    assert len(result["items"]) == 1
+    assert result["items"][0]["claims_count"] == 0

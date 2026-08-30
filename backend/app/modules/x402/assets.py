@@ -102,3 +102,22 @@ USDQ = AcceptedAsset(
 # USDC first: this tuple's order is the 402 offer's order, which is what makes
 # USDC the preferred asset rather than merely a documented one.
 ACCEPTED_ASSETS: tuple[AcceptedAsset, ...] = (USDC, EURQ, USDQ)
+
+
+def asset_for_asa_id(asset_id: str | None, network: str) -> AcceptedAsset | None:
+    """The accepted asset whose ASA id on `network` is `asset_id`, or None.
+
+    `asset_id` is the settled payment's ASA id as a string, in the shape
+    x402.guard.PaymentResult.asset_id carries it. None covers both an
+    unparseable id (None, empty, non-numeric) and one that names no accepted
+    asset on this network (a retired asset, a foreign ASA, a network the
+    asset does not exist on) -- the caller cannot price either.
+    """
+    try:
+        wanted = int(str(asset_id or "").strip())
+    except (TypeError, ValueError):
+        return None
+    for asset in ACCEPTED_ASSETS:
+        if asset.asa_id_for(network) == wanted:
+            return asset
+    return None

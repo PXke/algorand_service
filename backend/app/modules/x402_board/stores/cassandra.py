@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from app.core.cassandra import get_cassandra_session
+from app.core.cassandra import execute_parallel_with_args, get_cassandra_session
 from app.core.statements import X402BoardStmts
 from app.modules.x402_board.models.domain import BOARD_PARTITION, StoredPlacement
 
@@ -93,3 +93,34 @@ class CassandraPlacementStore:
         session = get_cassandra_session()
         rows = session.execute(X402BoardStmts.LIST_RECENT, (BOARD_PARTITION, limit))
         return [_row_to_placement(row) for row in rows]
+
+    def increment_clicks(self, entry_id: str) -> None:
+        """Add one to a placement's click-through total, atomically.
+
+        A Cassandra counter column (migration 098), a true atomic add-one at
+        the replica. Counter updates are not idempotent under a client-side
+        retry, so this is issued exactly once and never wrapped in a retry --
+        same contract as the feature board's vote counter.
+        """
+        session = get_cassandra_session()
+        session.execute(X402BoardStmts.INCREMENT_CLICKS, (entry_id,))
+
+    def get_click_counts(self, entry_ids: list[str]) -> dict[str, int]:
+        """Return click totals for many placements at once, keyed by entry id.
+
+        Concurrent point reads via execute_parallel_with_args rather than one
+        `WHERE entry_id IN ?`: each id is its own partition, so an IN would
+        make one coordinator fan out and wait on every replica serially.
+        Results come back in input order, so they zip against the ids.
+        """
+        if not entry_ids:
+            return {}
+        results = execute_parallel_with_args(
+            X402BoardStmts.GET_CLICKS, [(eid,) for eid in entry_ids]
+        )
+        counts: dict[str, int] = {}
+        for entry_id, (_success, result) in zip(entry_ids, results, strict=True):
+            row = result.one()
+            if row is not None:
+                counts[entry_id] = int(row.clicks or 0)
+        return counts

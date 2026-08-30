@@ -797,8 +797,8 @@ class X402DirectoryStmts:
     UPSERT_LISTING = _Stmt(
         "INSERT INTO algorand_platform.x402_listings ("
         "url_hash, url, price, assets, description, schema_json, tags, "
-        "term_end, settlement_tx_id, created_at, payer"
-        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        "term_end, settlement_tx_id, created_at, payer, category"
+        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
     )
     # First-time listing path: a lightweight transaction, so two concurrent
     # first-time listers of the same url cannot both observe "not listed" and
@@ -808,19 +808,24 @@ class X402DirectoryStmts:
     INSERT_LISTING_IF_ABSENT = _Stmt(
         "INSERT INTO algorand_platform.x402_listings ("
         "url_hash, url, price, assets, description, schema_json, tags, "
-        "term_end, settlement_tx_id, created_at, payer"
-        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) IF NOT EXISTS"
+        "term_end, settlement_tx_id, created_at, payer, category"
+        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) IF NOT EXISTS"
     )
+    # verified_wallet / verified_at (migration 097) are read on every listing
+    # SELECT but written only by the workers probe beat (algorand_shared.
+    # x402_statements.X402ProbeStmts), never by the INSERTs above -- a
+    # relist leaves the canonical row's badge in place for the reader's
+    # verified_wallet == payer check to honour or ignore.
     GET_LISTING = _Stmt(
         "SELECT url_hash, url, price, assets, description, schema_json, tags, "
-        "term_end, settlement_tx_id, created_at, payer "
+        "term_end, settlement_tx_id, created_at, payer, verified_wallet, verified_at, category "
         "FROM algorand_platform.x402_listings WHERE url_hash = ?"
     )
     INSERT_RECENCY = _Stmt(
         "INSERT INTO algorand_platform.x402_listings_by_recency ("
         "directory, created_at, url_hash, url, price, assets, description, "
-        "schema_json, tags, term_end, settlement_tx_id, payer"
-        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        "schema_json, tags, term_end, settlement_tx_id, payer, category"
+        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
     )
     # Deletes the row a re-listing supersedes. Needs the exact created_at of
     # the previous listing (read from x402_listings first), since created_at is
@@ -837,18 +842,21 @@ class X402DirectoryStmts:
     # and the caller clamps it (no unbounded listings, CLAUDE.md section 4).
     LIST_RECENT = _Stmt(
         "SELECT url_hash, url, price, assets, description, schema_json, tags, "
-        "term_end, settlement_tx_id, created_at, payer "
+        "term_end, settlement_tx_id, created_at, payer, verified_wallet, verified_at, category "
         "FROM algorand_platform.x402_listings_by_recency "
         "WHERE directory = ? LIMIT ?"
     )
     # Tag lookup projection (migration 096): one row per (normalized tag,
     # listing), written next to the recency projection, so a tag search is a
-    # single-partition newest-first read with no ALLOW FILTERING.
+    # single-partition newest-first read with no ALLOW FILTERING. The
+    # listing's category (099) is one more row here under the reserved tag
+    # `category:<name>` (StoredListing.projection_tags), which is how
+    # GET /x402/search?category= reads with no fourth table.
     INSERT_BY_TAG = _Stmt(
         "INSERT INTO algorand_platform.x402_listings_by_tag ("
         "tag, created_at, url_hash, url, price, assets, description, "
-        "schema_json, tags, term_end, settlement_tx_id, payer"
-        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        "schema_json, tags, term_end, settlement_tx_id, payer, category"
+        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
     )
     # Same addressing rule as DELETE_RECENCY: created_at is a clustering
     # column, so the previous listing's exact created_at is needed.
@@ -858,7 +866,7 @@ class X402DirectoryStmts:
     )
     LIST_BY_TAG = _Stmt(
         "SELECT url_hash, url, price, assets, description, schema_json, tags, "
-        "term_end, settlement_tx_id, created_at, payer "
+        "term_end, settlement_tx_id, created_at, payer, verified_wallet, verified_at, category "
         "FROM algorand_platform.x402_listings_by_tag "
         "WHERE tag = ? LIMIT ?"
     )
@@ -901,6 +909,13 @@ class X402BoardStmts:
         "created_at FROM algorand_platform.x402_board_by_recency "
         "WHERE board = ? LIMIT ?"
     )
+    # Click-through counter (migration 098), its own table because a counter
+    # column cannot share a table with non-counter columns. Bumped only by
+    # the free GET /board/:entry_id/go redirect, never on the feed read.
+    INCREMENT_CLICKS = _Stmt(
+        "UPDATE algorand_platform.x402_board_clicks SET clicks = clicks + 1 WHERE entry_id = ?"
+    )
+    GET_CLICKS = _Stmt("SELECT clicks FROM algorand_platform.x402_board_clicks WHERE entry_id = ?")
 
 
 class X402FeaturesStmts:
@@ -952,6 +967,18 @@ class X402FeaturesStmts:
         "INSERT INTO algorand_platform.x402_feature_votes ("
         "request_id, voted_at, settlement_tx_id, voter"
         ") VALUES (?, ?, ?, ?)"
+    )
+    # Paid build claims (migration 098): append-only per request, full
+    # INSERT of every column. Read newest-first with a bound LIMIT so the
+    # first row is the latest claimer and the count saturates at the bound.
+    INSERT_CLAIM = _Stmt(
+        "INSERT INTO algorand_platform.x402_feature_claims ("
+        "request_id, claimed_at, claimer, settlement_tx_id"
+        ") VALUES (?, ?, ?, ?)"
+    )
+    LIST_CLAIMS = _Stmt(
+        "SELECT request_id, claimed_at, claimer, settlement_tx_id "
+        "FROM algorand_platform.x402_feature_claims WHERE request_id = ? LIMIT ?"
     )
 
 

@@ -76,7 +76,7 @@ from app.core.cassandra import get_cassandra_session
 from app.core.config import settings
 from app.core.statements import X402GradingStmts
 from app.core.store_factory import StoreFactory
-from app.modules.x402.assets import ACCEPTED_ASSETS, USDC, AcceptedAsset
+from app.modules.x402.assets import USDC, AcceptedAsset, asset_for_asa_id
 from app.modules.x402.price_oracle import get_usd_rate
 from app.modules.x402.settlement import get_settlement_store
 
@@ -97,24 +97,6 @@ def _atomic(raw: str | None) -> int:
     except ValueError:
         logger.warning("x402 grading credibility: unparseable settlement amount_atomic %r", raw)
         return 0
-
-
-def _asset_for(asset_id: str | None, network: str) -> AcceptedAsset | None:
-    """Which currently-accepted asset an on-ledger asset_id names on `network`, if any.
-
-    None covers both an unparseable asset_id and one that names no accepted
-    asset on this network (a retired asset, a foreign ASA, a data error) --
-    the caller cannot price either, so both are "cannot normalize this row",
-    not "this row is worth zero".
-    """
-    try:
-        wanted = int(str(asset_id or "").strip())
-    except ValueError:
-        return None
-    for asset in ACCEPTED_ASSETS:
-        if asset.asa_id_for(network) == wanted:
-            return asset
-    return None
 
 
 def _normalize_to_usd_atomic(asset: AcceptedAsset, raw_atomic: int) -> int | None:
@@ -162,7 +144,7 @@ def _normalized_spend_atomic(
     raw = _atomic(amount_atomic)
     if raw == 0:
         return 0
-    asset = _asset_for(asset_id, network)
+    asset = asset_for_asa_id(asset_id, network)
     if asset is None:
         logger.warning(
             "x402 grading credibility: settlement asset_id %r on network %s is not a "

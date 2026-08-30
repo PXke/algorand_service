@@ -1581,3 +1581,15 @@ ARTIFACT_SKIP_COUNT_MAX_SCORE = env_float("ARTIFACT_SKIP_COUNT_MAX_SCORE", 6.0)
 # quality-head checkpoint they used to produce had no reader, see
 # docs/modules/gatekeeper.md).
 GATEKEEPER_FACT_MIN = env_float("GATEKEEPER_FACT_MIN", 0.80)
+# x402 probe / monitoring beat (roadmap item 7, CLAUDE.md 9.1). Off by default:
+# it sends real (unpaid, SSRF-guarded) requests to third-party endpoints, so
+# it is enabled deliberately per deployment, not by shipping code. The beat
+# never pays anything; its traffic is labelled by User-Agent and excluded from
+# every ranking.
+X402_PROBE_ENABLED = env_bool("X402_PROBE_ENABLED", False)
+X402_PROBE_INTERVAL_SECONDS = env_int("X402_PROBE_INTERVAL_SECONDS", 1800)
+# Hard per-request timeout, body read cap, and how many newest listings one
+# sweep covers (the recency feed is read LIMITed, never unbounded).
+X402_PROBE_TIMEOUT_SECONDS = env_float("X402_PROBE_TIMEOUT_SECONDS", 5.0)
+X402_PROBE_MAX_BODY_BYTES = env_int("X402_PROBE_MAX_BODY_BYTES", 64 * 1024)
+X402_PROBE_MAX_LISTINGS = env_int("X402_PROBE_MAX_LISTINGS", 200)

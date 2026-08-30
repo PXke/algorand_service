@@ -18,9 +18,14 @@ BOARD_PARTITION = "default"
 class BoardError(PlatformError):
     """A board-flow error mapped to an HTTP status."""
 
-    def __init__(self, code: str, message: str) -> None:
-        """Map a board error code to its HTTP status via http_status_for_code."""
-        super().__init__(code, message, http_status=http_status_for_code(code))
+    def __init__(self, code: str, message: str, *, http_status: int | None = None) -> None:
+        """Map a board error code to its HTTP status via http_status_for_code.
+
+        `http_status` overrides the lookup for codes that are this module's
+        own (the ownership refusal on renew is a 403, and the shared code
+        table in app.core.errors is not this change's to extend).
+        """
+        super().__init__(code, message, http_status=http_status or http_status_for_code(code))
 
 
 @dataclass

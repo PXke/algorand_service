@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import hashlib
+import logging
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from urllib.parse import urlsplit, urlunsplit
 
@@ -10,6 +12,8 @@ from app.core.config import settings
 from app.modules.x402_board.models.domain import BoardError, StoredPlacement
 from app.modules.x402_board.stores.base import PlacementStore
 from app.modules.x402_board.stores.factory import get_placement_store
+
+logger = logging.getLogger(__name__)
 
 _ALLOWED_SCHEMES = ("http", "https")
 _MAX_LINK_LENGTH = 2048
@@ -133,6 +137,114 @@ class BoardService:
         )
         self.store.upsert(placement)
         return placement
+
+    def get(self, entry_id: str) -> StoredPlacement | None:
+        """Return one placement by id, expired or not, or None if there is none.
+
+        A point read, used BEFORE the renew route's payment gate so a renewal
+        of an unknown entry is a free 404 rather than a charged one. It gives
+        away nothing the feed does not already publish (entry ids are served
+        there).
+        """
+        return self.store.get(entry_id) if entry_id else None
+
+    def renew(
+        self,
+        *,
+        placement: StoredPlacement,
+        payer: str,
+        settlement_tx_id: str,
+        now: datetime | None = None,
+    ) -> StoredPlacement:
+        """Extend a placement's term by one more configured term and return it.
+
+        Only the wallet that owns the placement may renew it. The payer is
+        only known AFTER the payment has settled -- the same accepted tradeoff
+        as the directory's relist ownership check (listing_service.create):
+        a renewal by a different wallet is refused with the payment already
+        taken, and the existing tile is left untouched. That is the price of
+        not letting anyone pay the small fee to take over someone else's paid
+        tile, and it is stated in the 402 offer before the payer commits.
+        An unattributable payment (empty payer) cannot prove ownership either
+        and is refused the same way.
+
+        The new term runs from max(now, current term_end): renewing early
+        adds a full term on top of what is left, renewing after expiry starts
+        a fresh one from now, and neither shortens what was already paid for.
+        created_at is deliberately NOT re-stamped -- a renewal buys more time,
+        not a jump back to the front of the newest-first feed (that is what a
+        fresh placement of the same link buys, see create()). The settlement
+        txid is replaced with the renewing payment's so the tile traces to
+        the payment that bought its current term.
+        """
+        attributed = payer.strip()
+        if not attributed or attributed != placement.payer:
+            raise BoardError(
+                "placement_owned_by_another_payer",
+                "Only the wallet that placed this entry may renew it. Payment has "
+                "settled but the existing placement was not changed.",
+                http_status=403,
+            )
+        moment = now or datetime.now(tz=UTC)
+        base = max(int(moment.timestamp()), placement.term_end_epoch)
+        renewed = replace(
+            placement,
+            settlement_tx_id=settlement_tx_id,
+            term_end_epoch=int(
+                (
+                    datetime.fromtimestamp(base, tz=UTC)
+                    + timedelta(days=settings.x402_board_term_days)
+                ).timestamp()
+            ),
+        )
+        self.store.upsert(renewed)
+        return renewed
+
+    def click(self, entry_id: str, *, now: datetime | None = None) -> str | None:
+        """Record one click-through on a live placement and return its link.
+
+        Returns None when the entry does not exist or its term has ended: an
+        expired tile must stop being advertised, and that includes stopping
+        being a redirect target. The counter bump happens only here, never on
+        the feed read, so the feed stays a pure read.
+
+        A counter failure is logged and does NOT fail the redirect: the
+        visitor asked for the link, and a bookkeeping blip must not turn a
+        working link into a 5xx. The lost click is exactly one increment.
+        """
+        placement = self.get(entry_id)
+        if placement is None:
+            return None
+        moment = now or datetime.now(tz=UTC)
+        if placement.term_end_epoch <= int(moment.timestamp()):
+            return None
+        try:
+            self.store.increment_clicks(entry_id)
+        except Exception:
+            logger.warning(
+                "x402 board: click on %s redirected but its counter bump failed",
+                entry_id,
+                exc_info=True,
+            )
+        return placement.link
+
+    def click_counts(self, items: list[StoredPlacement]) -> dict[str, int]:
+        """Click totals for a page of placements, keyed by entry id (missing = 0).
+
+        One batched read, bounded by the page the caller already clamped. An
+        unreadable counter table degrades to "no counts" with a log line
+        rather than taking the free feed down -- the placements themselves
+        are the product, the click number is a courtesy.
+        """
+        if not items:
+            return {}
+        try:
+            return self.store.get_click_counts([item.entry_id for item in items])
+        except Exception:
+            logger.warning(
+                "x402 board: click counts unreadable; feed served without them", exc_info=True
+            )
+            return {}
 
     def list_active(self, *, limit: int, now: datetime | None = None) -> list[StoredPlacement]:
         """Return placements whose term is still running, newest-first, clamped.

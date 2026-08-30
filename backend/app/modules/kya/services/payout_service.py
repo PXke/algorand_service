@@ -16,7 +16,7 @@ from algosdk.transaction import AssetTransferTxn, wait_for_confirmation
 from algosdk.v2client.algod import AlgodClient
 
 from app.core.config import settings
-from app.modules.x402.assets import ACCEPTED_ASSETS, AcceptedAsset
+from app.modules.x402.assets import asset_for_asa_id
 
 logger = logging.getLogger(__name__)
 
@@ -44,22 +44,6 @@ def payout_share(amount_atomic: str, share: float) -> int:
     return int(int(amount_atomic) * share)
 
 
-def _asset_for(asset_id: str, network: str) -> AcceptedAsset | None:
-    """The accepted asset whose ASA id on `network` matches `asset_id`, or None if `asset_id` isn't one of the marketplace's accepted assets on this network.
-
-    `asset_id` is expected in the same shape x402.guard.PaymentResult.asset_id
-    carries it: the settled payment's ASA id, as a string.
-    """
-    try:
-        wanted = int(asset_id)
-    except (TypeError, ValueError):
-        return None
-    for asset in ACCEPTED_ASSETS:
-        if asset.asa_id_for(network) == wanted:
-            return asset
-    return None
-
-
 def send_payout(*, receiver: str, amount_atomic: str, asset_id: str) -> PayoutResult:
     """Best-effort: sign and submit an ASA transfer of a share of the settled fee to `receiver` from the dedicated payout wallet, in the SAME asset the inbound payment actually settled in (`asset_id`, the settled ASA id as a string — see x402.guard.PaymentResult.asset_id). Never raises — every failure mode (unconfigured wallet, unrecognized settled asset, algod unreachable, opt-in missing, confirm timeout) becomes PayoutResult(status="failed"/"skipped", ...)."""
     if not settings.kyc_payout_mnemonic.strip():
@@ -70,7 +54,7 @@ def send_payout(*, receiver: str, amount_atomic: str, asset_id: str) -> PayoutRe
         return PayoutResult(status="skipped", error="payout amount rounds to zero")
 
     network = settings.x402_network
-    asset = _asset_for(asset_id, network)
+    asset = asset_for_asa_id(asset_id, network)
     if asset is None:
         logger.warning(
             "kya payout skipped for %s: settled asset id %r is not an accepted asset on network %s",

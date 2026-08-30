@@ -13,11 +13,19 @@ import logging
 
 from app.core import serialization
 from app.core.config import settings
+from app.core.errors import PlatformError
 from app.core.http import Request, Response, Router
 from app.core.http_errors import json_error_from_platform, json_error_response
 from app.core.query_params import query_param
 from app.modules.x402.discovery import describe_json_endpoint
 from app.modules.x402.paid_request import mark_fulfilled, require_paid_request
+
+# The ONLY import of x402_directory anywhere in this module, and read-only:
+# the tag leaderboard needs the directory's public ListingService to say which
+# listed URLs carry a tag. It is bound into GradingService as a callable
+# below, so the service and the stores stay directory-free (a test enforces
+# that this file is the only one allowed to import it).
+from app.modules.x402_directory.services.listing_service import ListingService
 from app.modules.x402_grading.models.domain import (
     MAX_COMMENT_LENGTH,
     MAX_SCORE,
@@ -25,19 +33,35 @@ from app.modules.x402_grading.models.domain import (
     MIN_SCORE,
     GradeAggregate,
     GradedEndpoint,
+    GradeSummary,
     GradingError,
     StoredGrade,
     WeightedGrade,
 )
-from app.modules.x402_grading.services.grading_service import GradingService
-from app.modules.x402_grading.services.rate_limit import grading_index_rate_limited
+from app.modules.x402_grading.services.grading_service import (
+    TOP_CANDIDATE_LIMIT,
+    GradingService,
+)
+from app.modules.x402_grading.services.rate_limit import (
+    grading_index_rate_limited,
+    grading_summary_rate_limited,
+)
 from app.schemas import X402GradeSubmission
 
 logger = logging.getLogger(__name__)
 
-# Stores are resolved lazily on first use, so this is safe as a module-level
-# singleton shared by all three routes.
-grading_service = GradingService()
+# Stores are resolved lazily on first use, so these are safe as module-level
+# singletons shared by every route. listing_service is the directory's PUBLIC
+# service; the lookup below is the one read the tag leaderboard makes of it.
+listing_service = ListingService()
+
+
+def _listed_urls_for_tag(tag: str, limit: int) -> list[str]:
+    """TagCandidateLookup bound to the directory: live listings carrying `tag`, newest first."""
+    return [item.url for item in listing_service.search(limit=limit, tag=tag)]
+
+
+grading_service = GradingService(tag_lookup=_listed_urls_for_tag)
 
 _GRADE_EXAMPLE = {
     "url": "https://api.example.com/v1/quote",
@@ -89,6 +113,37 @@ def _indexed_json(item: GradedEndpoint) -> dict:
         "url_hash": item.url_hash,
         "url": item.url,
         "last_graded_at_epoch": item.last_graded_at_epoch,
+    }
+
+
+def _summary_json(item: GradeSummary) -> dict:
+    """Serialize the free per-URL summary. Count and recency only, never a score."""
+    return {
+        "url_hash": item.url_hash,
+        "url": item.url,
+        "count": item.count,
+        "last_graded_at_epoch": item.last_graded_at_epoch,
+        "truncated": item.truncated,
+    }
+
+
+def _leaderboard_json(rank: int, item: GradeAggregate) -> dict:
+    """Serialize one leaderboard row: the aggregate numbers without the per-grader rows.
+
+    Kept separate from _aggregate_json on purpose: the leaderboard sells a
+    ranking across endpoints, not every grader's opinion of each -- that is
+    what the per-URL score lookup sells, and bundling it here would resell
+    25 of those for one price.
+    """
+    return {
+        "rank": rank,
+        "url_hash": item.url_hash,
+        "url": item.url,
+        "count": item.count,
+        "weighted_mean": item.weighted_mean,
+        "mean": item.mean,
+        "total_weight": item.total_weight,
+        "truncated": item.truncated,
     }
 
 
@@ -339,8 +394,131 @@ def x402_grade_index(request: Request) -> Response | dict:
     return {"items": [_indexed_json(item) for item in items]}
 
 
+def x402_grade_summary(request: Request) -> Response | dict:
+    """Free: how many wallets graded one URL and when it was last graded, rate-limited per IP.
+
+    Existence-tier data only -- the count and the timestamp, never a mean or
+    a distribution -- so it gives away nothing the paid score lookup sells,
+    and lets a caller decide whether an aggregate is worth paying for. The URL
+    is normalized with the write path's rule, and an ungraded URL is a 404.
+    """
+    if grading_summary_rate_limited(request):
+        return json_error_response(
+            429, "rate_limited", "Too many grade-summary requests — please try again later"
+        )
+
+    raw_url = query_param(request.query_params.get("url", ""))
+    if not raw_url:
+        return json_error_response(400, "invalid_request", "url is required")
+    try:
+        _, hashed = grading_service.resolve_url(raw_url)
+    except GradingError as exc:
+        return json_error_from_platform(exc)
+
+    endpoint = grading_service.graded_endpoint(hashed)
+    if endpoint is None:
+        return json_error_response(404, "not_found", "Nobody has graded that endpoint yet.")
+    return _summary_json(grading_service.summary(endpoint))
+
+
+def x402_grade_top(request: Request) -> Response:
+    """Paid: the top graded endpoints among directory listings carrying one tag.
+
+    Candidates come from the directory's tag projection via its public
+    service (the directory decides what "carries this tag" means); the
+    ranking is by this module's credibility-weighted mean, ties broken by
+    grader count then url_hash so the order is stable. Bounded to
+    TOP_CANDIDATE_LIMIT listings, aggregated with ONE batched ledger lookup.
+
+    Checked for FREE before the gate: the tag is usable (400) and at least one
+    listing with that tag has a grade (404) -- the second check reads only
+    what the free index and the free directory search already give away, so
+    nobody pays for an empty leaderboard.
+    """
+    raw_tag = query_param(request.query_params.get("tag", ""))
+    if not raw_tag:
+        return json_error_response(400, "invalid_request", "tag is required")
+    try:
+        candidates = grading_service.graded_candidates_for_tag(raw_tag)
+    except PlatformError as exc:
+        # The directory's invalid-tag error (DirectoryError) or this module's
+        # own "no lookup bound" -- both PlatformErrors, both pre-gate.
+        return json_error_from_platform(exc)
+    if not candidates:
+        return json_error_response(
+            404,
+            "not_found",
+            "No graded endpoint is listed under that tag. GET /api/v1/x402/search?tag= "
+            "lists the tag's endpoints and GET /api/v1/x402/grades the graded ones, free.",
+        )
+
+    result = require_paid_request(
+        request,
+        price=settings.x402_grading_score_price,
+        resource="x402-grading-top",
+        description=(
+            f"Read the top graded x402 endpoints listed under one directory tag, ranked "
+            f"by credibility-weighted mean grade, with each endpoint's plain mean and "
+            f"grader count. Considers at most {TOP_CANDIDATE_LIMIT} listings per tag. "
+            f"Per-grader opinions are not included -- GET /api/v1/x402/grades/score "
+            f"sells those per endpoint."
+        ),
+        # GET with query-string input, so no body_type (see x402_grade_score).
+        extensions=describe_json_endpoint(
+            input={"tag": "pricing"},
+            input_schema={
+                "type": "object",
+                "properties": {"tag": {"type": "string", "maxLength": 64}},
+                "required": ["tag"],
+            },
+            output_example={
+                "tag": "pricing",
+                "items": [
+                    {
+                        "rank": 1,
+                        "url_hash": "0" * 64,
+                        "url": _GRADE_EXAMPLE["url"],
+                        "count": 3,
+                        "weighted_mean": 4.612,
+                        "mean": 4.333,
+                        "total_weight": 930000,
+                        "truncated": False,
+                    }
+                ],
+                "weights_resolved": True,
+                "candidates_considered": 1,
+                "settlement_tx_id": "...",
+            },
+        ),
+    )
+    if result.error:
+        return result.error
+
+    aggregates = grading_service.aggregate_many(candidates)
+    aggregates.sort(key=lambda item: (-item.weighted_mean, -item.count, item.url_hash))
+    mark_fulfilled(result.payment_txid, resource="x402-grading-top")
+    return Response(
+        status_code=200,
+        headers={"Content-Type": "application/json", **result.settlement_headers},
+        description=serialization.dumps(
+            {
+                "tag": raw_tag.strip(),
+                "items": [
+                    _leaderboard_json(rank, item) for rank, item in enumerate(aggregates, start=1)
+                ],
+                # One batched lookup, so one answer for the whole board.
+                "weights_resolved": all(item.weights_resolved for item in aggregates),
+                "candidates_considered": len(aggregates),
+                "settlement_tx_id": result.payment_txid or "",
+            }
+        ),
+    )
+
+
 def register_x402_grading_routes(app: Router) -> None:
-    """Register the paid grade-submission and weighted-score routes and the free index."""
+    """Register the paid routes (grade, score, tag leaderboard) and the free ones (index, summary)."""
     app.post("/api/v1/x402/grades")(x402_grade_submit)
     app.get("/api/v1/x402/grades")(x402_grade_index)
     app.get("/api/v1/x402/grades/score")(x402_grade_score)
+    app.get("/api/v1/x402/grades/summary")(x402_grade_summary)
+    app.get("/api/v1/x402/grades/top")(x402_grade_top)

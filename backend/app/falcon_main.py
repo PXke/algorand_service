@@ -32,9 +32,11 @@ from app.modules.seo.api.routes import register_seo_routes
 from app.modules.sharing.api.routes import register_sharing_routes
 from app.modules.suggestions.api.routes import register_suggestions_routes
 from app.modules.x402_board.api.routes import register_x402_board_routes
+from app.modules.x402_catalog.api.routes import register_x402_catalog_routes
 from app.modules.x402_directory.api.routes import register_x402_directory_routes
 from app.modules.x402_features.api.routes import register_x402_features_routes
 from app.modules.x402_grading.api.routes import register_x402_grading_routes
+from app.modules.x402_news.api.routes import register_x402_news_routes
 
 
 class CorsMiddleware:
@@ -162,6 +164,14 @@ def create_app() -> falcon.App:
             register_x402_features_routes(router)
         if settings.x402_grading_store != "memory":
             register_x402_grading_routes(router)
+        # The News Engine has no store of its own: it reads through the news
+        # module's store, so its durability gate is the news store's setting.
+        if settings.news_store != "memory":
+            register_x402_news_routes(router)
+        # The catalog lists whichever of the products above were registered
+        # (it re-evaluates the same gates), so it comes last and is gated
+        # only on the shared switch.
+        register_x402_catalog_routes(router)
     register_seo_routes(router)
     return app
 

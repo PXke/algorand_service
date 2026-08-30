@@ -1,5 +1,9 @@
 # x402 / GoPlausible facilitator — verified reference
 
+> Looking for the marketplace's own routes, prices and payment flow as an
+> agent would use them? See [x402-marketplace-api.md](x402-marketplace-api.md)
+> and the live catalog at `GET https://algorand-api.pxke.me/api/v1/x402`.
+
 Compiled 2026-08-29 for the Algorand Global x402 Challenge build. Every value
 here was checked against a primary source (the official rules PDF, the
 challenge's own submission-guide blog post, the `algorandfoundation/x402-demo`

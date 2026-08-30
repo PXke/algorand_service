@@ -363,6 +363,36 @@ class Settings(msgspec.Struct, kw_only=True):
     # raising this.
     x402_grading_spend_scan_limit: int = 500
 
+    # ── x402 News Engine pay-per-call (GET /x402/news free, GET
+    # /x402/news/articles/:id paid, GET /x402/news/search paid). See
+    # app/modules/x402_news/. Roadmap item 1: the newspaper's own live
+    # articles resold per call. No store setting of its own -- the module
+    # reads through the news module's store, so route registration is gated
+    # on news_store != "memory" instead.
+    # Fee to read one article in full. Money strings, parsed by the tagged
+    # money parser in modules/x402/client.py (which is also what attaches the
+    # challenge tag). The cheapest paid read in the marketplace: one article
+    # is one datum, and the article already exists (no per-call cost to us).
+    x402_news_article_price: str = "$0.01"
+    # Fee for one ranked search. Priced above a single article read because a
+    # search runs a Typesense query per call and returns many hits' metadata.
+    x402_news_search_price: str = "$0.02"
+    # Free-endpoint abuse gate (CLAUDE.md section 9: rate limit every free
+    # endpoint per IP), counted under its own key prefix, separate from the
+    # other x402 products' budgets. Only the free headline list is counted.
+    x402_news_rate_limit_per_hour: int = 120
+    # Hard cap on a headline page and on paid search hits -- no unbounded
+    # listings (CLAUDE.md section 4).
+    x402_news_max_results: int = 50
+    # ── end x402 News Engine ──
+
+    # x402 catalog (GET /x402, free): the machine-readable index of every
+    # x402 product route currently registered. See app/modules/x402_catalog/.
+    # No store and no price of its own -- it only reads the other products'
+    # settings. Free-endpoint abuse gate (CLAUDE.md section 9), counted under
+    # its own key prefix, separate from the products' own budgets.
+    x402_catalog_rate_limit_per_hour: int = 120
+
     # Replay window for an already-spent payment header. Must be >= 2x the
     # facilitator's own HTTP timeout (FacilitatorConfig.timeout defaults to
     # 30s in x402-avm==2.0.2) so a header can never be re-presented while the

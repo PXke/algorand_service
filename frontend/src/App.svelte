@@ -16,6 +16,9 @@
     ecosystem: 'ecosystem',
   }
 
+  type X402Tab = 'directory' | 'board' | 'requests' | 'grades'
+  const X402_TABS: readonly X402Tab[] = ['directory', 'board', 'requests', 'grades']
+
   type View =
     | { name: 'home' }
     | { name: 'news' }
@@ -29,6 +32,7 @@
     | { name: 'about' }
     | { name: 'contact' }
     | { name: 'suggestions' }
+    | { name: 'x402'; tab: X402Tab }
     | { name: 'admin' }
     | { name: 'shared'; token: string }
     | { name: 'notfound' }
@@ -45,6 +49,7 @@
     | 'about'
     | 'contact'
     | 'suggestions'
+    | 'x402'
     | 'admin'
     | 'shared'
 
@@ -60,6 +65,7 @@
     about: () => import('./routes/About.svelte'),
     contact: () => import('./routes/Contact.svelte'),
     suggestions: () => import('./routes/Suggestions.svelte'),
+    x402: () => import('./routes/X402.svelte'),
     admin: () => import('./routes/admin/AdminHub.svelte'),
     shared: () => import('./routes/SharedArticle.svelte'),
   }
@@ -104,6 +110,14 @@
         return { name: 'home' }
       }
       return { name: 'suggestions' }
+    }
+    if (path === '/x402') return { name: 'x402', tab: 'directory' }
+    const x402 = matchPath('/x402/:tab', path)
+    if (x402) {
+      const tab = X402_TABS.find((t) => t === x402.tab.toLowerCase())
+      if (tab) return { name: 'x402', tab }
+      queueMicrotask(() => navigate('/x402', true))
+      return { name: 'x402', tab: 'directory' }
     }
     if (path === '/admin' || path === '/sources') {
       if (path === '/sources') queueMicrotask(() => navigate('/admin', true))
@@ -189,6 +203,9 @@
         {@const C = lazy.shared!}
         <C token={view.token} />
       {/key}
+    {:else if view.name === 'x402'}
+      {@const C = lazy.x402!}
+      <C tab={view.tab} />
     {:else}
       {@const C = lazy[view.name]!}
       <C />

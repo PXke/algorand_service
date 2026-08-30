@@ -4,7 +4,12 @@ from __future__ import annotations
 
 from typing import Protocol
 
-from app.modules.x402_features.models.domain import StoredFeatureRequest, StoredVote
+from app.modules.x402_features.models.domain import (
+    ClaimSummary,
+    StoredClaim,
+    StoredFeatureRequest,
+    StoredVote,
+)
 
 
 class FeatureStore(Protocol):
@@ -54,5 +59,19 @@ class FeatureStore(Protocol):
 
         Separate from increment_vote_total so the service, not each backend,
         owns the order the two happen in and what a failure of each means.
+        """
+        ...
+
+    def append_claim(self, claim: StoredClaim) -> None:
+        """Append one paid build claim to a request. Never replaces an earlier one."""
+        ...
+
+    def get_claim_summaries(self, request_ids: list[str]) -> dict[str, ClaimSummary]:
+        """Return (count, latest claimer) for many requests at once, keyed by request id.
+
+        Batched for the same reason get_vote_totals is: both read surfaces
+        need it for a whole page. Each request's claims are read newest-first
+        and LIMITed to CLAIMS_SCAN_LIMIT, so `count` saturates there. Ids with
+        no claims may be omitted; the caller treats a missing id as none.
         """
         ...

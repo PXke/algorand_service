@@ -4,9 +4,16 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
+from algorand_shared.x402_statements import X402ProbeStmts
+
 from app.core.cassandra import get_cassandra_session
 from app.core.statements import X402DirectoryStmts
-from app.modules.x402_directory.models.domain import DIRECTORY_PARTITION, StoredListing
+from app.modules.x402_directory.models.domain import (
+    DEFAULT_CATEGORY,
+    DIRECTORY_PARTITION,
+    StoredListing,
+    StoredProbe,
+)
 
 
 def _dt(epoch: int) -> datetime:
@@ -30,6 +37,24 @@ def _row_to_listing(row: object) -> StoredListing:
         assets=sorted(row.assets or []),
         tags=sorted(row.tags or []),
         payer=getattr(row, "payer", None) or "",
+        verified_wallet=getattr(row, "verified_wallet", None) or "",
+        verified_at_epoch=_epoch(getattr(row, "verified_at", None)),
+        # Pre-099 rows read back null; they are DEFAULT_CATEGORY by definition.
+        category=getattr(row, "category", None) or DEFAULT_CATEGORY,
+    )
+
+
+def _row_to_probe(row: object) -> StoredProbe:
+    return StoredProbe(
+        url_hash=row.url_hash,
+        url=row.url or "",
+        probed_at_epoch=_epoch(row.probed_at),
+        reachable=bool(row.reachable),
+        http_status=int(row.http_status or 0),
+        latency_ms=int(row.latency_ms or 0),
+        served_valid_402=bool(row.served_valid_402),
+        payto_seen=row.payto_seen or "",
+        error=row.error or "",
     )
 
 
@@ -47,6 +72,7 @@ def _canonical_params(item: StoredListing) -> tuple:
         item.settlement_tx_id,
         _dt(item.created_at_epoch),
         item.payer,
+        item.category,
     )
 
 
@@ -65,6 +91,7 @@ def _projection_params(partition: str, item: StoredListing) -> tuple:
         _dt(item.term_end_epoch),
         item.settlement_tx_id,
         item.payer,
+        item.category,
     )
 
 
@@ -72,7 +99,8 @@ class CassandraListingStore:
     """Cassandra-backed x402 directory listing storage.
 
     Three tables: the canonical x402_listings row, the newest-first recency
-    projection (090) and the per-tag projection (096). Every write path goes
+    projection (090) and the per-tag projection (096), which also carries one
+    reserved `category:<name>` row per listing (099). Every write path goes
     canonical row first, projections second (store before mark): if a
     projection write then fails, the listing exists and is missing only from a
     feed, which a re-list repairs. The reverse order could leave a feed entry
@@ -118,7 +146,12 @@ class CassandraListingStore:
         it in place: for the recency feed that is when created_at moved; for
         the tag feed it is when created_at moved OR the tag was dropped from
         the listing. Deleting a row the INSERT is about to rewrite at the
-        same key would be a tombstone racing its own replacement.
+        same key would be a tombstone racing its own replacement. The tag
+        feed's key set is StoredListing.projection_tags(), real tags plus the
+        reserved category row, so a category change drops the old category
+        row exactly like a dropped tag. A renewal (same created_at, new
+        term_end) rewrites every row in place, which is how the projections
+        pick up the new term_end.
         """
         session = get_cassandra_session()
         moved = previous is not None and previous.created_at_epoch != item.created_at_epoch
@@ -131,14 +164,14 @@ class CassandraListingStore:
             X402DirectoryStmts.INSERT_RECENCY, _projection_params(DIRECTORY_PARTITION, item)
         )
         if previous is not None:
-            new_tags = set(item.tags)
-            for tag in previous.tags:
+            new_tags = set(item.projection_tags())
+            for tag in previous.projection_tags():
                 if moved or tag not in new_tags:
                     session.execute(
                         X402DirectoryStmts.DELETE_BY_TAG,
                         (tag, _dt(previous.created_at_epoch), item.url_hash),
                     )
-        for tag in item.tags:
+        for tag in item.projection_tags():
             session.execute(X402DirectoryStmts.INSERT_BY_TAG, _projection_params(tag, item))
 
     def get(self, url_hash: str) -> StoredListing | None:
@@ -179,7 +212,13 @@ class CassandraListingStore:
         session.execute(
             X402DirectoryStmts.DELETE_RECENCY, (DIRECTORY_PARTITION, created_at, url_hash)
         )
-        for tag in existing.tags:
+        for tag in existing.projection_tags():
             session.execute(X402DirectoryStmts.DELETE_BY_TAG, (tag, created_at, url_hash))
         session.execute(X402DirectoryStmts.DELETE_LISTING, (url_hash,))
         return True
+
+    def latest_probe(self, url_hash: str) -> StoredProbe | None:
+        """Point read of x402_probe_latest (written by the workers probe beat); None if never probed."""
+        session = get_cassandra_session()
+        row = session.execute(X402ProbeStmts.GET_LATEST, (url_hash,)).one()
+        return None if row is None else _row_to_probe(row)

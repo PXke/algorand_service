@@ -28,3 +28,6 @@ workers/scripts/eval_translate_output/
 # Prod DB backups pulled locally (local, not for commit)
 workers/scratch/article_table_backup/
 workers/scratch/full_keyspace_backup/
+
+# x402 probe payer wallet (mnemonic) -- never commit
+backend/scripts/probe_wallet.json

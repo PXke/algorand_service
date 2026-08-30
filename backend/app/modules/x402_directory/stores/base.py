@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Protocol
 
-from app.modules.x402_directory.models.domain import StoredListing
+from app.modules.x402_directory.models.domain import StoredListing, StoredProbe
 
 
 class ListingStore(Protocol):
@@ -43,4 +43,8 @@ class ListingStore(Protocol):
 
     def delete(self, url_hash: str) -> bool:
         """Remove the listing for a URL hash, projections included. False if it did not exist."""
+        ...
+
+    def latest_probe(self, url_hash: str) -> StoredProbe | None:
+        """Return the newest probe result for a URL hash, or None if it was never probed."""
         ...

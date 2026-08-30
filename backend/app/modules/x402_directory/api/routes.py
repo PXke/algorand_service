@@ -1,4 +1,4 @@
-"""HTTP routes for the x402 endpoint directory: paid listing, free search.
+"""HTTP routes for the x402 endpoint directory: paid listing and renewal, free search, detail and probe status, admin delist.
 
 Route paths are /api/v1/x402/*, not the bare /x402/* the build plan names.
 nginx only proxies `location ^~ /api/` to this backend on the API host and
@@ -17,19 +17,27 @@ from app.core.query_params import query_param
 from app.modules.admin.auth import require_admin_wallet
 from app.modules.x402.discovery import describe_json_endpoint
 from app.modules.x402.paid_request import mark_fulfilled, require_paid_request
-from app.modules.x402_directory.models.domain import DirectoryError, StoredListing
+from app.modules.x402_directory.models.domain import (
+    CATEGORY_TAG_PREFIX,
+    LISTING_CATEGORIES,
+    DirectoryError,
+    StoredListing,
+    StoredProbe,
+)
 from app.modules.x402_directory.services.listing_service import (
     MAX_SCHEMA_JSON_BYTES,
     MAX_TAG_LENGTH,
     ListingService,
     encode_schema,
     normalize_url,
+    validate_category,
+    validate_tags,
 )
 from app.modules.x402_directory.services.rate_limit import search_rate_limited
-from app.schemas import X402ListingRequest
+from app.schemas import X402ListingRenewRequest, X402ListingRequest
 
 # Store is resolved lazily on first use, so this is safe as a module-level
-# singleton shared by both routes.
+# singleton shared by every route.
 listing_service = ListingService()
 
 _LISTING_EXAMPLE = {
@@ -38,6 +46,20 @@ _LISTING_EXAMPLE = {
     "description": "Live FX quote, one currency pair per call.",
     "assets": ["USDC"],
     "tags": ["fx", "market-data"],
+    "category": "finance",
+}
+
+# What a listing looks like on the wire, for the discovery output examples
+# of every route that returns one.
+_LISTING_OUTPUT_EXAMPLE = {
+    **_LISTING_EXAMPLE,
+    "schema": None,
+    "term_end_epoch": 0,
+    "created_at_epoch": 0,
+    "settlement_tx_id": "...",
+    "payer": "...",
+    "verified_wallet": "",
+    "verified_at_epoch": 0,
 }
 
 
@@ -49,11 +71,29 @@ def _listing_json(item: StoredListing) -> dict:
         "description": item.description,
         "assets": item.assets,
         "tags": item.tags,
+        "category": item.category,
         "schema": serialization.decode(item.schema_json, dict) if item.schema_json else None,
         "term_end_epoch": item.term_end_epoch,
         "created_at_epoch": item.created_at_epoch,
         "settlement_tx_id": item.settlement_tx_id,
         "payer": item.payer,
+        # Badge (migration 097): served only while it still belongs to the
+        # current payer, see StoredListing.is_verified.
+        "verified_wallet": item.verified_wallet if item.is_verified else "",
+        "verified_at_epoch": item.verified_at_epoch if item.is_verified else 0,
+    }
+
+
+def _probe_json(probe: StoredProbe) -> dict:
+    """Serialize the newest probe of one listing for the wire."""
+    return {
+        "probed_at_epoch": probe.probed_at_epoch,
+        "reachable": probe.reachable,
+        "http_status": probe.http_status,
+        "latency_ms": probe.latency_ms,
+        "served_valid_402": probe.served_valid_402,
+        "payto_seen": probe.payto_seen,
+        "error": probe.error,
     }
 
 
@@ -63,9 +103,10 @@ def x402_list(request: Request) -> Response:
     Everything checkable without knowing who is paying is checked BEFORE the
     payment gate, so a caller is never charged for a request that was doomed:
     the body is decoded and its fields range-checked, the URL is normalized
-    (scheme/host validity), and the request schema is encoded and size-checked.
-    All three are 400s nobody pays for. The gate runs only once the request is
-    known to be storable.
+    (scheme/host validity), the request schema is encoded and size-checked,
+    the category is checked against the fixed enum, and the tags are checked
+    for the reserved `category:` namespace. All are 400s nobody pays for. The
+    gate runs only once the request is known to be storable.
 
     After the gate, the one remaining way to fail is the ownership check in
     listing_service.create() — a relist attempt against a URL another payer
@@ -82,6 +123,8 @@ def x402_list(request: Request) -> Response:
     try:
         normalized_url = normalize_url(payload.url)
         schema_json = encode_schema(payload.schema)
+        category = validate_category(payload.category)
+        tags = validate_tags(payload.tags)
     except DirectoryError as exc:
         return json_error_from_platform(exc)
 
@@ -95,10 +138,15 @@ def x402_list(request: Request) -> Response:
         description=(
             f"List one x402 endpoint in the public PXke x402 directory for {term_days} days. "
             f"Discoverable immediately at GET /api/v1/x402/search (free; optional "
-            f"`?tag=<tag>` filters to listings carrying that tag, `?limit=` caps results), "
-            f"and removed from it when the {term_days} days are up. `tags` are stored "
-            f"trimmed and lowercased and are what `?tag=` matches on. Optional `schema` "
-            f"must serialize to at most {MAX_SCHEMA_JSON_BYTES} bytes."
+            f"`?tag=<tag>` filters to listings carrying that tag, `?category=<category>` "
+            f"to listings in that category, `?limit=` caps results) and at "
+            f"GET /api/v1/x402/listings?url=<url> (free; the full listing plus its latest "
+            f"probe), and removed from both when the {term_days} days are up "
+            f"(extend with POST /api/v1/x402/list/renew). `tags` are stored trimmed and "
+            f"lowercased and are what `?tag=` matches on; tags starting with "
+            f"`{CATEGORY_TAG_PREFIX}` are reserved. Optional `category` is one of "
+            f"{', '.join(LISTING_CATEGORIES)} (default other). Optional `schema` must "
+            f"serialize to at most {MAX_SCHEMA_JSON_BYTES} bytes."
         ),
         extensions=describe_json_endpoint(
             # POST carries its input as a JSON body, so this must declare a
@@ -124,7 +172,17 @@ def x402_list(request: Request) -> Response:
                         "items": {"type": "string", "maxLength": MAX_TAG_LENGTH},
                         "description": (
                             "Stored trimmed and lowercased; searchable via "
-                            "GET /api/v1/x402/search?tag=<tag>."
+                            f"GET /api/v1/x402/search?tag=<tag>. Tags starting with "
+                            f"`{CATEGORY_TAG_PREFIX}` are reserved and rejected."
+                        ),
+                    },
+                    "category": {
+                        "type": "string",
+                        "enum": list(LISTING_CATEGORIES),
+                        "default": "other",
+                        "description": (
+                            "Fixed facet; searchable via "
+                            "GET /api/v1/x402/search?category=<category>."
                         ),
                     },
                     # JSON Schema has no serialized-byte-size keyword, so the
@@ -135,7 +193,7 @@ def x402_list(request: Request) -> Response:
                 "required": ["url", "price"],
             },
             output_example={
-                "listing": {**_LISTING_EXAMPLE, "term_end_epoch": 0},
+                "listing": _LISTING_OUTPUT_EXAMPLE,
                 "settlement_tx_id": "...",
                 "term_days": term_days,
             },
@@ -150,18 +208,19 @@ def x402_list(request: Request) -> Response:
             price=payload.price,
             description=payload.description,
             assets=payload.assets,
-            tags=payload.tags,
+            tags=tags,
             schema_json=schema_json,
             settlement_tx_id=result.payment_txid or "",
             payer=result.payer or "",
+            category=category,
         )
     except DirectoryError as exc:
         # Reachable now (migration 094): a relist attempt by a different
         # payer than the current owner is refused here, payment already
         # taken — see listing_service.create()'s ownership check. That check
-        # is the ONLY reachable raiser on this side of the gate: the URL and
-        # the schema were both validated above, before it. A new validation
-        # rule belongs there too, never here.
+        # is the ONLY reachable raiser on this side of the gate: the URL,
+        # the schema, the category and the tags were all validated above,
+        # before it. A new validation rule belongs there too, never here.
         return json_error_from_platform(exc)
 
     mark_fulfilled(result.payment_txid, resource="x402-directory-list")
@@ -178,13 +237,101 @@ def x402_list(request: Request) -> Response:
     )
 
 
+def x402_renew(request: Request) -> Response:
+    """Paid: extend an existing listing's term by one more term, at the listing price.
+
+    Decoded, normalized and looked up BEFORE the payment gate: a malformed
+    body, an invalid url and a url that is not listed are all free 400s/404s.
+    Ownership cannot be checked before the gate -- the payer is only known
+    once the payment has settled -- so a renewal of a live listing by a
+    wallet other than its owner is refused with the payment already taken and
+    the listing untouched (403, receipt headers served). Same accepted
+    tradeoff as x402_list's relist check and the board's renew, and the 402
+    offer says so before the payer commits. See listing_service.renew() for
+    the term arithmetic and what a renewal does and does not change.
+    """
+    try:
+        payload = serialization.decode(request.body, X402ListingRenewRequest)
+    except serialization.DecodeError as exc:
+        return json_error_response(400, "invalid_request", str(exc))
+    try:
+        normalized_url = normalize_url(payload.url)
+    except DirectoryError as exc:
+        return json_error_from_platform(exc)
+    if listing_service.probe_status(normalized_url) is None:
+        return json_error_response(404, "not_found", "No listing for that url")
+
+    term_days = settings.x402_listing_term_days
+    result = require_paid_request(
+        request,
+        price=settings.x402_listing_price,
+        resource="x402-directory-renew",
+        description=(
+            f"Extend an existing PXke x402 directory listing by {term_days} more days, "
+            f"from the later of now and its current term end; nothing else about the "
+            f"listing changes. Only the wallet that listed the url may renew it while "
+            f"its term is running: a payment from any other wallet settles but is "
+            f"refused and changes nothing. An expired or unowned listing may be "
+            f"renewed, and thereby claimed, by any wallet."
+        ),
+        extensions=describe_json_endpoint(
+            body_type="json",
+            input={"url": _LISTING_EXAMPLE["url"]},
+            input_schema={
+                "type": "object",
+                "properties": {"url": {"type": "string", "maxLength": 2048}},
+                "required": ["url"],
+            },
+            output_example={
+                "listing": _LISTING_OUTPUT_EXAMPLE,
+                "settlement_tx_id": "...",
+                "term_days": term_days,
+            },
+        ),
+    )
+    if result.error:
+        return result.error
+
+    try:
+        renewed = listing_service.renew(
+            normalized_url=normalized_url,
+            payer=result.payer or "",
+            settlement_tx_id=result.payment_txid or "",
+        )
+    except DirectoryError as exc:
+        # The ownership refusal (or, only if the listing was admin-deleted
+        # between the pre-gate lookup and now, not_found): payment taken,
+        # nothing changed. The settlement headers are still served so the
+        # payer has their receipt.
+        return Response(
+            status_code=exc.http_status,
+            headers={"Content-Type": "application/json", **result.settlement_headers},
+            description=serialization.dumps({"error": {"code": exc.code, "message": exc.message}}),
+        )
+
+    mark_fulfilled(result.payment_txid, resource="x402-directory-renew")
+    return Response(
+        status_code=200,
+        headers={"Content-Type": "application/json", **result.settlement_headers},
+        description=serialization.dumps(
+            {
+                "listing": _listing_json(renewed),
+                "settlement_tx_id": result.payment_txid or "",
+                "term_days": term_days,
+            }
+        ),
+    )
+
+
 def x402_search(request: Request) -> Response | dict:
     """Free: the directory's unexpired listings, newest first, rate-limited per IP.
 
-    Query params: `limit` (integer, clamped to settings.x402_search_max_results)
-    and optional `tag` (1-MAX_TAG_LENGTH characters, matched trimmed and
-    lowercased against the tags a listing was stored with). Listings whose
-    paid term has ended are excluded — see listing_service.search().
+    Query params: `limit` (integer, clamped to settings.x402_search_max_results),
+    optional `tag` (1-MAX_TAG_LENGTH characters, matched trimmed and
+    lowercased against the tags a listing was stored with) and optional
+    `category` (one of LISTING_CATEGORIES); `tag` and `category` together are
+    a 400. Listings whose paid term has ended are excluded — see
+    listing_service.search().
     """
     if search_rate_limited(request):
         return json_error_response(
@@ -198,11 +345,76 @@ def x402_search(request: Request) -> Response | dict:
         return json_error_response(400, "invalid_request", "limit must be an integer")
 
     raw_tag = query_param(request.query_params.get("tag", ""))
+    raw_category = query_param(request.query_params.get("category", ""))
     try:
-        items = listing_service.search(limit=limit, tag=raw_tag or None)
+        items = listing_service.search(
+            limit=limit, tag=raw_tag or None, category=raw_category or None
+        )
     except DirectoryError as exc:
         return json_error_from_platform(exc)
     return {"items": [_listing_json(item) for item in items]}
+
+
+def x402_listing_detail(request: Request) -> Response | dict:
+    """Free: everything the directory holds about one listed URL, rate-limited per IP.
+
+    The listing in the same shape search serves it, plus `probe` (the newest
+    unpaid probe result, null before the first probe). Shares the search
+    route's per-IP hourly budget: same free read path over the same
+    directory. A url that is not listed, or whose paid term has ended, is a
+    404 -- this is the per-url twin of search, which has stopped serving it.
+    """
+    if search_rate_limited(request):
+        return json_error_response(
+            429, "rate_limited", "Too many listing requests — please try again later"
+        )
+    raw_url = query_param(request.query_params.get("url", ""))
+    if not raw_url:
+        return json_error_response(400, "invalid_request", "url is required")
+    try:
+        normalized_url = normalize_url(raw_url)
+    except DirectoryError as exc:
+        return json_error_from_platform(exc)
+
+    found = listing_service.detail(normalized_url)
+    if found is None:
+        return json_error_response(404, "not_found", "No live listing for that url")
+    listing, probe = found
+    return {
+        "listing": _listing_json(listing),
+        "probe": _probe_json(probe) if probe is not None else None,
+    }
+
+
+def x402_probe_status(request: Request) -> Response | dict:
+    """Free: the newest unpaid probe result for one listed URL, rate-limited per IP.
+
+    Shares the search route's per-IP hourly budget (search_rate_limited):
+    it is the same free read path over the same directory. `probe` is null
+    for a listing the beat has not reached yet; an unlisted URL is a 404.
+    """
+    if search_rate_limited(request):
+        return json_error_response(
+            429, "rate_limited", "Too many probe requests — please try again later"
+        )
+    raw_url = query_param(request.query_params.get("url", ""))
+    if not raw_url:
+        return json_error_response(400, "invalid_request", "url is required")
+    try:
+        normalized_url = normalize_url(raw_url)
+    except DirectoryError as exc:
+        return json_error_from_platform(exc)
+
+    found = listing_service.probe_status(normalized_url)
+    if found is None:
+        return json_error_response(404, "not_found", "No listing for that url")
+    listing, probe = found
+    return {
+        "url": listing.url,
+        "verified_wallet": listing.verified_wallet if listing.is_verified else "",
+        "verified_at_epoch": listing.verified_at_epoch if listing.is_verified else 0,
+        "probe": _probe_json(probe) if probe is not None else None,
+    }
 
 
 def x402_admin_delete_listing(request: Request) -> Response | dict:
@@ -234,7 +446,10 @@ def x402_admin_delete_listing(request: Request) -> Response | dict:
 
 
 def register_x402_directory_routes(app: Router) -> None:
-    """Register the paid directory-listing route, the free search route, and the admin delist route."""
+    """Register the paid list and renew routes, the free search, detail and probe-status routes, and the admin delist route."""
     app.post("/api/v1/x402/list")(x402_list)
+    app.post("/api/v1/x402/list/renew")(x402_renew)
     app.get("/api/v1/x402/search")(x402_search)
+    app.get("/api/v1/x402/listings")(x402_listing_detail)
+    app.get("/api/v1/x402/directory/probe")(x402_probe_status)
     app.delete("/api/v1/admin/x402/listings")(x402_admin_delete_listing)

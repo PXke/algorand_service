@@ -4,7 +4,13 @@ from __future__ import annotations
 
 import threading
 
-from app.modules.x402_features.models.domain import StoredFeatureRequest, StoredVote
+from app.modules.x402_features.models.domain import (
+    CLAIMS_SCAN_LIMIT,
+    ClaimSummary,
+    StoredClaim,
+    StoredFeatureRequest,
+    StoredVote,
+)
 
 
 class InMemoryFeatureStore:
@@ -15,6 +21,7 @@ class InMemoryFeatureStore:
         self._items: dict[str, StoredFeatureRequest] = {}
         self._totals: dict[str, int] = {}
         self._votes: dict[str, list[StoredVote]] = {}
+        self._claims: dict[str, list[StoredClaim]] = {}
         # Guards the vote total specifically. `self._totals[id] += 1` is a
         # read-modify-write, and CPython's bytecode for it is interruptible
         # between the read and the write -- two threads voting on the same
@@ -62,6 +69,34 @@ class InMemoryFeatureStore:
         """Append one vote to a request's audit log."""
         with self._lock:
             self._votes.setdefault(vote.request_id, []).append(vote)
+
+    def append_claim(self, claim: StoredClaim) -> None:
+        """Append one paid build claim to a request."""
+        with self._lock:
+            self._claims.setdefault(claim.request_id, []).append(claim)
+
+    def get_claim_summaries(self, request_ids: list[str]) -> dict[str, ClaimSummary]:
+        """Return (count, latest claimer) per request, newest-first and bounded like Cassandra.
+
+        Sorted (claimed_at DESC, claimer ASC) and cut at CLAIMS_SCAN_LIMIT to
+        match the Cassandra table's clustering order and read bound, so tests
+        see the same saturation as production.
+        """
+        with self._lock:
+            summaries: dict[str, ClaimSummary] = {}
+            for rid in request_ids:
+                claims = self._claims.get(rid)
+                if not claims:
+                    continue
+                ordered = sorted(claims, key=lambda c: (-c.claimed_at_epoch, c.claimer))
+                ordered = ordered[:CLAIMS_SCAN_LIMIT]
+                summaries[rid] = ClaimSummary(count=len(ordered), latest_claimer=ordered[0].claimer)
+            return summaries
+
+    def claims_for(self, request_id: str) -> list[StoredClaim]:
+        """Return a request's claims. Test/dev helper -- not on the Protocol."""
+        with self._lock:
+            return list(self._claims.get(request_id, []))
 
     def votes_for(self, request_id: str) -> list[StoredVote]:
         """Return a request's audit log. Test/dev helper -- not on the Protocol.

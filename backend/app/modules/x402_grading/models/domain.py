@@ -2,8 +2,10 @@
 
 A grade is about an arbitrary URL the grader names. Nothing here refers to a
 directory listing: an endpoint does not have to be listed in
-modules/x402_directory (or anywhere else) to be graded, so this module has no
-dependency on that one at all.
+modules/x402_directory (or anywhere else) to be graded. The only place this
+module touches the directory is the paid tag leaderboard route
+(api/routes.py), which READS the directory's public ListingService to pick
+its candidate URLs -- storage, keys and the write path stay independent.
 
 The settlement ledger is shared infrastructure and lives in
 modules/x402/settlement.py. This module only READS it, and only to ask how much
@@ -87,6 +89,22 @@ class GradedEndpoint:
     url_hash: str
     url: str
     last_graded_at_epoch: int
+
+
+@dataclass
+class GradeSummary:
+    """The FREE per-URL summary: how many wallets graded it and when it was last graded.
+
+    Existence-tier only, like GradedEndpoint: no mean, no distribution, no
+    grades. `count` is over the same bounded scan the paid aggregate uses and
+    `truncated` says when it hit that bound.
+    """
+
+    url_hash: str
+    url: str
+    count: int
+    last_graded_at_epoch: int
+    truncated: bool = False
 
 
 @dataclass

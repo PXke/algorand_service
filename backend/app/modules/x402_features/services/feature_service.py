@@ -19,8 +19,10 @@ from datetime import UTC, datetime
 
 from app.core.config import settings
 from app.modules.x402_features.models.domain import (
+    ClaimSummary,
     FeatureError,
     RankedFeatureRequest,
+    StoredClaim,
     StoredFeatureRequest,
     StoredVote,
 )
@@ -172,6 +174,57 @@ class FeatureService:
                 exc_info=True,
             )
         return self.store.get_vote_total(request_id)
+
+    def claim(
+        self,
+        *,
+        request_id: str,
+        claimer: str,
+        settlement_tx_id: str,
+        now: datetime | None = None,
+    ) -> ClaimSummary:
+        """Record one paid "I'm building this" claim and return the request's claim summary.
+
+        Multiple claims are allowed, from different wallets and from the
+        same one: the payment makes the declaration costly, which is the
+        whole signal, and an exclusive lock would let anyone pay once to
+        squat a request nobody else may then declare for. The claim is stored
+        under the settled payer -- an unattributable payment is stored with
+        an empty claimer rather than dropped, because the payment happened
+        and the row is the record that it bought something.
+
+        The returned summary is a read-back and may lag a claim that settled
+        concurrently; it is a courtesy echo for the payer.
+        """
+        moment = now or datetime.now(tz=UTC)
+        self.store.append_claim(
+            StoredClaim(
+                request_id=request_id,
+                claimer=claimer.strip(),
+                settlement_tx_id=settlement_tx_id,
+                claimed_at_epoch=int(moment.timestamp()),
+            )
+        )
+        return self.store.get_claim_summaries([request_id]).get(request_id, ClaimSummary())
+
+    def claim_summaries(self, items: list[StoredFeatureRequest]) -> dict[str, ClaimSummary]:
+        """Claim summaries for a page of requests, keyed by request id (missing = none).
+
+        One batched, bounded read (see FeatureStore.get_claim_summaries). An
+        unreadable claims table degrades to "no claims shown" with a log
+        line rather than taking the free browse down: the requests are the
+        product on that surface and the claims are an annotation.
+        """
+        if not items:
+            return {}
+        try:
+            return self.store.get_claim_summaries([item.request_id for item in items])
+        except Exception:
+            logger.warning(
+                "x402 features: claim summaries unreadable; page served without them",
+                exc_info=True,
+            )
+            return {}
 
     def list_recent(self, *, limit: int) -> list[StoredFeatureRequest]:
         """Return requests newest-first, clamped to the configured maximum.

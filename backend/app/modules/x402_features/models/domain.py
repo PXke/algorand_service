@@ -14,6 +14,13 @@ from app.core.errors import PlatformError, http_status_for_code
 # 092 for why the whole board lives in one partition and when to shard it.
 FEATURES_PARTITION = "default"
 
+# Bound on the per-request claims read behind claims_count (migration 098).
+# A module constant rather than a setting (config.py is outside this change):
+# claims are rare relative to votes -- a builder declares once, not per unit
+# of demand -- so a count that saturates at 100 loses nothing real, and it
+# keeps the batched read on the FREE browse surface strictly bounded.
+CLAIMS_SCAN_LIMIT = 100
+
 
 class FeatureError(PlatformError):
     """A feature-board error mapped to an HTTP status."""
@@ -61,6 +68,35 @@ class StoredVote:
     voter: str
     settlement_tx_id: str
     voted_at_epoch: int
+
+
+@dataclass
+class StoredClaim:
+    """One paid "I'm building this" declaration against a request (migration 098).
+
+    `claimer` is the paying wallet from the settled payment, never anything
+    the request body claimed. Multiple claims per request, and per wallet,
+    are allowed: a claim is a public statement of intent that the payment
+    makes costly, not an exclusive lock on the request -- two builders may
+    both be building it, and a builder may re-declare after going quiet.
+    """
+
+    request_id: str
+    claimer: str
+    settlement_tx_id: str
+    claimed_at_epoch: int
+
+
+@dataclass
+class ClaimSummary:
+    """What both read surfaces show about a request's claims: how many, and who last claimed.
+
+    `count` is over a bounded partition read (see FeatureStore.get_claim_summaries),
+    so it saturates at that bound rather than being unbounded.
+    """
+
+    count: int = 0
+    latest_claimer: str = ""
 
 
 @dataclass

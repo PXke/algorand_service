@@ -31,7 +31,7 @@ from typing import Protocol
 
 from app.core.config import settings
 from app.core.store_factory import StoreFactory
-from app.modules.x402.assets import ACCEPTED_ASSETS, AcceptedAsset
+from app.modules.x402.assets import asset_for_asa_id
 from app.modules.x402.guard import PaymentResult
 from app.modules.x402.price_oracle import eur_pricing_id, get_eur_rate
 
@@ -212,18 +212,6 @@ def set_settlement_store(store: SettlementStore | None) -> None:
     _factory.set(store)
 
 
-def _asset_for(asset_id: str | None, network: str) -> AcceptedAsset | None:
-    """Which currently-accepted asset an on-ledger asset_id names on `network`, if any."""
-    try:
-        wanted = int(str(asset_id or "").strip())
-    except ValueError:
-        return None
-    for asset in ACCEPTED_ASSETS:
-        if asset.asa_id_for(network) == wanted:
-            return asset
-    return None
-
-
 def eur_value_at_settlement(
     *, asset_id: str | None, amount_atomic: str | None, network: str
 ) -> float:
@@ -233,7 +221,7 @@ def eur_value_at_settlement(
     because the payer has already been charged and the ledger write must not
     depend on CoinGecko or Redis being up.
     """
-    asset = _asset_for(asset_id, network)
+    asset = asset_for_asa_id(asset_id, network)
     if asset is None:
         logger.warning(
             "x402 settlement: asset_id %r on network %s is not an accepted asset; "

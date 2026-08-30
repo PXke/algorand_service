@@ -18,7 +18,10 @@ from app.modules.x402.discovery import describe_json_endpoint
 from app.modules.x402.paid_request import mark_fulfilled, require_paid_request
 from app.modules.x402_board.models.domain import BoardError, StoredPlacement
 from app.modules.x402_board.services.board_service import BoardService, normalize_link
-from app.modules.x402_board.services.rate_limit import board_read_rate_limited
+from app.modules.x402_board.services.rate_limit import (
+    board_click_rate_limited,
+    board_read_rate_limited,
+)
 from app.schemas import X402BoardPlacementRequest
 
 # Store is resolved lazily on first use, so this is safe as a module-level
@@ -32,9 +35,16 @@ _PLACEMENT_EXAMPLE = {
 }
 
 
-def _placement_json(item: StoredPlacement) -> dict:
-    """Serialize a stored placement for the wire."""
-    return {
+def _placement_json(item: StoredPlacement, *, clicks: int | None = None) -> dict:
+    """Serialize a stored placement for the wire.
+
+    `entry_id` is served because it is what a caller renews
+    (POST /board/:entry_id/renew) and clicks through (GET /board/:entry_id/go).
+    `clicks` is included only when the caller resolved it (the feed does, via
+    one batched counter read); the placement and renewal responses omit it.
+    """
+    payload = {
+        "entry_id": item.entry_id,
         "link": item.link,
         "name": item.name,
         "pitch": item.pitch,
@@ -43,6 +53,9 @@ def _placement_json(item: StoredPlacement) -> dict:
         "created_at_epoch": item.created_at_epoch,
         "settlement_tx_id": item.settlement_tx_id,
     }
+    if clicks is not None:
+        payload["clicks"] = clicks
+    return payload
 
 
 def x402_board_place(request: Request) -> Response:
@@ -151,10 +164,116 @@ def x402_board_read(request: Request) -> Response | dict:
         return json_error_response(400, "invalid_request", "limit must be an integer")
 
     items = board_service.list_active(limit=limit)
-    return {"items": [_placement_json(item) for item in items]}
+    # One batched counter read for the page, bounded by the clamped limit --
+    # never a bump: the feed is the hot read path and stays a pure read.
+    clicks = board_service.click_counts(items)
+    return {"items": [_placement_json(item, clicks=clicks.get(item.entry_id, 0)) for item in items]}
+
+
+def x402_board_renew(request: Request) -> Response:
+    """Paid: extend an existing placement's term by one more term, owner only.
+
+    Existence is checked BEFORE the payment gate: renewing an unknown entry
+    is a free 404, not a charged one. Ownership CANNOT be checked before the
+    gate -- the payer is only known once the payment has settled -- so a
+    renewal by a wallet other than the placer is refused with the payment
+    already taken and the tile untouched (403). This is the same accepted
+    tradeoff as the directory's relist ownership check, and the 402 offer
+    says so before the payer commits. Priced at the placement price: a
+    renewal buys exactly one more term.
+    """
+    entry_id = query_param(request.path_params.get("entry_id", ""))
+    placement = board_service.get(entry_id)
+    if placement is None:
+        return json_error_response(404, "not_found", "No board placement with that id")
+
+    term_days = settings.x402_board_term_days
+    result = require_paid_request(
+        request,
+        price=settings.x402_board_price,
+        resource="x402-board-renew",
+        description=(
+            f"Extend your existing PXke x402 board placement by {term_days} more days, "
+            f"from the later of now and its current term end. Only the wallet that "
+            f"placed the entry may renew it: a payment from any other wallet settles "
+            f"but is refused and changes nothing."
+        ),
+        # No body and no query params: the only input is the entry id in the
+        # path, which the Bazaar reads from the route template itself.
+        extensions=describe_json_endpoint(
+            output_example={
+                "placement": {
+                    **_PLACEMENT_EXAMPLE,
+                    "entry_id": "0" * 64,
+                    "payer": "...",
+                    "term_end_epoch": 0,
+                    "created_at_epoch": 0,
+                    "settlement_tx_id": "...",
+                },
+                "settlement_tx_id": "...",
+                "term_days": term_days,
+            }
+        ),
+    )
+    if result.error:
+        return result.error
+
+    try:
+        renewed = board_service.renew(
+            placement=placement,
+            payer=result.payer or "",
+            settlement_tx_id=result.payment_txid or "",
+        )
+    except BoardError as exc:
+        # The ownership refusal: payment taken, nothing changed. The
+        # settlement headers are still served so the payer has their receipt.
+        return Response(
+            status_code=exc.http_status,
+            headers={"Content-Type": "application/json", **result.settlement_headers},
+            description=serialization.dumps({"error": {"code": exc.code, "message": exc.message}}),
+        )
+
+    mark_fulfilled(result.payment_txid, resource="x402-board-renew")
+    return Response(
+        status_code=200,
+        headers={"Content-Type": "application/json", **result.settlement_headers},
+        description=serialization.dumps(
+            {
+                "placement": _placement_json(renewed),
+                "settlement_tx_id": result.payment_txid or "",
+                "term_days": term_days,
+            }
+        ),
+    )
+
+
+def x402_board_go(request: Request) -> Response:
+    """Free: 302 to a live placement's link, counting the click-through, rate-limited per IP.
+
+    The counter is bumped here and only here, so the feed read never writes.
+    An unknown or expired entry is a 404: an ended term stops being advertised,
+    redirects included.
+    """
+    if board_click_rate_limited(request):
+        return json_error_response(
+            429, "rate_limited", "Too many board click-throughs — please try again later"
+        )
+    entry_id = query_param(request.path_params.get("entry_id", ""))
+    link = board_service.click(entry_id)
+    if link is None:
+        return json_error_response(404, "not_found", "No live board placement with that id")
+    return Response(
+        status_code=302,
+        # Never cached: a cached redirect would skip the counter on every
+        # repeat visit and, worse, keep redirecting after the term ends.
+        headers={"Location": link, "Cache-Control": "no-store"},
+        description="",
+    )
 
 
 def register_x402_board_routes(app: Router) -> None:
-    """Register the paid board-placement route and the free board-read route."""
+    """Register the board's paid routes (place, renew) and free routes (feed, click-through)."""
     app.post("/api/v1/x402/board")(x402_board_place)
     app.get("/api/v1/x402/board")(x402_board_read)
+    app.post("/api/v1/x402/board/:entry_id/renew")(x402_board_renew)
+    app.get("/api/v1/x402/board/:entry_id/go")(x402_board_go)

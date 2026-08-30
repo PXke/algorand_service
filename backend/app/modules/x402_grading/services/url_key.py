@@ -6,12 +6,14 @@ x402_directory has `normalize_url` and x402_board has `normalize_link`, both
 doing exactly this, and both documenting that they deliberately keep their own
 copy rather than importing the other's: a module must not depend on a sibling
 product's lifecycle, and importing one would make a bad URL here raise that
-sibling's error type. This module now follows the same precedent, and has a
-second reason the other two do not: this rework's whole point is that grading
-no longer depends on x402_directory in ANY way -- not for listing lookup, and
-so also not for the one import the previous build did keep. Importing the
-directory's normalizer would leave the coupling that was just removed, in a
-place where it is easy to miss.
+sibling's error type. This module follows the same precedent, and has a
+second reason the other two do not: grades are keyed on THIS module's hash of
+THIS module's normalization, so the key never depends on the directory's
+normalizer. (The paid tag leaderboard in api/routes.py does read the
+directory's listings to choose candidate URLs, and re-normalizes each listed
+URL with THIS function before looking up its grades -- the two normalizers
+agree today, and if they ever diverge a listing simply finds no grades rather
+than the wrong ones.)
 
 The right long-run resolution is unchanged from what x402_board already flagged
 and is unchanged by this change: ONE shared URL helper in modules/x402/ that

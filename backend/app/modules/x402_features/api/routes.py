@@ -24,6 +24,7 @@ from app.core.query_params import query_param
 from app.modules.x402.discovery import describe_json_endpoint
 from app.modules.x402.paid_request import mark_fulfilled, require_paid_request
 from app.modules.x402_features.models.domain import (
+    ClaimSummary,
     FeatureError,
     RankedFeatureRequest,
     StoredFeatureRequest,
@@ -48,32 +49,44 @@ _REQUEST_EXAMPLE = {
 }
 
 
-def _public_json(item: StoredFeatureRequest) -> dict:
+def _claims_json(summary: ClaimSummary) -> dict:
+    """The claim annotation both surfaces carry: how many builders declared, and who last did.
+
+    Claims are public by design (a claim is a builder announcing themselves),
+    so they sit on the FREE surface too -- they are not the demand signal.
+    An empty latest claimer is served as null, never as a placeholder.
+    """
+    return {"claims_count": summary.count, "latest_claimer": summary.latest_claimer or None}
+
+
+def _public_json(item: StoredFeatureRequest, claims: ClaimSummary) -> dict:
     """Serialize a request for the FREE browse surface.
 
-    Existence only: the id (so a caller knows what to vote on), the title, the
-    description and when it was filed. NO vote total and no submitter -- the
-    demand signal is what the paid surface sells, and giving the numbers away
-    here would leave it selling nothing. Keep this function and
-    _demand_json separate rather than adding a flag: one boolean away from
-    leaking the paid field is exactly the kind of mistake a free/paid split
-    cannot afford.
+    Existence only: the id (so a caller knows what to vote on or claim), the
+    title, the description, when it was filed, and the public claim
+    annotation. NO vote total and no submitter -- the demand signal is what
+    the paid surface sells, and giving the numbers away here would leave it
+    selling nothing. Keep this function and _demand_json separate rather than
+    adding a flag: one boolean away from leaking the paid field is exactly
+    the kind of mistake a free/paid split cannot afford.
     """
     return {
         "request_id": item.request_id,
         "title": item.title,
         "description": item.description,
         "created_at_epoch": item.created_at_epoch,
+        **_claims_json(claims),
     }
 
 
-def _demand_json(ranked: RankedFeatureRequest) -> dict:
+def _demand_json(ranked: RankedFeatureRequest, claims: ClaimSummary) -> dict:
     """Serialize a ranked request for the PAID demand surface, vote total included.
 
     Requests are filed free and anonymously, so `submitter` is null -- served
     as null rather than as an empty string or a placeholder, so a builder
     reading demand is never handed a fabricated author. The demand signal
-    itself (vote_total) is what this surface sells.
+    itself (vote_total) is what this surface sells; the claim annotation is
+    the same public one the free browse carries.
     """
     item = ranked.request
     return {
@@ -83,6 +96,7 @@ def _demand_json(ranked: RankedFeatureRequest) -> dict:
         "submitter": item.submitter or None,
         "created_at_epoch": item.created_at_epoch,
         "vote_total": ranked.vote_total,
+        **_claims_json(claims),
     }
 
 
@@ -121,7 +135,7 @@ def x402_features_submit(request: Request) -> Response:
     return Response(
         status_code=201,
         headers={"Content-Type": "application/json"},
-        description=serialization.dumps({"request": _public_json(item)}),
+        description=serialization.dumps({"request": _public_json(item, ClaimSummary())}),
     )
 
 
@@ -202,7 +216,67 @@ def x402_features_browse(request: Request) -> Response | dict:
         return json_error_response(400, "invalid_request", "limit must be an integer")
 
     items = feature_service.list_recent(limit=limit)
-    return {"items": [_public_json(item) for item in items]}
+    claims = feature_service.claim_summaries(items)
+    return {
+        "items": [_public_json(item, claims.get(item.request_id, ClaimSummary())) for item in items]
+    }
+
+
+def x402_features_claim(request: Request) -> Response:
+    """Paid: a builder wallet declares "I'm building this" against a request.
+
+    Existence is checked BEFORE the payment gate -- claiming an unknown
+    request is a free 404, same rule as voting. Priced at the vote price: a
+    claim is one costly public statement, the same weight as one unit of
+    demand. Multiple claims are allowed (see FeatureService.claim); the
+    claimer is always the settled payer, never anything in a body.
+    """
+    request_id = query_param(request.path_params.get("request_id", ""))
+    if not request_id or not feature_service.exists(request_id):
+        return json_error_response(404, "not_found", "No feature request with that id")
+
+    result = require_paid_request(
+        request,
+        price=settings.x402_features_vote_price,
+        resource="x402-features-claim",
+        description=(
+            "Declare that your wallet is building a PXke x402 feature request. The "
+            "claim is public: the request's claim count and your wallet as latest "
+            "claimer appear on the free board and the paid demand read. Not "
+            "exclusive -- other builders may claim the same request, and you may "
+            "claim again."
+        ),
+        # No body and no query params: the only input is the request id in
+        # the path, which the Bazaar reads from the route template itself.
+        extensions=describe_json_endpoint(
+            output_example={
+                "request_id": "...",
+                "claims_count": 2,
+                "latest_claimer": "...",
+                "settlement_tx_id": "...",
+            }
+        ),
+    )
+    if result.error:
+        return result.error
+
+    summary = feature_service.claim(
+        request_id=request_id,
+        claimer=result.payer or "",
+        settlement_tx_id=result.payment_txid or "",
+    )
+    mark_fulfilled(result.payment_txid, resource="x402-features-claim")
+    return Response(
+        status_code=200,
+        headers={"Content-Type": "application/json", **result.settlement_headers},
+        description=serialization.dumps(
+            {
+                "request_id": request_id,
+                **_claims_json(summary),
+                "settlement_tx_id": result.payment_txid or "",
+            }
+        ),
+    )
 
 
 def x402_features_demand(request: Request) -> Response:
@@ -249,6 +323,8 @@ def x402_features_demand(request: Request) -> Response:
                         "submitter": None,
                         "created_at_epoch": 0,
                         "vote_total": 7,
+                        "claims_count": 1,
+                        "latest_claimer": "...",
                     }
                 ],
                 "settlement_tx_id": "...",
@@ -259,13 +335,17 @@ def x402_features_demand(request: Request) -> Response:
         return result.error
 
     ranked = feature_service.rank_by_demand(limit=limit)
+    claims = feature_service.claim_summaries([item.request for item in ranked])
     mark_fulfilled(result.payment_txid, resource="x402-features-demand")
     return Response(
         status_code=200,
         headers={"Content-Type": "application/json", **result.settlement_headers},
         description=serialization.dumps(
             {
-                "items": [_demand_json(item) for item in ranked],
+                "items": [
+                    _demand_json(item, claims.get(item.request.request_id, ClaimSummary()))
+                    for item in ranked
+                ],
                 "settlement_tx_id": result.payment_txid or "",
             }
         ),
@@ -273,7 +353,7 @@ def x402_features_demand(request: Request) -> Response:
 
 
 def register_x402_features_routes(app: Router) -> None:
-    """Register the feature board's two free routes (file, browse) and two paid ones (vote, demand)."""
+    """Register the feature board's two free routes (file, browse) and three paid ones (vote, claim, demand)."""
     app.post("/api/v1/x402/features")(x402_features_submit)
     app.get("/api/v1/x402/features")(x402_features_browse)
     # /features/demand does not collide with /features/:request_id/vote: the
@@ -281,3 +361,4 @@ def register_x402_features_routes(app: Router) -> None:
     # in length and never compete for the same path.
     app.get("/api/v1/x402/features/demand")(x402_features_demand)
     app.post("/api/v1/x402/features/:request_id/vote")(x402_features_vote)
+    app.post("/api/v1/x402/features/:request_id/claim")(x402_features_claim)

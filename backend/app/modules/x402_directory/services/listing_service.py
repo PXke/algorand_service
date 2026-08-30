@@ -3,12 +3,21 @@
 from __future__ import annotations
 
 import hashlib
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from urllib.parse import urlsplit, urlunsplit
 
 from app.core import serialization
 from app.core.config import settings
-from app.modules.x402_directory.models.domain import DirectoryError, StoredListing
+from app.modules.x402_directory.models.domain import (
+    CATEGORY_TAG_PREFIX,
+    DEFAULT_CATEGORY,
+    LISTING_CATEGORIES,
+    DirectoryError,
+    StoredListing,
+    StoredProbe,
+    category_tag,
+)
 from app.modules.x402_directory.stores.base import ListingStore
 from app.modules.x402_directory.stores.factory import get_listing_store
 
@@ -84,11 +93,54 @@ def normalize_tag(raw: str) -> str:
 
 
 def search_tag(raw: str) -> str:
-    """Validate and normalize the `tag` search filter, raising invalid_request if unusable."""
+    """Validate and normalize the `tag` search filter, raising invalid_request if unusable.
+
+    The reserved `category:` namespace is refused here too: a category is
+    searched with `?category=`, and letting `?tag=category:x` read the same
+    partition would make the reserved prefix a second, undocumented API.
+    """
     tag = normalize_tag(raw)
     if not tag or len(tag) > MAX_TAG_LENGTH:
         raise DirectoryError("invalid_request", f"tag must be 1-{MAX_TAG_LENGTH} characters")
+    if tag.startswith(CATEGORY_TAG_PREFIX):
+        raise DirectoryError(
+            "invalid_request", f"tags starting with `{CATEGORY_TAG_PREFIX}` are reserved"
+        )
     return tag
+
+
+def validate_tags(tags: list[str]) -> list[str]:
+    """Normalize a listing's submitted tags, refusing any in the reserved `category:` namespace.
+
+    Runs BEFORE the payment gate (the route calls it next to normalize_url),
+    so a forged category tag is a 400 nobody pays for. Blank tags are
+    dropped, duplicates folded, the result sorted -- the stored form.
+    """
+    normalized = sorted({normalize_tag(t) for t in tags if normalize_tag(t)})
+    for tag in normalized:
+        if tag.startswith(CATEGORY_TAG_PREFIX):
+            raise DirectoryError(
+                "invalid_request",
+                f"tag `{tag}` is reserved: tags starting with `{CATEGORY_TAG_PREFIX}` "
+                f"are written by the directory itself from `category`",
+            )
+    return normalized
+
+
+def validate_category(raw: str) -> str:
+    """Canonical form of a listing's category, raising invalid_request if it is not in the enum.
+
+    Trimmed and lowercased; blank means DEFAULT_CATEGORY. Runs BEFORE the
+    payment gate, so an unknown category is a free 400, and again on the
+    `?category=` search filter so both sides name the same partition.
+    """
+    category = raw.strip().lower() or DEFAULT_CATEGORY
+    if category not in LISTING_CATEGORIES:
+        raise DirectoryError(
+            "invalid_request",
+            f"category must be one of: {', '.join(LISTING_CATEGORIES)}",
+        )
+    return category
 
 
 def url_hash(normalized_url: str) -> str:
@@ -123,6 +175,7 @@ class ListingService:
         schema_json: str,
         settlement_tx_id: str,
         payer: str,
+        category: str = DEFAULT_CATEGORY,
         now: datetime | None = None,
     ) -> StoredListing:
         """Store a paid listing for the configured term and return it.
@@ -131,7 +184,10 @@ class ListingService:
         encoded (encode_schema), because both of those can reject a request and
         both must therefore run before the payment gate, not here -- see the
         route's docstring. Doing them again here would be doing paid-path work
-        twice; the guards below only re-assert what those two produce.
+        twice; the guards below only re-assert what those two produce. The
+        same holds for `category` (validate_category) and `tags`
+        (validate_tags): both run pre-gate in the route, and are re-run here
+        only as the durable guard on the columns.
 
         Re-listing a URL already in the directory replaces it and re-stamps both
         created_at and term_end: the payer paid for a fresh term starting now,
@@ -204,8 +260,9 @@ class ListingService:
             ),
             created_at_epoch=int(moment.timestamp()),
             assets=sorted({a.strip() for a in assets if a.strip()}),
-            tags=sorted({normalize_tag(t) for t in tags if normalize_tag(t)}),
+            tags=validate_tags(tags),
             payer=payer,
+            category=validate_category(category),
         )
         if self.store.insert_if_absent(listing):
             return listing
@@ -228,7 +285,12 @@ class ListingService:
         return listing
 
     def search(
-        self, *, limit: int, tag: str | None = None, now: datetime | None = None
+        self,
+        *,
+        limit: int,
+        tag: str | None = None,
+        category: str | None = None,
+        now: datetime | None = None,
     ) -> list[StoredListing]:
         """Return listings whose term is still running, newest-first, clamped.
 
@@ -238,6 +300,13 @@ class ListingService:
         the recency feed; an unknown tag is simply an empty partition. The
         same term-expiry filter applies after the LIMITed read either way.
         Raises invalid_request for a blank or over-long tag.
+
+        With `category` (raw; validate_category), only listings declared in
+        that category are returned -- the same projection, read at the
+        reserved `category:<name>` partition (migration 099). `tag` and
+        `category` together are refused (invalid_request): each is one
+        partition, and intersecting two would mean reading one and filtering
+        the other in memory, which turns the LIMIT into a lie.
 
         The name stays `search` rather than becoming `search_active`: for a
         search endpoint, live results are what a caller already expects, and it
@@ -263,11 +332,98 @@ class ListingService:
         moment = now or datetime.now(tz=UTC)
         cutoff = int(moment.timestamp())
         clamped = max(1, min(limit, settings.x402_search_max_results))
-        if tag is None:
-            items = self.store.list_recent(limit=clamped)
-        else:
+        if tag is not None and category is not None:
+            raise DirectoryError(
+                "invalid_request", "tag and category cannot be combined in one search"
+            )
+        if tag is not None:
             items = self.store.list_by_tag(search_tag(tag), limit=clamped)
+        elif category is not None:
+            items = self.store.list_by_tag(category_tag(validate_category(category)), limit=clamped)
+        else:
+            items = self.store.list_recent(limit=clamped)
         return [item for item in items if item.term_end_epoch > cutoff]
+
+    def renew(
+        self,
+        *,
+        normalized_url: str,
+        payer: str,
+        settlement_tx_id: str,
+        now: datetime | None = None,
+    ) -> StoredListing:
+        """Extend a listing's term by one more configured term and return it.
+
+        Ownership follows create()'s rule exactly: a listing whose term is
+        still running and whose non-empty payer is not this payer may not be
+        renewed (listing_owned_by_another_payer, 403); an unowned (empty
+        payer) or expired listing may be renewed -- and thereby claimed -- by
+        anyone, since the previous payer only bought the term they paid for.
+        Like create(), no `and payer` guard on the new side: an
+        unattributable payment cannot prove it is the owner of a live
+        listing. The payer is only known after settlement, so a refusal here
+        comes with the payment already taken -- the same accepted tradeoff
+        as create() and the board's renew, stated in the 402 offer.
+
+        The new term runs from max(now, current term_end): renewing early
+        adds a full term on top of what is left, renewing after expiry
+        starts a fresh one from now, and neither shortens what was already
+        paid for. created_at is NOT re-stamped -- a renewal buys time, not a
+        jump back to the front of the newest-first feed (that is what a
+        relist buys). settlement_tx_id and payer are replaced so the listing
+        traces to the payment that bought its current term; the verified
+        badge (097) survives only if the payer is unchanged, since it
+        attests that THAT wallet controls the endpoint. Everything the
+        listing says about the endpoint (price, description, assets, tags,
+        schema, category) is left exactly as it was.
+
+        Raises not_found if the url is not listed; the route checks this
+        before the gate, this is the guard for any other caller.
+        """
+        moment = now or datetime.now(tz=UTC)
+        existing = self.store.get(url_hash(normalized_url))
+        if existing is None:
+            raise DirectoryError("not_found", "No listing for that url")
+        cutoff = int(moment.timestamp())
+        if existing.payer and existing.payer != payer and existing.term_end_epoch > cutoff:
+            raise DirectoryError(
+                "listing_owned_by_another_payer",
+                "Only the wallet that listed this url may renew it. Payment has "
+                "settled but the existing listing was not changed.",
+            )
+        base = max(cutoff, existing.term_end_epoch)
+        same_payer = existing.payer == payer
+        renewed = replace(
+            existing,
+            term_end_epoch=int(
+                (
+                    datetime.fromtimestamp(base, tz=UTC)
+                    + timedelta(days=settings.x402_listing_term_days)
+                ).timestamp()
+            ),
+            settlement_tx_id=settlement_tx_id,
+            payer=payer,
+            verified_wallet=existing.verified_wallet if same_payer else "",
+            verified_at_epoch=existing.verified_at_epoch if same_payer else 0,
+        )
+        self.store.upsert(renewed)
+        return renewed
+
+    def detail(
+        self, normalized_url: str, *, now: datetime | None = None
+    ) -> tuple[StoredListing, StoredProbe | None] | None:
+        """Free read: one LIVE listing plus its newest probe, or None if unlisted or expired.
+
+        The one place a caller can read everything the directory holds about
+        a single endpoint. Unlike probe_status(), an expired listing is None
+        here: this is the per-url twin of search(), and search() has stopped
+        serving that listing.
+        """
+        moment = now or datetime.now(tz=UTC)
+        found = self.probe_status(normalized_url)
+        if found is None or found[0].term_end_epoch <= int(moment.timestamp()):
+            return None
+        return found
 
     def delete(self, normalized_url: str) -> bool:
         """Admin-only: remove a listing outright, feed projection included.
@@ -278,3 +434,18 @@ class ListingService:
         to delete, so the admin route can tell a real removal from a no-op.
         """
         return self.store.delete(url_hash(normalized_url))
+
+    def probe_status(self, normalized_url: str) -> tuple[StoredListing, StoredProbe | None] | None:
+        """Free read: the listing for a URL plus its newest probe, or None if the URL is not listed.
+
+        Only listed URLs are answerable -- the probe beat only ever probes
+        directory listings, so an unlisted URL has no probe row by
+        construction, and refusing it here keeps the free route from being
+        used to enumerate probe rows by hash. A listed URL that has not been
+        probed yet returns (listing, None).
+        """
+        key = url_hash(normalized_url)
+        listing = self.store.get(key)
+        if listing is None:
+            return None
+        return listing, self.store.latest_probe(key)

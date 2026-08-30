@@ -400,6 +400,21 @@ class X402ListingRequest(msgspec.Struct, kw_only=True):
         default_factory=list
     )
     schema: dict | None = None
+    # One of x402_directory.models.domain.LISTING_CATEGORIES; the closed enum
+    # is enforced by listing_service.validate_category() BEFORE the payment
+    # gate, this bound only stops an oversized string reaching it. Omitted
+    # means "other".
+    category: Annotated[str, Meta(max_length=32)] = "other"
+
+
+class X402ListingRenewRequest(msgspec.Struct, kw_only=True):
+    """Request body for POST /x402/list/renew — extend one existing listing's term.
+
+    Only the url: a renewal changes nothing about the listing but its term end,
+    its settlement txid and (for an unowned or expired listing) its payer.
+    """
+
+    url: Annotated[str, Meta(min_length=8, max_length=2048)]
 
 
 class X402ListingItem(msgspec.Struct, kw_only=True):
@@ -717,5 +732,3 @@ class DomainSetRequest(msgspec.Struct, kw_only=True):
     # and composed into a one-shot article about that page's content (see
     # ingest_publish_signal call in web_crawler.py's scrape_from_queue_item).
     full_site: bool = True
-
-

@@ -7,7 +7,10 @@ from datetime import UTC, datetime
 from app.core.cassandra import execute_parallel_with_args, get_cassandra_session
 from app.core.statements import X402FeaturesStmts
 from app.modules.x402_features.models.domain import (
+    CLAIMS_SCAN_LIMIT,
     FEATURES_PARTITION,
+    ClaimSummary,
+    StoredClaim,
     StoredFeatureRequest,
     StoredVote,
 )
@@ -141,3 +144,39 @@ class CassandraFeatureStore:
                 vote.voter,
             ),
         )
+
+    def append_claim(self, claim: StoredClaim) -> None:
+        """Append one paid build claim to a request (full INSERT of every column)."""
+        session = get_cassandra_session()
+        session.execute(
+            X402FeaturesStmts.INSERT_CLAIM,
+            (
+                claim.request_id,
+                _dt(claim.claimed_at_epoch),
+                claim.claimer,
+                claim.settlement_tx_id,
+            ),
+        )
+
+    def get_claim_summaries(self, request_ids: list[str]) -> dict[str, ClaimSummary]:
+        """Return (count, latest claimer) per request via concurrent bounded partition reads.
+
+        Same shape as get_vote_totals: one partition per request, read
+        concurrently rather than with a multi-partition IN, results zipped in
+        input order. Each read is newest-first and LIMITed to
+        CLAIMS_SCAN_LIMIT, so the first row is the latest claimer and the row
+        count saturates at the bound.
+        """
+        if not request_ids:
+            return {}
+        results = execute_parallel_with_args(
+            X402FeaturesStmts.LIST_CLAIMS, [(rid, CLAIMS_SCAN_LIMIT) for rid in request_ids]
+        )
+        summaries: dict[str, ClaimSummary] = {}
+        for request_id, (_success, result) in zip(request_ids, results, strict=True):
+            rows = list(result)
+            if rows:
+                summaries[request_id] = ClaimSummary(
+                    count=len(rows), latest_claimer=rows[0].claimer or ""
+                )
+        return summaries

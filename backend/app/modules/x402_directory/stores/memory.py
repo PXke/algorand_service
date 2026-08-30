@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from app.modules.x402_directory.models.domain import StoredListing
+from app.modules.x402_directory.models.domain import StoredListing, StoredProbe
 
 
 class InMemoryListingStore:
@@ -17,6 +17,7 @@ class InMemoryListingStore:
         """Start with an empty listing table and an empty tag projection."""
         self._items: dict[str, StoredListing] = {}
         self._by_tag: dict[str, dict[str, StoredListing]] = {}
+        self._probes: dict[str, StoredProbe] = {}
 
     def insert_if_absent(self, item: StoredListing) -> bool:
         """Store the listing only if its url_hash is not yet present. True if it was stored."""
@@ -31,10 +32,10 @@ class InMemoryListingStore:
 
     def _put(self, item: StoredListing, *, previous: StoredListing | None) -> None:
         if previous is not None:
-            for tag in previous.tags:
+            for tag in previous.projection_tags():
                 self._by_tag.get(tag, {}).pop(item.url_hash, None)
         self._items[item.url_hash] = item
-        for tag in item.tags:
+        for tag in item.projection_tags():
             self._by_tag.setdefault(tag, {})[item.url_hash] = item
 
     def get(self, url_hash: str) -> StoredListing | None:
@@ -66,6 +67,14 @@ class InMemoryListingStore:
         existing = self._items.pop(url_hash, None)
         if existing is None:
             return False
-        for tag in existing.tags:
+        for tag in existing.projection_tags():
             self._by_tag.get(tag, {}).pop(url_hash, None)
         return True
+
+    def latest_probe(self, url_hash: str) -> StoredProbe | None:
+        """Return the newest probe for a URL hash, or None if never probed."""
+        return self._probes.get(url_hash)
+
+    def record_probe(self, probe: StoredProbe) -> None:
+        """Test hook standing in for the workers probe beat: store the latest probe row."""
+        self._probes[probe.url_hash] = probe
