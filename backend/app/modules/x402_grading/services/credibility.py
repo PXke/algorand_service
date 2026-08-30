@@ -140,7 +140,25 @@ class CassandraSpendLookup:
         self._session_provider = session_provider or get_cassandra_session
 
     def spend_by_payer(self, payers: Sequence[str]) -> dict[str, int] | None:
-        """Sum the ledger's recent day partitions per payer, current network only."""
+        """Sum the ledger's recent day partitions per payer, current network only.
+
+        Sequential by day on purpose, not yet parallelized: a performance
+        review flagged this loop as ~lookback_days sequential round trips
+        and suggested the shared `execute_parallel_with_args` helper (used
+        the same way in x402_features for per-request vote totals) -- but
+        that helper always uses the real process-wide session
+        (`get_cassandra_session()`), not this class's injected
+        `_session_provider`, so switching to it would silently stop
+        honoring the test seam this class was built around (including the
+        failure-simulation test). The driver's own `execute_concurrent_with_args`
+        does accept an explicit session, but this codebase's fake test
+        session only implements synchronous `execute()`, not the
+        `execute_async()` the concurrent path needs -- fixing this properly
+        means either extending that fake session or picking a different
+        concurrency approach, a real decision left for a follow-up rather
+        than guessed at here. Latency only, not correctness: still bounded,
+        still answers for every payer in one pass.
+        """
         wanted = set(payers)
         totals = dict.fromkeys(wanted, 0)
         if not wanted:

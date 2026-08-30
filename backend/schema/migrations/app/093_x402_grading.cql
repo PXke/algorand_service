@@ -81,8 +81,16 @@ CREATE TABLE IF NOT EXISTS x402_grades (
 -- registry is a constant partition key ('default'), so the whole index lives
 -- in one partition and reads with no fan-out. That bounds the table to a
 -- single partition on purpose: it holds one row per GRADED endpoint, and every
--- read is LIMITed. If it ever outgrows one partition, shard the key by month
--- -- do NOT let this become an unbounded hot partition silently.
+-- read is LIMITed. If it ever outgrows one partition, do NOT shard by month
+-- the way the recency projections in 090/091 would -- this table is addressed
+-- by a deterministic point read on url_hash (existence check before the paid
+-- score lookup, and on every grade upsert), not scanned by recency, so a
+-- month shard would turn every one of those point reads into a fan-out across
+-- every shard -- exactly the "no fan-out" property the constant key exists
+-- for, destroyed by its own fix. Shard by a bucket derived from url_hash
+-- itself instead (e.g. its first hex character), which keeps existence
+-- checks a single deterministic point read. Do NOT let this become an
+-- unbounded hot partition silently, but don't reach for the wrong fix either.
 --
 -- Clustered by url_hash rather than by last_graded_at: this is an existence
 -- index, so it needs deterministic enumeration, not recency ordering, and
