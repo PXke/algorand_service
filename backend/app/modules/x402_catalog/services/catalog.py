@@ -94,6 +94,15 @@ PRODUCTS: tuple[Product, ...] = (
                 path=CATALOG_PATH,
                 description="This document: every live x402 route, its price and how to pay.",
             ),
+            CatalogRoute(
+                method="GET",
+                path="/api/v1/x402/settlements/recent",
+                description=(
+                    "Free, rate-limited proof-of-volume feed: real (non-operator) "
+                    "settlements across every product, newest first, bounded. Our own "
+                    "probe payments are excluded, never counted here as customer volume."
+                ),
+            ),
         ),
     ),
     Product(
@@ -387,6 +396,41 @@ def _route_json(product: Product, route: CatalogRoute) -> dict[str, Any]:
         "description": route.description,
         "input_example": route.input_example,
     }
+
+
+def recent_settlements_json(*, limit: int = 25) -> dict[str, Any]:
+    """Public JSON for the free proof-of-volume feed.
+
+    Reads modules/x402/settlement.py's recent_real_settlements() (already
+    probe-payer-excluded) and serializes it with human units and asset
+    symbols, never raw atomic amounts a reader would have to decode.
+    """
+    from app.modules.x402.assets import asset_for_asa_id
+    from app.modules.x402.settlement import EUR_VALUE_UNAVAILABLE, recent_real_settlements
+
+    records = recent_real_settlements(limit=limit)
+    items = []
+    for r in records:
+        asset = asset_for_asa_id(r.asset_id, r.network)
+        amount = None
+        if asset is not None:
+            try:
+                amount = int(r.amount_atomic) / (10**asset.decimals)
+            except (TypeError, ValueError):
+                amount = None
+        items.append(
+            {
+                "tx_id": r.tx_id,
+                "asset": asset.symbol if asset is not None else r.asset_id,
+                "amount": amount,
+                "payer": r.payer,
+                "resource": r.resource,
+                "settled_at_epoch": r.settled_at_epoch,
+                "eur_value": None if r.eur_value == EUR_VALUE_UNAVAILABLE else r.eur_value,
+                "fulfilled": r.fulfilled,
+            }
+        )
+    return {"items": items}
 
 
 def build_catalog() -> dict[str, Any]:

@@ -1048,6 +1048,16 @@ class X402Stmts:
     MARK_SETTLEMENT_BY_TX_FULFILLED = _Stmt(
         "UPDATE algorand_platform.x402_settlements_by_tx SET fulfilled = ? WHERE tx_id = ?"
     )
+    # Full-column day partition read for the free recent-settlements feed
+    # (modules/x402_catalog): a shared-ledger read, so it lives here on
+    # X402Stmts, not on X402GradingStmts's narrower four-column
+    # LIST_SETTLEMENTS_FOR_DAY below (which is grading-specific and
+    # deliberately stays put -- see credibility.py).
+    LIST_SETTLEMENTS_FOR_DAY_FULL = _Stmt(
+        "SELECT settled_at, tx_id, asset_id, amount_atomic, payer, resource, "
+        "network, eur_value, fulfilled FROM algorand_platform.x402_settlements "
+        "WHERE day = ? LIMIT ?"
+    )
 
 
 class X402GradingStmts:

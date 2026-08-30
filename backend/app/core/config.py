@@ -407,6 +407,10 @@ class Settings(msgspec.Struct, kw_only=True):
     # settings. Free-endpoint abuse gate (CLAUDE.md section 9), counted under
     # its own key prefix, separate from the products' own budgets.
     x402_catalog_rate_limit_per_hour: int = 120
+    # Free proof-of-volume feed (GET /api/v1/x402/settlements/recent): real,
+    # non-operator settlements across every product. Own key prefix and own
+    # budget, separate from the catalog and every product's own limits.
+    x402_settlements_rate_limit_per_hour: int = 120
 
     # Replay window for an already-spent payment header. Must be >= 2x the
     # facilitator's own HTTP timeout (FacilitatorConfig.timeout defaults to

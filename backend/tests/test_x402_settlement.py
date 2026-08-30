@@ -31,6 +31,7 @@ from app.modules.x402.settlement import (
     CassandraSettlementStore,
     InMemorySettlementStore,
     SettlementRecord,
+    recent_real_settlements,
 )
 
 _PAYER = "P" * 58
@@ -298,3 +299,93 @@ def test_cassandra_mark_fulfilled_reads_the_key_first_and_never_upserts_a_phanto
     miss = _FakeSession(by_tx_row=None)
     assert _cassandra_store(monkeypatch, miss).mark_fulfilled("TX1") is False
     assert [c[0] for c in miss.calls] == [_cql("GET_SETTLEMENT_BY_TX")]
+
+
+def _record(*, tx_id: str, payer: str, settled_at_epoch: int) -> SettlementRecord:
+    """A minimal settled, fulfilled record for the recent-settlements tests."""
+    return SettlementRecord(
+        tx_id=tx_id,
+        asset_id="31566704",
+        amount_atomic="10000",
+        payer=payer,
+        resource="x402-directory-list",
+        network=ALGORAND_MAINNET_CAIP2,
+        settled_at_epoch=settled_at_epoch,
+        eur_value=0.09,
+        fulfilled=True,
+    )
+
+
+def test_recent_real_settlements_excludes_configured_probe_payers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A settlement from an X402_PROBE_PAYERS wallet never appears in the real feed."""
+    from app.core.config import settings
+
+    monkeypatch.setattr(settings, "x402_probe_payers", _PAYER)
+    store = InMemorySettlementStore()
+    now = int(datetime.now(tz=UTC).timestamp())
+    store.record_settlement(_record(tx_id="probe-tx", payer=_PAYER, settled_at_epoch=now))
+    store.record_settlement(_record(tx_id="real-tx", payer="Q" * 58, settled_at_epoch=now - 1))
+
+    result = recent_real_settlements(store=store)
+
+    assert [r.tx_id for r in result] == ["real-tx"]
+
+
+def test_recent_real_settlements_is_newest_first_and_bounded() -> None:
+    """Results come back newest-first and respect the limit."""
+    store = InMemorySettlementStore()
+    now = int(datetime.now(tz=UTC).timestamp())
+    for i in range(5):
+        store.record_settlement(_record(tx_id=f"tx-{i}", payer="Q" * 58, settled_at_epoch=now - i))
+
+    result = recent_real_settlements(store=store, limit=3)
+
+    assert [r.tx_id for r in result] == ["tx-0", "tx-1", "tx-2"]
+
+
+def test_recent_real_settlements_looks_back_across_empty_days() -> None:
+    """A settlement from yesterday is still found when today's partition is empty."""
+    store = InMemorySettlementStore()
+    yesterday = int(datetime.now(tz=UTC).timestamp()) - 86400
+    store.record_settlement(
+        _record(tx_id="yesterday-tx", payer="Q" * 58, settled_at_epoch=yesterday)
+    )
+
+    result = recent_real_settlements(store=store, lookback_days=3)
+
+    assert [r.tx_id for r in result] == ["yesterday-tx"]
+
+
+def test_cassandra_list_for_day_reverses_the_ascending_page(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The Cassandra store's page comes back stored-order-ASC; list_for_day serves it newest-first."""
+    rows = [
+        SimpleNamespace(
+            settled_at=datetime.fromtimestamp(1000 + i, tz=UTC),
+            tx_id=f"tx-{i}",
+            asset_id="31566704",
+            amount_atomic="10000",
+            payer="Q" * 58,
+            resource="x402-directory-list",
+            network=ALGORAND_MAINNET_CAIP2,
+            eur_value=0.09,
+            fulfilled=True,
+        )
+        for i in range(3)
+    ]
+
+    class _ListSession(_FakeSession):
+        def execute(self, stmt: SimpleNamespace, params: tuple[object, ...]) -> SimpleNamespace:
+            self.calls.append((stmt.cql, params))
+            assert stmt.cql == _cql("LIST_SETTLEMENTS_FOR_DAY_FULL")
+            assert params == ("2026-08-30", 200)
+            return rows
+
+    store = _cassandra_store(monkeypatch, _ListSession())
+
+    result = store.list_for_day("2026-08-30", limit=200)
+
+    assert [r.tx_id for r in result] == ["tx-2", "tx-1", "tx-0"]

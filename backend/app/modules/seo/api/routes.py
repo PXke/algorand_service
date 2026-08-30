@@ -38,6 +38,7 @@ _HOME_LIMIT = 30
 _FRONT_HOT_LIMIT = 6
 _NEWS_SSR_LIMIT = 30
 _SECTION_LIMIT = 30
+_X402_SSR_LIMIT = 30
 _FEED_FULL_CONTENT_LIMIT = 20  # newest items carry full content:encoded HTML
 _SITEMAP_LIMIT = 5000
 _SITEMAP_CACHE_TTL = 900
@@ -190,6 +191,14 @@ def _is_known_app_path(path: str) -> bool:
         # Cap length to keep junk out of the analytics store.
         slug = path[len("/topic/") :]
         return 0 < len(slug) <= 48 and "/" not in slug
+    if path == "/x402":
+        return True
+    if path.startswith("/x402/"):
+        # The exact tab set the SPA router and the SSR route both recognize
+        # (render.X402_TABS) -- an unknown tab falls back to directory rather
+        # than a 400/404, so the beacon accepts only the real enum, not any
+        # trailing segment.
+        return path[len("/x402/") :] in render.X402_TABS
     return False
 
 
@@ -566,6 +575,67 @@ def glossary_term(request: Request) -> Response:
     )
 
 
+def _x402_document(request: Request, tab: str, path: str) -> Response:
+    """SSR one x402 marketplace tab.
+
+    `tab` must already be one of render.X402_TABS -- callers resolve an unknown/missing :tab
+    to "directory" before reaching here, same fallback the SPA's own router applies
+    (App.svelte), so a bogus tab in the URL never 404s.
+
+    Reads the SAME free service-layer functions the JSON routes
+    (x402_search/x402_board_read/x402_features_browse/x402_grade_index) call, directly rather
+    than over HTTP -- this bypasses those routes' own per-IP rate limiting, which is fine here:
+    the SSR document itself is short-TTL cached (see register_seo_routes's Cache-Control) rather
+    than hit once per crawler request.
+    """
+    from app.modules.x402_board.services.board_service import BoardService
+    from app.modules.x402_directory.services.listing_service import ListingService
+    from app.modules.x402_features.services.feature_service import FeatureService
+    from app.modules.x402_grading.services.grading_service import GradingService
+    from app.modules.x402_news.services.news_engine_service import NewsEngineService
+
+    _record(request, path)
+    kwargs: dict = {}
+    if tab == "board":
+        board_service = BoardService()
+        placements = board_service.list_active(limit=_X402_SSR_LIMIT)
+        kwargs["placements"] = placements
+        kwargs["placement_clicks"] = board_service.click_counts(placements)
+    elif tab == "requests":
+        feature_service = FeatureService()
+        items = feature_service.list_recent(limit=_X402_SSR_LIMIT)
+        kwargs["feature_requests"] = items
+        kwargs["claims"] = feature_service.claim_summaries(items)
+    elif tab == "grades":
+        grading_service = GradingService()
+        kwargs["graded"] = grading_service.list_graded(limit=_X402_SSR_LIMIT)
+    elif tab == "news":
+        news_engine = NewsEngineService()
+        kwargs["news_items"] = news_engine.list_headlines(limit=_X402_SSR_LIMIT)
+    else:
+        listing_service = ListingService()
+        kwargs["listings"] = listing_service.search(limit=_X402_SSR_LIMIT)
+
+    return _doc_response(
+        render.render_x402(tab, **kwargs),
+        "public, max-age=300",
+        tracked_path=path,
+    )
+
+
+def x402_index(request: Request) -> Response:
+    """SSR the x402 marketplace's directory tab at the bare /x402 path."""
+    return _x402_document(request, "directory", "/x402")
+
+
+def x402_tab(request: Request) -> Response:
+    """SSR one x402 marketplace tab at /x402/:tab; an unrecognized tab renders the directory tab (same fallback X402.svelte's router applies) instead of 404ing."""
+    raw = (request.path_params.get("tab", "") or "").strip().lower()
+    tab = raw if raw in render.X402_TABS else "directory"
+    path = f"/x402/{raw}" if raw else "/x402"
+    return _x402_document(request, tab, path)
+
+
 def about(request: Request) -> Response:
     """SSR static about page."""
     path = "/about"
@@ -810,6 +880,8 @@ def register_seo_routes(app: Router) -> None:
     app.get("/topic/:tag")(topic)
     app.get("/glossary")(glossary_index)
     app.get("/glossary/:slug")(glossary_term)
+    app.get("/x402")(x402_index)
+    app.get("/x402/:tab")(x402_tab)
     app.get("/about")(about)
     app.get("/contact")(contact)
     app.get("/search")(search)
@@ -839,6 +911,8 @@ def register_seo_routes(app: Router) -> None:
         ("/topic/:tag", topic),
         ("/glossary", glossary_index),
         ("/glossary/:slug", glossary_term),
+        ("/x402", x402_index),
+        ("/x402/:tab", x402_tab),
         ("/about", about),
         ("/contact", contact),
         ("/search", search),

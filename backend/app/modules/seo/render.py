@@ -33,6 +33,11 @@ from app.modules.news.models.schemas import ArticleDetail, ArticleFeedItem
 from app.modules.seo.chrome import SSR_CHROME_STYLE, ssr_page
 from app.modules.seo.markdown import md_to_html, md_to_text, truncate
 from app.modules.seo.topics import display_tag_label, primary_tag, topic_feed_path
+from app.modules.x402_board.models.domain import StoredPlacement
+from app.modules.x402_catalog.services.catalog import CATALOG_PATH
+from app.modules.x402_directory.models.domain import StoredListing
+from app.modules.x402_features.models.domain import ClaimSummary, StoredFeatureRequest
+from app.modules.x402_grading.models.domain import GradedEndpoint
 
 
 def site_url() -> str:
@@ -369,7 +374,9 @@ _SSR_STYLE = (
     # background-COLOR, not the `background` shorthand: the shorthand resets
     # background-image, which silently wiped the SPA's masthead wash on
     # every SSR-rendered page (the stylesheet loads after this block).
-    "html,body{background-color:var(--surface," + token("surface") + ")}"
+    "html,body{background-color:var(--surface,"
+    + token("surface")
+    + ")}"
     + SSR_CHROME_STYLE
     # The loading notice only exists for humans watching the app boot, so it is
     # hidden from the reading flow's start: JS reveals it, and it dies with the
@@ -446,7 +453,9 @@ def pick_related_articles(
     for item in feed:
         if item.article_id == article.article_id:
             continue
-        item_tags = {t.strip().lower() for t in (item.tags or []) if t.strip() and not is_meta_tag(t)}
+        item_tags = {
+            t.strip().lower() for t in (item.tags or []) if t.strip() and not is_meta_tag(t)
+        }
         if tags & item_tags:
             related.append(item)
         if len(related) >= limit:
@@ -1137,13 +1146,10 @@ def render_glossary_term(term: GlossaryTerm) -> tuple[str, str]:
     aliases_html = ""
     if term.aliases:
         aliases_html = (
-            '<p class="ssr-muted">Also known as: '
-            + html.escape(", ".join(term.aliases))
-            + "</p>"
+            '<p class="ssr-muted">Also known as: ' + html.escape(", ".join(term.aliases)) + "</p>"
         )
     body = ssr_container(
-        f"<h1>{html.escape(term.term)}</h1>"
-        f"<p>{html.escape(term.definition)}</p>{aliases_html}",
+        f"<h1>{html.escape(term.term)}</h1><p>{html.escape(term.definition)}</p>{aliases_html}",
         active="/glossary",
         breadcrumbs=trail,
     )
@@ -1241,5 +1247,385 @@ def render_noindex(title: str, *, active: str | None = None) -> tuple[str, str]:
         f"<h1>{html.escape(title)}</h1>",
         active=active,
         breadcrumbs=[("Home", site_url() + "/"), (title, site_url() + "/")],
+    )
+    return head, body
+
+
+# --- x402 agent marketplace (SSR mirror of frontend/src/routes/X402.svelte) ---
+#
+# Tabs match the SPA's X402Tab type exactly (App.svelte's matchPath). An
+# unknown :tab value is handled by the caller (seo/api/routes.py's x402
+# handler) resolving it to "directory" before this module ever sees it --
+# the same fallback the SPA's router applies -- so every function here can
+# assume `tab` is one of the five below.
+
+X402_TABS: tuple[str, ...] = ("directory", "board", "requests", "grades", "news")
+
+_X402_TAB_PATHS: dict[str, str] = {
+    "directory": "/x402",
+    "board": "/x402/board",
+    "requests": "/x402/requests",
+    "grades": "/x402/grades",
+    "news": "/x402/news",
+}
+
+_X402_TAB_NAV_LABELS: dict[str, str] = {
+    "directory": "Directory",
+    "board": "Board",
+    "requests": "Requests",
+    "grades": "Grades",
+    "news": "News",
+}
+
+# <title>/meta description per tab -- mirrors x402PricingHeading/x402Lead
+# copy from frontend/src/lib/i18n/locales/en.json, condensed for crawlers.
+_X402_TAB_HEAD_TITLES: dict[str, str] = {
+    "directory": "x402 Endpoint Directory",
+    "board": "x402 Visibility Board",
+    "requests": "x402 Feature Requests",
+    "grades": "x402 Endpoint Grades",
+    "news": "x402 News Engine",
+}
+
+_X402_TAB_DESCRIPTIONS: dict[str, str] = {
+    "directory": (
+        "Browse x402 endpoints for sale to AI agents on Algorand mainnet, priced in "
+        "USDC and paid per call. Listing costs $0.10 for 30 days; browsing is free. "
+        "Filter the free search with ?tag=<tag> or ?category=<category>."
+    ),
+    "board": (
+        "The x402 paid visibility board: agents pay $0.05 in USDC to place a link "
+        "and pitch for 14 days on Algorand mainnet. Free to browse."
+    ),
+    "requests": (
+        "Feature requests agents want built as x402 endpoints. Filing is free; "
+        "votes cost $0.02 in USDC on Algorand mainnet and rank the demand."
+    ),
+    "grades": (
+        "x402 endpoints agents have graded after paying them, on Algorand mainnet. "
+        "Grading costs $0.02 in USDC; the weighted score is a paid read."
+    ),
+    "news": (
+        "The x402 News Engine: pay-per-call access to the PXke Algorand newspaper. "
+        "Headlines are free; a full article costs $0.01 and full-text search $0.02, "
+        "settled in USDC on Algorand mainnet."
+    ),
+}
+
+# Mirrors the Svelte page's pricing dl (x402Price*Label/Value keys) and the
+# settings the routes actually charge (x402_listing_price etc.) -- static
+# copy, not a live settings read, same as the SPA's own hardcoded strings.
+_X402_PRICING_ROWS: tuple[tuple[str, str], ...] = (
+    ("List an endpoint (30 days)", "$0.10"),
+    ("Place on the board (14 days)", "$0.05"),
+    ("File a feature request", "free"),
+    ("Vote on a request", "$0.02"),
+    ("Read ranked demand", "$0.05"),
+    ("Grade an endpoint", "$0.02"),
+    ("Read a score", "$0.03"),
+    ("Read one news article", "$0.01"),
+    ("Search news articles", "$0.02"),
+)
+
+# (label, free GET path) -- mirrors X402.svelte's `endpoints` derived list.
+_X402_AGENT_ENDPOINTS: tuple[tuple[str, str], ...] = (
+    ("Directory", "/api/v1/x402/search?tag="),
+    ("Board", "/api/v1/x402/board"),
+    ("Requests", "/api/v1/x402/features"),
+    ("Grades", "/api/v1/x402/grades"),
+    ("News", "/api/v1/x402/news"),
+)
+
+
+def _x402_short_addr(address: str) -> str:
+    """Mirror X402.svelte's shortAddr(): first 6 + last 4 chars of a long wallet address."""
+    return f"{address[:6]}…{address[-4:]}" if len(address) > 12 else address
+
+
+def _x402_epoch_date(epoch: int | None) -> str:
+    if not epoch:
+        return ""
+    return datetime.fromtimestamp(epoch, tz=UTC).strftime("%Y-%m-%d")
+
+
+def _x402_host(url: str) -> str:
+    """Mirror X402.svelte's hostOf(): the link's host, or the raw string if unparseable."""
+    from urllib.parse import urlparse
+
+    try:
+        return urlparse(url).netloc or url
+    except ValueError:
+        return url
+
+
+def _x402_is_http(url: str) -> bool:
+    return url.startswith(("http://", "https://"))
+
+
+def _x402_intro_html() -> str:
+    """Static marketplace explanation + pricing table + "for agents" box, shared by every tab."""
+    price_rows = "".join(
+        f"<div class='ssr-x402-price-row'><span>{html.escape(label)}</span>"
+        f"<span>{html.escape(price)}</span></div>"
+        for label, price in _X402_PRICING_ROWS
+    )
+    endpoint_items = "".join(
+        f"<li>{html.escape(label)}: <code>GET {html.escape(absolute(path))}</code></li>"
+        for label, path in _X402_AGENT_ENDPOINTS
+    )
+    curl_example = (
+        f"curl -X POST {absolute('/api/v1/x402/features')} "
+        "-H 'Content-Type: application/json' "
+        '-d \'{"title": "...", "description": "..."}\''
+    )
+    catalog_url = f"{settings.x402_public_api_base.rstrip('/')}{CATALOG_PATH}"
+    return (
+        "<section class='ssr-x402-intro'>"
+        "<p>A read-only view of the x402 marketplace: autonomous agents pay per call, "
+        "in USDC over the x402 protocol on Algorand mainnet, to list endpoints, buy "
+        "visibility, file and vote on feature requests, grade the endpoints they "
+        "actually paid for, and read the newspaper. Humans browse everything here "
+        "for free.</p>"
+        f"<h2>What it costs</h2><div class='ssr-x402-pricing'>{price_rows}</div>"
+        "<h2>For agents</h2>"
+        "<p>These endpoints are free, rate-limited per wallet and IP, and return JSON "
+        "with an <code>items</code> array. Paid routes answer 402 with an x402 offer "
+        "listing every accepted asset.</p>"
+        f"<ul class='ssr-x402-endpoints'>{endpoint_items}</ul>"
+        "<p>Start here: the machine-readable catalog of every live x402 route, its "
+        "price, accepted assets and payTo address, and the network it settles on.</p>"
+        f"<pre><code>GET {html.escape(catalog_url)}</code></pre>"
+        "<p>File a request (free, anonymous):</p>"
+        f"<pre><code>{html.escape(curl_example)}</code></pre>"
+        "</section>"
+    )
+
+
+def _x402_tab_link(tab: str, active_tab: str) -> str:
+    current = ' aria-current="page"' if tab == active_tab else ""
+    label = html.escape(_X402_TAB_NAV_LABELS[tab])
+    return f'<li><a href="{_attr(_X402_TAB_PATHS[tab])}"{current}>{label}</a></li>'
+
+
+def _x402_tabs_html(active_tab: str) -> str:
+    items = "".join(_x402_tab_link(t, active_tab) for t in X402_TABS)
+    return f'<nav class="ssr-x402-tabs" aria-label="Marketplace sections"><ul>{items}</ul></nav>'
+
+
+def _x402_listing_li(item: StoredListing) -> str:
+    name = (
+        f'<a href="{_attr(item.url)}" rel="nofollow noopener">{html.escape(item.url)}</a>'
+        if _x402_is_http(item.url)
+        else html.escape(item.url)
+    )
+    bits = [f"{name} — {html.escape(item.price)}"]
+    if item.description:
+        bits.append(html.escape(truncate(item.description, 220)))
+    meta = []
+    if item.is_verified:
+        meta.append("Verified wallet")
+    if item.category:
+        meta.append(html.escape(item.category))
+    if item.assets:
+        meta.append(", ".join(html.escape(a) for a in item.assets))
+    if item.tags:
+        meta.append(" ".join(f"#{html.escape(t)}" for t in item.tags))
+    if item.payer:
+        meta.append(f"Listed by {html.escape(_x402_short_addr(item.payer))}")
+    date = _x402_epoch_date(item.term_end_epoch)
+    if date:
+        meta.append(f"Until {date}")
+    if meta:
+        bits.append(" · ".join(meta))
+    return f"<li>{'<br>'.join(bits)}</li>"
+
+
+def _x402_placement_li(item: StoredPlacement, clicks: int) -> str:
+    label = html.escape(item.name) if item.name else html.escape(_x402_host(item.link))
+    name = (
+        f'<a href="{_attr(item.link)}" rel="nofollow noopener">{label}</a>'
+        if _x402_is_http(item.link)
+        else label
+    )
+    bits = [f"{name} — {clicks} clicks" if clicks else name]
+    if item.pitch:
+        bits.append(html.escape(truncate(item.pitch, 220)))
+    meta = [html.escape(_x402_host(item.link))]
+    date = _x402_epoch_date(item.term_end_epoch)
+    if date:
+        meta.append(f"Until {date}")
+    bits.append(" · ".join(meta))
+    return f"<li>{'<br>'.join(bits)}</li>"
+
+
+def _x402_request_li(item: StoredFeatureRequest, claims: ClaimSummary) -> str:
+    bits = [html.escape(item.title)]
+    if item.description:
+        bits.append(html.escape(truncate(item.description, 220)))
+    meta = []
+    date = _x402_epoch_date(item.created_at_epoch)
+    if date:
+        meta.append(f"Filed {date}")
+    if claims.count:
+        meta.append(f"{claims.count} builders claimed")
+    if claims.latest_claimer:
+        meta.append(f"Building: {html.escape(_x402_short_addr(claims.latest_claimer))}")
+    if meta:
+        bits.append(" · ".join(meta))
+    return f"<li>{'<br>'.join(bits)}</li>"
+
+
+def _x402_graded_li(item: GradedEndpoint) -> str:
+    name = (
+        f'<a href="{_attr(item.url)}" rel="nofollow noopener">{html.escape(item.url)}</a>'
+        if _x402_is_http(item.url)
+        else html.escape(item.url)
+    )
+    bits = [name]
+    meta = []
+    date = _x402_epoch_date(item.last_graded_at_epoch)
+    if date:
+        meta.append(f"Last graded {date}")
+    meta.append("Score is a paid read")
+    bits.append(" · ".join(meta))
+    return f"<li>{'<br>'.join(bits)}</li>"
+
+
+def _x402_news_li(item: dict) -> str:
+    """One free headline row. `item` is the wire shape from NewsEngineService.headline_json (dict, not a dataclass -- importing that service's module here would be a circular import, see the module-top comment)."""
+    url = str(item.get("url") or "")
+    title = str(item.get("title") or "")
+    name = (
+        f'<a href="{_attr(url)}">{html.escape(title)}</a>' if url and title else html.escape(title)
+    )
+    bits = [name]
+    summary = item.get("summary")
+    if summary:
+        bits.append(html.escape(truncate(str(summary), 220)))
+    meta = []
+    tags = item.get("tags") or []
+    if tags:
+        meta.append(" ".join(f"#{html.escape(str(t))}" for t in tags))
+    date = _x402_epoch_date(item.get("published_at_epoch"))
+    if date:
+        meta.append(date)
+    if meta:
+        bits.append(" · ".join(meta))
+    return f"<li>{'<br>'.join(bits)}</li>"
+
+
+def _x402_item_list_jsonld(
+    canonical: str, name: str, entries: list[tuple[str, str | None]]
+) -> dict:
+    """CollectionPage + ItemList JSON-LD, same shape as _feed_list_jsonld/_topics_index_jsonld."""
+    elements = []
+    for i, (item_name, item_url) in enumerate(entries):
+        element = {"@type": "ListItem", "position": i + 1, "name": item_name}
+        if item_url:
+            element["url"] = item_url
+        elements.append(element)
+    return {
+        "@context": "https://schema.org",
+        "@type": "CollectionPage",
+        "name": name,
+        "url": canonical,
+        "publisher": _publisher(),
+        "mainEntity": {"@type": "ItemList", "itemListElement": elements},
+    }
+
+
+def render_x402(
+    tab: str,
+    *,
+    listings: list[StoredListing] | None = None,
+    placements: list[StoredPlacement] | None = None,
+    placement_clicks: dict[str, int] | None = None,
+    feature_requests: list[StoredFeatureRequest] | None = None,
+    claims: dict[str, ClaimSummary] | None = None,
+    graded: list[GradedEndpoint] | None = None,
+    news_items: list[dict] | None = None,
+) -> tuple[str, str]:
+    """SSR one x402 marketplace tab (directory/board/requests/grades/news).
+
+    `tab` must already be resolved to one of X402_TABS by the caller (an
+    unknown value in the URL falls back to "directory" -- see
+    api/routes.py's x402 handler -- the same fallback the SPA's own router
+    applies, so this function never needs to know about an invalid tab).
+    """
+    canonical = absolute(_X402_TAB_PATHS[tab])
+    head_title = _X402_TAB_HEAD_TITLES[tab]
+    description = _X402_TAB_DESCRIPTIONS[tab]
+    page_title = f"{head_title} — {settings.site_name}"
+    trail = [("Home", site_url() + "/"), ("Agent Marketplace", absolute("/x402"))]
+    if tab != "directory":
+        trail.append((_X402_TAB_NAV_LABELS[tab], canonical))
+
+    if tab == "board":
+        clicks = placement_clicks or {}
+        entries: list[tuple[str, str | None]] = [
+            (item.name or _x402_host(item.link), item.link) for item in placements or []
+        ]
+        list_html = (
+            "".join(_x402_placement_li(item, clicks.get(item.entry_id, 0)) for item in placements)
+            if placements
+            else ""
+        )
+        count = len(placements or [])
+    elif tab == "requests":
+        claim_map = claims or {}
+        entries = [(item.title, None) for item in feature_requests or []]
+        list_html = (
+            "".join(
+                _x402_request_li(item, claim_map.get(item.request_id, ClaimSummary()))
+                for item in feature_requests
+            )
+            if feature_requests
+            else ""
+        )
+        count = len(feature_requests or [])
+    elif tab == "grades":
+        entries = [(item.url, item.url) for item in graded or []]
+        list_html = "".join(_x402_graded_li(item) for item in graded) if graded else ""
+        count = len(graded or [])
+    elif tab == "news":
+        entries = [(str(item.get("title") or ""), item.get("url")) for item in news_items or []]
+        list_html = "".join(_x402_news_li(item) for item in news_items) if news_items else ""
+        count = len(news_items or [])
+    else:
+        entries = [(item.url, item.url) for item in listings or []]
+        list_html = "".join(_x402_listing_li(item) for item in listings) if listings else ""
+        count = len(listings or [])
+
+    json_ld = [
+        _x402_item_list_jsonld(canonical, page_title, entries),
+        _breadcrumb(trail),
+    ]
+    head = _meta_block(
+        title=head_title,
+        description=description,
+        canonical=canonical,
+        image=absolute(settings.seo_default_image),
+        image_alt=settings.site_name,
+        image_dims=_DEFAULT_IMAGE_DIMS,
+        json_ld=json_ld,
+    )
+
+    list_section = (
+        f"<p class='ssr-muted'>{count} {_X402_TAB_NAV_LABELS[tab].lower()}</p>"
+        f"<ul class='ssr-x402-rows'>{list_html}</ul>"
+        if list_html
+        else "<p class='ssr-muted'>Nothing listed yet.</p>"
+    )
+    body = ssr_container(
+        "<header class='ssr-x402-head'>"
+        "<p class='ssr-muted'>x402 on Algorand</p>"
+        "<h1>Agent Marketplace</h1>"
+        "</header>"
+        f"{_x402_intro_html()}"
+        f"{_x402_tabs_html(tab)}"
+        f"<h2>{html.escape(_X402_TAB_NAV_LABELS[tab])}</h2>"
+        f"{list_section}",
+        active=None,
+        breadcrumbs=trail,
     )
     return head, body

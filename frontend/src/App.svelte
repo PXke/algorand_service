@@ -16,8 +16,8 @@
     ecosystem: 'ecosystem',
   }
 
-  type X402Tab = 'directory' | 'board' | 'requests' | 'grades'
-  const X402_TABS: readonly X402Tab[] = ['directory', 'board', 'requests', 'grades']
+  type X402Tab = 'directory' | 'board' | 'requests' | 'grades' | 'news'
+  const X402_TABS: readonly X402Tab[] = ['directory', 'board', 'requests', 'grades', 'news']
 
   type View =
     | { name: 'home' }

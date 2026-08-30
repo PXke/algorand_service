@@ -7,16 +7,19 @@
   import {
     x402Api,
     X402_PATHS,
+    X402_CATALOG_URL,
+    X402_CATEGORIES,
     type X402Listing,
     type X402Placement,
     type X402FeatureRequest,
     type X402GradedEndpoint,
+    type X402NewsItem,
   } from '../lib/api/x402'
   import { formatDispatchStamp } from '../lib/liveClock'
   import PageMeta from '../components/PageMeta.svelte'
   import { SITE_TAGLINE } from '../lib/seo'
 
-  type X402Tab = 'directory' | 'board' | 'requests' | 'grades'
+  type X402Tab = 'directory' | 'board' | 'requests' | 'grades' | 'news'
 
   let { tab }: { tab: X402Tab } = $props()
 
@@ -24,20 +27,23 @@
   let placements: X402Placement[] = $state([])
   let requests: X402FeatureRequest[] = $state([])
   let graded: X402GradedEndpoint[] = $state([])
+  let newsItems: X402NewsItem[] = $state([])
   let loading = $state(true)
   let error = $state<string | null>(null)
   let tag = $state('')
+  let category = $state('')
   // The directory fetch keys on the debounced value, not the raw input, so
   // typing a tag does not fire one request per keystroke.
   let tagQuery = $state('')
 
-  const TABS: X402Tab[] = ['directory', 'board', 'requests', 'grades']
+  const TABS: X402Tab[] = ['directory', 'board', 'requests', 'grades', 'news']
 
   const tabLabel: Record<X402Tab, string> = {
     directory: 'x402TabDirectory',
     board: 'x402TabBoard',
     requests: 'x402TabRequests',
     grades: 'x402TabGrades',
+    news: 'x402TabNews',
   }
 
   const apiBase = $derived(config.apiBaseUrl.replace(/\/$/, '') || window.location.origin)
@@ -46,6 +52,7 @@
     { key: 'x402TabBoard', url: `${apiBase}${X402_PATHS.board}` },
     { key: 'x402TabRequests', url: `${apiBase}${X402_PATHS.features}` },
     { key: 'x402TabGrades', url: `${apiBase}${X402_PATHS.grades}` },
+    { key: 'x402TabNews', url: `${apiBase}${X402_PATHS.news}` },
   ])
   const curlExample = $derived(
     `curl -X POST ${apiBase}${X402_PATHS.features} -H 'Content-Type: application/json' -d '{"title": "...", "description": "..."}'`,
@@ -56,8 +63,14 @@
     { what: t($messages, 'x402PriceBoardLabel'), price: t($messages, 'x402PriceBoardValue') },
     { what: t($messages, 'x402PriceRequestLabel'), price: t($messages, 'x402PriceRequestValue') },
     { what: t($messages, 'x402PriceVoteLabel'), price: t($messages, 'x402PriceVoteValue') },
+    { what: t($messages, 'x402PriceDemandLabel'), price: t($messages, 'x402PriceDemandValue') },
     { what: t($messages, 'x402PriceGradeLabel'), price: t($messages, 'x402PriceGradeValue') },
     { what: t($messages, 'x402PriceScoreLabel'), price: t($messages, 'x402PriceScoreValue') },
+    { what: t($messages, 'x402PriceArticleLabel'), price: t($messages, 'x402PriceArticleValue') },
+    {
+      what: t($messages, 'x402PriceNewsSearchLabel'),
+      price: t($messages, 'x402PriceNewsSearchValue'),
+    },
   ])
 
   const count = $derived.by(() => {
@@ -70,6 +83,8 @@
         return requests.length
       case 'grades':
         return graded.length
+      case 'news':
+        return newsItems.length
     }
   })
 
@@ -81,22 +96,24 @@
     return () => clearTimeout(id)
   })
 
-  // One AbortController per reactive run: a tab switch or a new tag query
-  // cancels the request still in flight, so a slow earlier response can
-  // never overwrite the list the reader is now looking at.
+  // One AbortController per reactive run: a tab switch or a new tag/category
+  // query cancels the request still in flight, so a slow earlier response
+  // can never overwrite the list the reader is now looking at.
   $effect(() => {
     const which = tab
     const q = tagQuery
+    const cat = category
     const ac = new AbortController()
     loading = true
     error = null
     void (async () => {
       try {
         const opts = { signal: ac.signal }
-        if (which === 'directory') listings = await x402Api.search(q, opts)
+        if (which === 'directory') listings = await x402Api.search(q, cat, opts)
         else if (which === 'board') placements = await x402Api.board(opts)
         else if (which === 'requests') requests = await x402Api.features(opts)
-        else graded = await x402Api.grades(opts)
+        else if (which === 'grades') graded = await x402Api.grades(opts)
+        else newsItems = await x402Api.news(opts)
         if (ac.signal.aborted) return
         loading = false
       } catch (e) {
@@ -176,6 +193,9 @@
           </li>
         {/each}
       </ul>
+      <p class="curl-label">{t($messages, 'x402CatalogLabel')}</p>
+      <p class="muted">{t($messages, 'x402CatalogBody')}</p>
+      <pre class="curl"><code>GET {X402_CATALOG_URL}</code></pre>
       <p class="curl-label">{t($messages, 'x402ForAgentsCurlLabel')}</p>
       <pre class="curl"><code>{curlExample}</code></pre>
     </aside>
@@ -202,6 +222,17 @@
           autocomplete="off"
           spellcheck="false"
         />
+      </span>
+    </label>
+    <label class="find">
+      <span class="sr-only">{t($messages, 'x402CategoryFilter')}</span>
+      <span class="query-shell">
+        <select bind:value={category}>
+          <option value="">{t($messages, 'x402CategoryFilter')}</option>
+          {#each X402_CATEGORIES as c (c)}
+            <option value={c}>{c}</option>
+          {/each}
+        </select>
       </span>
     </label>
   {/if}
@@ -237,6 +268,9 @@
             <p class="meta">
               {#if item.verified_wallet}
                 <span class="badge verified">{t($messages, 'x402Verified')}</span>
+              {/if}
+              {#if item.category}
+                <span class="badge">{item.category}</span>
               {/if}
               {#each item.assets ?? [] as asset (asset)}
                 <span class="badge">{asset}</span>
@@ -306,11 +340,16 @@
               {#if typeof item.claims_count === 'number' && item.claims_count > 0}
                 <span class="badge">{t($messages, 'x402Claims', { count: item.claims_count })}</span>
               {/if}
+              {#if item.latest_claimer}
+                <span class="stamp"
+                  >{t($messages, 'x402Building')} {shortAddr(item.latest_claimer)}</span
+                >
+              {/if}
             </p>
           </li>
         {/each}
       </ul>
-    {:else}
+    {:else if tab === 'grades'}
       <ul class="rows">
         {#each graded as item, i (`${item.url}-${i}`)}
           <li class="row">
@@ -330,6 +369,29 @@
                 >
               {/if}
               <span class="stamp">{t($messages, 'x402ScorePaidHint')}</span>
+            </p>
+          </li>
+        {/each}
+      </ul>
+    {:else}
+      <ul class="rows">
+        {#each newsItems as item, i (`${item.article_id}-${i}`)}
+          <li class="row">
+            <div class="row-head">
+              <a class="name" href={item.url} target="_blank" rel="noopener noreferrer nofollow"
+                >{item.title}</a
+              >
+            </div>
+            {#if item.summary}
+              <p class="desc">{item.summary}</p>
+            {/if}
+            <p class="meta">
+              {#each item.tags ?? [] as tg (tg)}
+                <span class="badge">#{tg}</span>
+              {/each}
+              {#if stamp(item.published_at_epoch)}
+                <span class="stamp">{stamp(item.published_at_epoch)}</span>
+              {/if}
             </p>
           </li>
         {/each}

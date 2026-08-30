@@ -8,6 +8,7 @@ from app.core.rate_limit import incr_with_expiry
 from app.core.request_headers import client_ip
 
 _KEY_PREFIX = "algorand:x402:catalog_rl:"
+_SETTLEMENTS_KEY_PREFIX = "algorand:x402:settlements_rl:"
 _WINDOW_SECONDS = 3600
 
 
@@ -33,3 +34,19 @@ def catalog_rate_limited(request: Request) -> bool:
     if count is None:
         return False
     return count > settings.x402_catalog_rate_limit_per_hour
+
+
+def settlements_rate_limited(request: Request) -> bool:
+    """Return True when this IP has exceeded the hourly recent-settlements budget.
+
+    Same fail-open, same-key-per-IP shape as catalog_rate_limited, its own
+    prefix and its own setting so it never shares a budget with the catalog
+    or any product.
+    """
+    ip = client_ip(request.headers)
+    if not ip:
+        return False
+    count = incr_with_expiry(f"{_SETTLEMENTS_KEY_PREFIX}{ip}", window_seconds=_WINDOW_SECONDS)
+    if count is None:
+        return False
+    return count > settings.x402_settlements_rate_limit_per_hour

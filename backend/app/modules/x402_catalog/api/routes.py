@@ -11,8 +11,15 @@ from __future__ import annotations
 
 from app.core.http import Request, Response, Router
 from app.core.http_errors import json_error_response
-from app.modules.x402_catalog.services.catalog import CATALOG_PATH, build_catalog
-from app.modules.x402_catalog.services.rate_limit import catalog_rate_limited
+from app.modules.x402_catalog.services.catalog import (
+    CATALOG_PATH,
+    build_catalog,
+    recent_settlements_json,
+)
+from app.modules.x402_catalog.services.rate_limit import (
+    catalog_rate_limited,
+    settlements_rate_limited,
+)
 
 
 def x402_catalog(request: Request) -> Response | dict:
@@ -24,6 +31,16 @@ def x402_catalog(request: Request) -> Response | dict:
     return build_catalog()
 
 
+def x402_recent_settlements(request: Request) -> Response | dict:
+    """Free: real (non-operator) settlements across every product, newest first, rate-limited."""
+    if settlements_rate_limited(request):
+        return json_error_response(
+            429, "rate_limited", "Too many settlement-feed requests — please try again later"
+        )
+    return recent_settlements_json()
+
+
 def register_x402_catalog_routes(app: Router) -> None:
-    """Register the free catalog route."""
+    """Register the free catalog route and the free recent-settlements proof-of-volume feed."""
     app.get(CATALOG_PATH)(x402_catalog)
+    app.get("/api/v1/x402/settlements/recent")(x402_recent_settlements)

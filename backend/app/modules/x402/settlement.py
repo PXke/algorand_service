@@ -34,6 +34,7 @@ from app.core.store_factory import StoreFactory
 from app.modules.x402.assets import asset_for_asa_id
 from app.modules.x402.guard import PaymentResult
 from app.modules.x402.price_oracle import eur_pricing_id, get_eur_rate
+from app.modules.x402.probe_payers import is_probe_payer
 
 logger = logging.getLogger(__name__)
 
@@ -73,6 +74,10 @@ class SettlementStore(Protocol):
 
     def mark_fulfilled(self, tx_id: str) -> bool:
         """Flip one settlement to fulfilled. Returns False if no such row exists."""
+        ...
+
+    def list_for_day(self, day: str, *, limit: int) -> list[SettlementRecord]:
+        """One UTC day's settlements (YYYY-MM-DD), newest first, bounded."""
         ...
 
 
@@ -166,6 +171,38 @@ class CassandraSettlementStore:
         session.execute(X402Stmts.MARK_SETTLEMENT_BY_TX_FULFILLED, (True, tx_id))
         return True
 
+    def list_for_day(self, day: str, *, limit: int) -> list[SettlementRecord]:
+        """One UTC day's settlements, newest first, bounded by a single-partition LIMIT read.
+
+        The table has no explicit clustering order (defaults to settled_at
+        ASC), so this reads the LIMITed page in stored order and reverses it
+        in Python -- correct because the caller (recent_real_settlements)
+        bounds both the per-day LIMIT and the total number of days it scans,
+        never treating this as a paged cursor into a large partition.
+        """
+        from app.core.cassandra import get_cassandra_session
+        from app.core.statements import X402Stmts
+
+        rows = get_cassandra_session().execute(
+            X402Stmts.LIST_SETTLEMENTS_FOR_DAY_FULL, (day, limit)
+        )
+        out = [
+            SettlementRecord(
+                tx_id=row.tx_id,
+                asset_id=row.asset_id or "",
+                amount_atomic=row.amount_atomic or "",
+                payer=row.payer or "",
+                resource=row.resource or "",
+                network=row.network or "",
+                settled_at_epoch=int(row.settled_at.replace(tzinfo=UTC).timestamp()),
+                eur_value=EUR_VALUE_UNAVAILABLE if row.eur_value is None else float(row.eur_value),
+                fulfilled=bool(row.fulfilled),
+            )
+            for row in rows
+        ]
+        out.reverse()
+        return out
+
 
 class InMemorySettlementStore:
     """In-memory settlement ledger for dev and tests."""
@@ -189,6 +226,16 @@ class InMemorySettlementStore:
             return False
         record.fulfilled = True
         return True
+
+    def list_for_day(self, day: str, *, limit: int) -> list[SettlementRecord]:
+        """One UTC day's settlements, newest first, bounded."""
+        day_rows = [
+            s
+            for s in self.settlements
+            if datetime.fromtimestamp(s.settled_at_epoch, tz=UTC).strftime("%Y-%m-%d") == day
+        ]
+        day_rows.sort(key=lambda s: s.settled_at_epoch, reverse=True)
+        return day_rows[:limit]
 
 
 _factory: StoreFactory[SettlementStore] = StoreFactory(
@@ -344,3 +391,30 @@ def mark_fulfilled(
             resource,
         )
     return marked
+
+
+def recent_real_settlements(
+    *, limit: int = 25, lookback_days: int = 7, store: SettlementStore | None = None
+) -> list[SettlementRecord]:
+    """Real (non-probe) settlements, newest first, bounded.
+
+    "Real" means the payer is not in X402_PROBE_PAYERS -- our own
+    self-verification payments are excluded here the same way they are
+    excluded from every ranking (modules/x402/probe_payers.py), so this is
+    honest proof-of-customer-volume, not our own traffic wearing that label.
+
+    Scans today's UTC day partition backwards up to `lookback_days`, stopping
+    once `limit` real settlements have been collected -- bounded on both
+    axes, never an unbounded ledger scan (CLAUDE.md section 4).
+    """
+    active_store = store or get_settlement_store()
+    collected: list[SettlementRecord] = []
+    day = datetime.now(tz=UTC)
+    for _ in range(max(1, lookback_days)):
+        for record in active_store.list_for_day(day.strftime("%Y-%m-%d"), limit=200):
+            if not is_probe_payer(record.payer):
+                collected.append(record)
+                if len(collected) >= limit:
+                    return collected
+        day = day.fromtimestamp(day.timestamp() - 86400, tz=UTC)
+    return collected

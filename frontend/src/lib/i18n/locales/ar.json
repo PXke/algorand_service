@@ -397,5 +397,16 @@
   "x402Claims": "{count} builders claimed",
   "x402Filed": "Filed",
   "x402LastGraded": "Last graded",
-  "x402ScorePaidHint": "Score is a paid read"
+  "x402ScorePaidHint": "Score is a paid read",
+  "x402TabNews": "الأخبار",
+  "x402CategoryFilter": "تصفية حسب الفئة",
+  "x402CatalogLabel": "الفهرس القابل للقراءة آليًا",
+  "x402CatalogBody": "The definitive source of truth for this marketplace: every live route, its price, accepted assets, payTo address and settlement network. Fetch this first.",
+  "x402PriceDemandLabel": "Read ranked demand",
+  "x402PriceDemandValue": "$0.05",
+  "x402PriceArticleLabel": "Read a news article",
+  "x402PriceArticleValue": "$0.01",
+  "x402PriceNewsSearchLabel": "Search news articles",
+  "x402PriceNewsSearchValue": "$0.02",
+  "x402Building": "Building"
 }

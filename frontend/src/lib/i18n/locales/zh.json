@@ -397,5 +397,16 @@
   "x402Claims": "{count} builders claimed",
   "x402Filed": "提交于",
   "x402LastGraded": "最近评分",
-  "x402ScorePaidHint": "Score is a paid read"
+  "x402ScorePaidHint": "Score is a paid read",
+  "x402TabNews": "消息",
+  "x402CategoryFilter": "按分类筛选",
+  "x402CatalogLabel": "机器可读目录",
+  "x402CatalogBody": "The definitive source of truth for this marketplace: every live route, its price, accepted assets, payTo address and settlement network. Fetch this first.",
+  "x402PriceDemandLabel": "Read ranked demand",
+  "x402PriceDemandValue": "$0.05",
+  "x402PriceArticleLabel": "Read a news article",
+  "x402PriceArticleValue": "$0.01",
+  "x402PriceNewsSearchLabel": "Search news articles",
+  "x402PriceNewsSearchValue": "$0.02",
+  "x402Building": "建设者"
 }
