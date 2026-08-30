@@ -244,6 +244,32 @@ def test_malformed_body_is_rejected_before_the_payment_gate(
 
 
 @pytest.mark.usefixtures("testnet_settings", "fake_redis")
+def test_a_bad_scheme_link_is_rejected_before_the_payment_gate(
+    store: InMemoryPlacementStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A length-valid but non-http(s) link is a 400 taken BEFORE the gate — the schema only bounds the link's length, so scheme/host rejection used to land after the payer had already been charged."""
+    monkeypatch.setattr(board_routes, "board_service", BoardService(store))
+
+    def _must_not_charge(*_args: object, **_kwargs: object) -> Never:
+        raise AssertionError("the payment gate must not run for an unplaceable link")
+
+    monkeypatch.setattr(board_routes, "require_paid_request", _must_not_charge)
+
+    response = board_routes.x402_board_place(
+        _request(body=json.dumps({"link": "ftp://example.com", "name": "x"}).encode())
+    )
+
+    # 400, not the 402 an un-vetted link would have produced, and not a 200
+    # after a settled payment.
+    assert response.status_code == 400
+    assert "invalid_request" in response.description
+    assert "http or https" in response.description
+    # Nothing was written either.
+    assert board_routes.board_service.list_active(limit=50) == []
+
+
+@pytest.mark.usefixtures("testnet_settings", "fake_redis")
 def test_an_over_long_pitch_is_rejected_before_the_payment_gate(
     store: InMemoryPlacementStore,
     monkeypatch: pytest.MonkeyPatch,
@@ -322,7 +348,7 @@ def test_the_same_payer_replacing_their_own_link_renews_rather_than_duplicating(
     service = BoardService(store)
     base = datetime(2026, 8, 1, tzinfo=UTC)
     service.create(
-        link="https://agent.example.com/home",
+        normalized_link="https://agent.example.com/home",
         name="Agent",
         pitch="first",
         payer=_PAYER,
@@ -330,7 +356,9 @@ def test_the_same_payer_replacing_their_own_link_renews_rather_than_duplicating(
         now=base,
     )
     service.create(
-        link="https://AGENT.example.com/home",
+        # Normalized the way the route normalizes it, pre-gate: a differently
+        # cased host is the SAME tile, not a second one the payer must buy again.
+        normalized_link=normalize_link("https://AGENT.example.com/home"),
         name="Agent",
         pitch="second",
         payer=_PAYER,
@@ -352,14 +380,14 @@ def test_a_different_payer_cannot_overwrite_someone_elses_tile_for_the_same_link
     """Two payers advertising the same link each get their own tile — paying the small fee must not hijack another payer's pitch text."""
     service = BoardService(store)
     service.create(
-        link="https://agent.example.com/home",
+        normalized_link="https://agent.example.com/home",
         name="Real Agent",
         pitch="the genuine pitch",
         payer=_PAYER,
         settlement_tx_id="TX1",
     )
     service.create(
-        link="https://agent.example.com/home",
+        normalized_link="https://agent.example.com/home",
         name="Impostor",
         pitch="defaced",
         payer=_OTHER_PAYER,
@@ -380,14 +408,14 @@ def test_an_unattributable_payment_gets_its_own_tile_rather_than_colliding(
     """When the gate cannot attribute a payer, the txid stands in — two such payments must not overwrite each other."""
     service = BoardService(store)
     service.create(
-        link="https://agent.example.com/home",
+        normalized_link="https://agent.example.com/home",
         name="",
         pitch="first",
         payer="",
         settlement_tx_id="TXA",
     )
     service.create(
-        link="https://agent.example.com/home",
+        normalized_link="https://agent.example.com/home",
         name="",
         pitch="second",
         payer="",
@@ -425,7 +453,7 @@ def test_board_returns_placements_newest_first(
     service = BoardService(store)
     for index in range(3):
         service.create(
-            link=f"https://agent{index}.example.com/x",
+            normalized_link=f"https://agent{index}.example.com/x",
             name=f"Agent {index}",
             pitch=f"pitch {index}",
             payer=_PAYER,
@@ -446,7 +474,7 @@ def test_a_placement_whose_term_has_ended_is_no_longer_advertised(
     service = BoardService(store)
     base = datetime(2026, 8, 1, tzinfo=UTC)
     service.create(
-        link="https://agent.example.com/x",
+        normalized_link="https://agent.example.com/x",
         name="Agent",
         pitch="expiring",
         payer=_PAYER,
@@ -468,7 +496,7 @@ def test_board_limit_is_clamped_to_the_configured_maximum(
     service = BoardService(store)
     for index in range(5):
         service.create(
-            link=f"https://agent{index}.example.com/x",
+            normalized_link=f"https://agent{index}.example.com/x",
             name=f"Agent {index}",
             pitch=f"pitch {index}",
             payer=_PAYER,

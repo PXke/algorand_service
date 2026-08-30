@@ -1,12 +1,17 @@
-"""x402 KYC ping endpoint tests.
+"""The 402 offer KYC's paid lookup serves before anyone has paid.
 
-The 402-without-payment path runs fully offline: a stub facilitator client
-avoids any real network call, and asserts verify()/settle() are never reached
-when no payment header is present. The happy-path round trip needs a funded
-Algorand TestNet payer account and a reachable facilitator, so it's written
-but skipped by default (see the plan/memory: testnet account setup was
-explicitly deferred). It has not been run end-to-end yet — treat it as a
-starting point, not a verified reference, if it needs fixing later.
+Fully offline: a stub facilitator client avoids any real network call and
+asserts verify()/settle() are never reached when no payment header is
+present.
+
+Was test_x402_kyc_ping.py, covering a throwaway /api/v1/kyc/_test/ping route
+that charged a hardcoded $0.01 through the low-level gate with no replay
+protection and no ledger row. That route is deleted; what survives here is
+the part that was never about the ping — the shape of the 402 itself (status,
+PAYMENT-REQUIRED header, the contest challenge tag, the Bazaar discovery
+declaration), now exercised against kyc-verify, the module's one real paid
+resource. The paid path's replay rejection and ledger write live in
+test_kyc_routes.py.
 """
 
 from __future__ import annotations
@@ -39,7 +44,7 @@ def _fake_request(headers: dict[str, str] | None = None) -> Request:
         query_params=QueryParams(),
         path_params={},
         body=b"",
-        url=SimpleNamespace(scheme="http", host="localhost", path="/api/v1/kyc/_test/ping"),
+        url=SimpleNamespace(scheme="http", host="localhost", path="/api/v1/kyc/verify"),
     )
 
 
@@ -77,7 +82,7 @@ def test_require_payment_returns_402_without_payment_header(
     monkeypatch.setattr(settings, "x402_network", ALGORAND_TESTNET_CAIP2)
     monkeypatch.setattr(settings, "x402_pay_to_address", "A" * 58)
 
-    result = x402_guard.require_payment(_fake_request(), price="$0.01", resource="kyc-ping")
+    result = x402_guard.require_payment(_fake_request(), price="$0.05", resource="kyc-verify")
 
     assert result.error is not None
     assert result.error.status_code == 402
@@ -100,7 +105,7 @@ def test_require_payment_always_carries_the_challenge_tag(monkeypatch: pytest.Mo
     monkeypatch.setattr(settings, "x402_network", ALGORAND_TESTNET_CAIP2)
     monkeypatch.setattr(settings, "x402_pay_to_address", "A" * 58)
 
-    result = x402_guard.require_payment(_fake_request(), price="$0.01", resource="kyc-ping")
+    result = x402_guard.require_payment(_fake_request(), price="$0.05", resource="kyc-verify")
 
     payment_required = decode_payment_required_header(result.error.headers["PAYMENT-REQUIRED"])
     assert payment_required.accepts[0].extra["tag"] == x402_client.CHALLENGE_TAG
@@ -133,8 +138,8 @@ def test_require_payment_declares_bazaar_discovery_when_extensions_passed(
 
     result = x402_guard.require_payment(
         _fake_request(),
-        price="$0.01",
-        resource="kyc-ping",
+        price="$0.05",
+        resource="kyc-verify",
         extensions=declare_discovery_extension(
             input={"wallet": "ABC..."},
             input_schema={"properties": {"wallet": {"type": "string"}}, "required": ["wallet"]},
@@ -155,18 +160,16 @@ def test_require_payment_has_no_bazaar_declaration_when_extensions_omitted(
     monkeypatch.setattr(settings, "x402_network", ALGORAND_TESTNET_CAIP2)
     monkeypatch.setattr(settings, "x402_pay_to_address", "A" * 58)
 
-    result = x402_guard.require_payment(_fake_request(), price="$0.01", resource="kyc-ping")
+    result = x402_guard.require_payment(_fake_request(), price="$0.05", resource="kyc-verify")
 
     payment_required = decode_payment_required_header(result.error.headers["PAYMENT-REQUIRED"])
     assert not (payment_required.extensions or {}).get("bazaar")
 
 
 def test_kyc_routes_declare_discovery_extension_without_raising() -> None:
-    """Regression: both KYC paid routes built their Bazaar discovery extension with a real AttributeError before this fix -- output={"example": ...} is a plain dict, but the installed package reads output.example as an attribute, not a dict key. Both routes now go through describe_json_endpoint (modules/x402/discovery.py), which cannot reproduce this bug -- it always wraps in OutputConfig. Calling it with the exact shape each route uses must not raise."""
+    """Regression: the KYC paid routes built their Bazaar discovery extension with a real AttributeError before this fix -- output={"example": ...} is a plain dict, but the installed package reads output.example as an attribute, not a dict key. The route now goes through describe_json_endpoint (modules/x402/discovery.py), which cannot reproduce this bug -- it always wraps in OutputConfig. Calling it with the exact shape the route uses must not raise."""
     from app.modules.x402.discovery import describe_json_endpoint
 
-    # Same shape as kyc_test_ping's extensions= argument.
-    describe_json_endpoint(input={}, input_schema={}, output_example={"ok": True, "paid_by": "..."})
     # Same shape as kyc_verify's extensions= argument.
     describe_json_endpoint(
         input={"wallet": "ALGORAND_ADDRESS"},
@@ -186,8 +189,15 @@ def test_kyc_routes_declare_discovery_extension_without_raising() -> None:
     "(set X402_TESTNET_INTEGRATION=1, X402_TEST_PAYER_MNEMONIC, "
     "and run the backend with X402_ENABLED=true against X402_TEST_BASE_URL)",
 )
-def test_kyc_ping_round_trip_on_testnet() -> None:
-    """Full 402 -> pay -> verify -> settle round trip against the real GoPlausible facilitator on TestNet. Written against x402-avm==2.0.2 source (2026-07-13) but not yet executed — no funded TestNet account existed at write time. Re-check the lower-level calls here against the installed package first if this fails."""
+def test_kyc_verify_round_trip_on_testnet() -> None:
+    """Full 402 -> pay -> verify -> settle round trip against the real GoPlausible facilitator on TestNet. Written against x402-avm==2.0.2 source (2026-07-13) but not yet executed — no funded TestNet account existed at write time. Re-check the lower-level calls here against the installed package first if this fails.
+
+    Was pointed at the deleted /api/v1/kyc/_test/ping route; kept and retargeted
+    at the real paid lookup rather than deleted with it, because a real
+    round-trip is the one thing Phase 0 acceptance actually depends on
+    (CLAUDE.md 9.1) and this is the only harness for it. Still never executed —
+    treat it as a starting point, not a verified reference.
+    """
     import base64
 
     import httpx
@@ -219,8 +229,14 @@ def test_kyc_ping_round_trip_on_testnet() -> None:
                 out.append(base64.b64decode(encoding.msgpack_encode(signed)))
             return out
 
+    # The payer's own address is a real, checksum-valid Algorand address, so it
+    # passes kyc_verify's pre-gate format check. It is almost certainly not
+    # enrolled, which is fine: a miss is a chargeable answer, and what this
+    # exercises is the payment round trip, not the lookup result.
+    verify_url = f"{base_url}/api/v1/kyc/verify?wallet={address}"
+
     with httpx.Client(timeout=30.0) as client:
-        first = client.get(f"{base_url}/api/v1/kyc/_test/ping")
+        first = client.get(verify_url)
         assert first.status_code == 402
         payment_required = decode_payment_required_header(first.headers["PAYMENT-REQUIRED"])
         requirements = payment_required.accepts[0]
@@ -230,11 +246,13 @@ def test_kyc_ping_round_trip_on_testnet() -> None:
         payload = PaymentPayload(payload=inner_payload, accepted=requirements)
         header = encode_payment_signature_header(payload)
 
-        second = client.get(
-            f"{base_url}/api/v1/kyc/_test/ping",
-            headers={"PAYMENT-SIGNATURE": header},
-        )
+        second = client.get(verify_url, headers={"PAYMENT-SIGNATURE": header})
         assert second.status_code == 200
-        body = second.json()
-        assert body["ok"] is True
-        assert body["paid_by"] == address
+        assert second.json()["wallet_address"] == address
+
+        # The same header a second time must now be refused as a replay, since
+        # this route goes through require_paid_request rather than the bare
+        # gate. This is the live counterpart of the offline replay test in
+        # test_kyc_routes.py.
+        third = client.get(verify_url, headers={"PAYMENT-SIGNATURE": header})
+        assert third.status_code == 409

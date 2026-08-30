@@ -90,7 +90,7 @@ class BoardService:
     def create(
         self,
         *,
-        link: str,
+        normalized_link: str,
         name: str,
         pitch: str,
         payer: str,
@@ -99,18 +99,29 @@ class BoardService:
     ) -> StoredPlacement:
         """Store a paid placement for the configured term and return it.
 
+        `normalized_link` must already have come from `normalize_link`. The
+        caller normalizes rather than this method because normalization is
+        what rejects a non-http(s) or host-less link, and that rejection has
+        to happen BEFORE the payment gate -- normalizing here as well would
+        either be redundant work or, worse, invite a caller to skip the
+        pre-gate check and charge for a link it then refuses.
+
         Re-placing a link the same payer already has on the board replaces it
         and re-stamps both created_at and term_end: they paid for a fresh term
         starting now, not for an extension of whatever the previous term was.
         Re-stamping created_at also moves the tile back to the front of the
         newest-first feed, which is the visibility they just paid for.
         """
+        if not normalized_link:
+            # normalize_link cannot return this, so it means a caller skipped
+            # it. Refuse rather than key a tile on the empty string, which
+            # would collide every such placement onto one row per owner.
+            raise BoardError("invalid_request", "link must be normalized before placement")
         moment = now or datetime.now(tz=UTC)
-        normalized = normalize_link(link)
         owner = _owner_key(payer=payer, settlement_tx_id=settlement_tx_id)
         placement = StoredPlacement(
-            entry_id=placement_id(owner=owner, normalized_link=normalized),
-            link=normalized,
+            entry_id=placement_id(owner=owner, normalized_link=normalized_link),
+            link=normalized_link,
             name=name.strip()[:_MAX_NAME_LENGTH],
             pitch=pitch.strip()[:_MAX_PITCH_LENGTH],
             payer=payer.strip(),

@@ -17,7 +17,7 @@ from app.core.query_params import query_param
 from app.modules.x402.discovery import describe_json_endpoint
 from app.modules.x402.paid_request import require_paid_request
 from app.modules.x402_board.models.domain import BoardError, StoredPlacement
-from app.modules.x402_board.services.board_service import BoardService
+from app.modules.x402_board.services.board_service import BoardService, normalize_link
 from app.modules.x402_board.services.rate_limit import board_read_rate_limited
 from app.schemas import X402BoardPlacementRequest
 
@@ -48,16 +48,25 @@ def _placement_json(item: StoredPlacement) -> dict:
 def x402_board_place(request: Request) -> Response:
     """Paid: place one link and pitch on the public visibility board for a fixed term.
 
-    The body is parsed and validated BEFORE the payment gate runs, so a
-    malformed request is rejected with a 400 without anyone being charged for
-    it. Nothing is written before the payment settles, and once it has settled
-    the placement is stored and returned -- a settled payment never yields a
-    4xx.
+    Everything checkable without knowing who is paying is checked BEFORE the
+    payment gate, so a caller is never charged for a request that was doomed:
+    the body is decoded and range-checked, and the link is normalized -- which
+    is where scheme and host are enforced -- both 400s. The schema's length
+    bound alone does NOT establish that a link is placeable, so normalizing
+    after the gate would charge for `ftp://example.com` and then reject it.
+
+    Nothing is written before the payment settles, and once it has settled the
+    placement is stored and returned -- a settled payment never yields a 4xx.
     """
     try:
         payload = serialization.decode(request.body, X402BoardPlacementRequest)
     except serialization.DecodeError as exc:
         return json_error_response(400, "invalid_request", str(exc))
+
+    try:
+        normalized_link = normalize_link(payload.link)
+    except BoardError as exc:
+        return json_error_from_platform(exc)
 
     term_days = settings.x402_board_term_days
     result = require_paid_request(
@@ -98,17 +107,20 @@ def x402_board_place(request: Request) -> Response:
 
     try:
         placement = board_service.create(
-            link=payload.link,
+            normalized_link=normalized_link,
             name=payload.name,
             pitch=payload.pitch,
             payer=result.payer or "",
             settlement_tx_id=result.payment_txid or "",
         )
     except BoardError as exc:
-        # Unreachable in practice — the link is validated during decode and the
-        # only other raiser is normalize_link, which runs on the same input.
-        # Kept explicit so a future validation rule cannot silently 500 a
-        # request whose payment has already been taken.
+        # No currently-reachable path raises here: the link was normalized
+        # above, before the gate, and create()'s only raiser is its guard
+        # against an empty normalized link, which normalize_link cannot
+        # return. Kept explicit so that if a future rule DOES raise on this
+        # side of the gate it maps to its own status instead of a bare 500 --
+        # but note that reaching this line at all would mean a settled payment
+        # ending in a 4xx, so a new rule belongs before the gate, not after it.
         return json_error_from_platform(exc)
 
     return Response(

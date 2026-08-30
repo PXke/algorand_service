@@ -190,6 +190,21 @@ class Settings(msgspec.Struct, kw_only=True):
     # automated sweep from x402_pay_to_address. Empty = payouts are skipped
     # (logged, never block the paid lookup response) until configured.
     kyc_payout_mnemonic: str = ""
+    # Free-endpoint abuse gate (CLAUDE.md section 9: rate limit every free
+    # endpoint per wallet and per IP), same Redis incr/expire shape as the
+    # other x402 modules, under its own key prefix. Three separate budgets
+    # because the two free KYC endpoints cost wildly different things:
+    #   - consent-message is a pure string build, so it gets the same generous
+    #     hourly allowance the other modules' free reads get;
+    #   - enroll fires two outbound indexer requests and a Cassandra write per
+    #     hit, so its per-IP allowance is much tighter;
+    #   - enroll is additionally limited per WALLET, because the cost that
+    #     actually matters is how many distinct wallets get enrolled and
+    #     wallet addresses are free to generate. Re-enrolling only refreshes
+    #     an existing row's signals, so a handful a day is plenty.
+    kyc_consent_rate_limit_per_hour: int = 120
+    kyc_enroll_rate_limit_per_hour: int = 20
+    kyc_enroll_wallet_rate_limit_per_day: int = 5
 
     # x402 endpoint directory (POST /x402/list paid, GET /x402/search free).
     # See app/modules/x402_directory/.

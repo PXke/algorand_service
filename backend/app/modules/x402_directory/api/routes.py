@@ -17,7 +17,12 @@ from app.core.query_params import query_param
 from app.modules.x402.discovery import describe_json_endpoint
 from app.modules.x402.paid_request import require_paid_request
 from app.modules.x402_directory.models.domain import DirectoryError, StoredListing
-from app.modules.x402_directory.services.listing_service import ListingService
+from app.modules.x402_directory.services.listing_service import (
+    MAX_SCHEMA_JSON_BYTES,
+    ListingService,
+    encode_schema,
+    normalize_url,
+)
 from app.modules.x402_directory.services.rate_limit import search_rate_limited
 from app.schemas import X402ListingRequest
 
@@ -52,15 +57,30 @@ def _listing_json(item: StoredListing) -> dict:
 def x402_list(request: Request) -> Response:
     """Paid: list an x402 endpoint in the directory for a fixed term.
 
-    The body is parsed and validated BEFORE the payment gate runs, so a
-    malformed request is rejected with a 400 without anyone being charged for
-    it. Nothing is written before the payment settles, and once it has settled
-    the listing is stored and returned — a settled payment never yields a 4xx.
+    Everything checkable without knowing who is paying is checked BEFORE the
+    payment gate, so a caller is never charged for a request that was doomed:
+    the body is decoded and its fields range-checked, the URL is normalized
+    (scheme/host validity), and the request schema is encoded and size-checked.
+    All three are 400s nobody pays for. The gate runs only once the request is
+    known to be storable.
+
+    After the gate, the one remaining way to fail is the ownership check in
+    listing_service.create() — a relist attempt against a URL another payer
+    owns, which cannot be evaluated before the gate because the payer's
+    identity does not exist until the payment settles. That is the only
+    settled-payment-yields-a-4xx path on this route, and it is deliberate; see
+    create()'s docstring.
     """
     try:
         payload = serialization.decode(request.body, X402ListingRequest)
     except serialization.DecodeError as exc:
         return json_error_response(400, "invalid_request", str(exc))
+
+    try:
+        normalized_url = normalize_url(payload.url)
+        schema_json = encode_schema(payload.schema)
+    except DirectoryError as exc:
+        return json_error_from_platform(exc)
 
     term_days = settings.x402_listing_term_days
     result = require_paid_request(
@@ -71,7 +91,9 @@ def x402_list(request: Request) -> Response:
         # commit — the term length is not derivable from the price alone.
         description=(
             f"List one x402 endpoint in the public PXke x402 directory for {term_days} days. "
-            f"Discoverable immediately at GET /api/v1/x402/search."
+            f"Discoverable immediately at GET /api/v1/x402/search, and removed from it when "
+            f"the {term_days} days are up. Optional `schema` must serialize to at most "
+            f"{MAX_SCHEMA_JSON_BYTES} bytes."
         ),
         extensions=describe_json_endpoint(
             # POST carries its input as a JSON body, so this must declare a
@@ -86,8 +108,19 @@ def x402_list(request: Request) -> Response:
                     "url": {"type": "string", "maxLength": 2048},
                     "price": {"type": "string", "maxLength": 64},
                     "description": {"type": "string", "maxLength": 2000},
-                    "assets": {"type": "array", "items": {"type": "string"}},
-                    "tags": {"type": "array", "items": {"type": "string"}},
+                    "assets": {
+                        "type": "array",
+                        "maxItems": 16,
+                        "items": {"type": "string", "maxLength": 64},
+                    },
+                    "tags": {
+                        "type": "array",
+                        "maxItems": 16,
+                        "items": {"type": "string", "maxLength": 64},
+                    },
+                    # JSON Schema has no serialized-byte-size keyword, so the
+                    # 4 KiB cap enforced by encode_schema() above cannot be
+                    # declared here; it is stated in the description instead.
                     "schema": {"type": "object"},
                 },
                 "required": ["url", "price"],
@@ -104,19 +137,22 @@ def x402_list(request: Request) -> Response:
 
     try:
         listing = listing_service.create(
-            url=payload.url,
+            normalized_url=normalized_url,
             price=payload.price,
             description=payload.description,
             assets=payload.assets,
             tags=payload.tags,
-            schema=payload.schema,
+            schema_json=schema_json,
             settlement_tx_id=result.payment_txid or "",
             payer=result.payer or "",
         )
     except DirectoryError as exc:
         # Reachable now (migration 094): a relist attempt by a different
         # payer than the current owner is refused here, payment already
-        # taken — see listing_service.create()'s ownership check.
+        # taken — see listing_service.create()'s ownership check. That check
+        # is the ONLY reachable raiser on this side of the gate: the URL and
+        # the schema were both validated above, before it. A new validation
+        # rule belongs there too, never here.
         return json_error_from_platform(exc)
 
     return Response(
@@ -133,7 +169,11 @@ def x402_list(request: Request) -> Response:
 
 
 def x402_search(request: Request) -> Response | dict:
-    """Free: the directory's listings, newest first, rate-limited per IP."""
+    """Free: the directory's unexpired listings, newest first, rate-limited per IP.
+
+    Listings whose paid term has ended are excluded — see
+    listing_service.search().
+    """
     if search_rate_limited(request):
         return json_error_response(
             429, "rate_limited", "Too many search requests — please try again later"

@@ -370,13 +370,30 @@ class X402ListingRequest(msgspec.Struct, kw_only=True):
     `schema` mirrors the field name in the stored listing's JSON representation;
     it is persisted as a JSON string in the schema_json column (SCHEMA is a
     reserved CQL keyword and cannot be a bare column name).
+
+    Every field is bounded, in item COUNT and in per-item length. A listing is
+    paid input served back inline, for free, up to
+    settings.x402_search_max_results at a time by GET /x402/search, so an
+    unbounded field here is an unbounded free response at our egress cost. The
+    64-character item bound matches this struct's own `price` bound and sits
+    under x402_board's 80-character `name`; it holds an asset symbol or ASA id
+    and a tag comfortably, which is all either list is for.
+
+    `schema` is the one field msgspec cannot bound declaratively (an arbitrary
+    JSON object has no length). Its serialized size is capped by
+    listing_service.encode_schema(), called by the route BEFORE the payment
+    gate -- see MAX_SCHEMA_JSON_BYTES there for the number and the reasoning.
     """
 
     url: Annotated[str, Meta(min_length=8, max_length=2048)]
     price: Annotated[str, Meta(min_length=1, max_length=64)]
     description: Annotated[str, Meta(max_length=2000)] = ""
-    assets: Annotated[list[str], Meta(max_length=16)] = field(default_factory=list)
-    tags: Annotated[list[str], Meta(max_length=16)] = field(default_factory=list)
+    assets: Annotated[list[Annotated[str, Meta(max_length=64)]], Meta(max_length=16)] = field(
+        default_factory=list
+    )
+    tags: Annotated[list[Annotated[str, Meta(max_length=64)]], Meta(max_length=16)] = field(
+        default_factory=list
+    )
     schema: dict | None = None
 
 

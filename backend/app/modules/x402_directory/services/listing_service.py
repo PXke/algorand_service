@@ -15,6 +15,16 @@ from app.modules.x402_directory.stores.factory import get_listing_store
 _ALLOWED_SCHEMES = ("http", "https")
 _MAX_URL_LENGTH = 2048
 
+# Cap on one listing's serialized request schema. Deliberately far below the
+# 256 KiB global body cap (core/falcon_router.py): a listing is paid input that
+# GET /x402/search serves back inline, for free, up to
+# settings.x402_search_max_results (100) at a time, so the body cap alone would
+# put a ~25 MB free response one paid listing at a time within reach. At 4 KiB
+# -- twice this struct's largest free-text bound, `description` at 2000 -- a
+# full 100-listing search response stays around 1 MB. It is also generous for
+# what the field is for: a JSON Schema describing one endpoint's input.
+MAX_SCHEMA_JSON_BYTES = 4096
+
 
 def normalize_url(raw: str) -> str:
     """Normalize an endpoint URL to the canonical form the directory keys on.
@@ -34,6 +44,26 @@ def normalize_url(raw: str) -> str:
     if not parts.hostname:
         raise DirectoryError("invalid_request", "url must include a host")
     return urlunsplit((parts.scheme.lower(), parts.netloc.lower(), parts.path, parts.query, ""))
+
+
+def encode_schema(schema: dict | None) -> str:
+    """Serialize a listing's request schema to the stored JSON string, size-capped.
+
+    Raises invalid_request if the encoded form exceeds MAX_SCHEMA_JSON_BYTES.
+    The route calls this BEFORE the payment gate, so an oversized schema is a
+    400 that nobody is charged for; create() takes the string this returns
+    rather than the dict, so the encoding and the size check happen exactly
+    once on the paid path.
+    """
+    if not schema:
+        return ""
+    encoded = serialization.dumps(schema)
+    if len(encoded.encode("utf-8")) > MAX_SCHEMA_JSON_BYTES:
+        raise DirectoryError(
+            "invalid_request",
+            f"schema must serialize to at most {MAX_SCHEMA_JSON_BYTES} bytes",
+        )
+    return encoded
 
 
 def url_hash(normalized_url: str) -> str:
@@ -60,17 +90,23 @@ class ListingService:
     def create(
         self,
         *,
-        url: str,
+        normalized_url: str,
         price: str,
         description: str,
         assets: list[str],
         tags: list[str],
-        schema: dict | None,
+        schema_json: str,
         settlement_tx_id: str,
         payer: str,
         now: datetime | None = None,
     ) -> StoredListing:
         """Store a paid listing for the configured term and return it.
+
+        Takes the URL ALREADY normalized (normalize_url) and the schema ALREADY
+        encoded (encode_schema), because both of those can reject a request and
+        both must therefore run before the payment gate, not here -- see the
+        route's docstring. Doing them again here would be doing paid-path work
+        twice; the guards below only re-assert what those two produce.
 
         Re-listing a URL already in the directory replaces it and re-stamps both
         created_at and term_end: the payer paid for a fresh term starting now,
@@ -99,8 +135,20 @@ class ListingService:
         (existing.payer == ""), same as any other payer.
         """
         moment = now or datetime.now(tz=UTC)
-        normalized = normalize_url(url)
-        key = url_hash(normalized)
+        if not normalized_url.strip():
+            # normalize_url cannot return this, so the route cannot reach it.
+            # Kept so a future caller cannot store a listing keyed on nothing.
+            raise DirectoryError("invalid_request", "url must include a host")
+        if len(schema_json.encode("utf-8")) > MAX_SCHEMA_JSON_BYTES:
+            # Likewise unreachable from the route, which calls encode_schema()
+            # before the gate. This is the durable guard on the column: a
+            # future caller must not be able to store an unbounded blob that
+            # the free search then serves back inline.
+            raise DirectoryError(
+                "invalid_request",
+                f"schema must serialize to at most {MAX_SCHEMA_JSON_BYTES} bytes",
+            )
+        key = url_hash(normalized_url)
         existing = self.store.get(key)
         if existing is not None and existing.payer and existing.payer != payer:
             raise DirectoryError(
@@ -110,10 +158,10 @@ class ListingService:
             )
         listing = StoredListing(
             url_hash=key,
-            url=normalized,
+            url=normalized_url,
             price=price,
             description=description.strip(),
-            schema_json=serialization.dumps(schema) if schema else "",
+            schema_json=schema_json,
             settlement_tx_id=settlement_tx_id,
             term_end_epoch=int(
                 (moment + timedelta(days=settings.x402_listing_term_days)).timestamp()
@@ -126,7 +174,33 @@ class ListingService:
         self.store.upsert(listing)
         return listing
 
-    def search(self, *, limit: int) -> list[StoredListing]:
-        """Return listings newest-first, clamped to the configured maximum."""
+    def search(self, *, limit: int, now: datetime | None = None) -> list[StoredListing]:
+        """Return listings whose term is still running, newest-first, clamped.
+
+        The name stays `search` rather than becoming `search_active`: for a
+        search endpoint, live results are what a caller already expects, and it
+        is returning EXPIRED ones that would need announcing.
+
+        A listing whose term has ended must stop being served: the 402 offer
+        sells "List one x402 endpoint ... for N days" and one payment bought
+        one term, not permanent presence in the directory. Before this filter
+        existed, nothing on the read path looked at term_end_epoch at all, so a
+        single payment listed a URL forever.
+
+        Mirrors x402_board's BoardService.list_active(), including its
+        tradeoff: expired rows are dropped HERE rather than in each store, so
+        the rule applies identically to Cassandra and memory, and the filter
+        runs after the LIMITed read rather than as a CQL predicate -- so a page
+        can come back short when the front of the feed is full of expired
+        listings. Accepted for the same reason it is accepted there: the feed
+        is a single bounded partition (DIRECTORY_PARTITION) and every read
+        stays LIMITed, whereas filtering in CQL on a non-key column would mean
+        ALLOW FILTERING, which CLAUDE.md section 4 forbids. A Cassandra TTL on
+        the projection, or a sweep, is the real fix and is not built here.
+        """
+        moment = now or datetime.now(tz=UTC)
+        cutoff = int(moment.timestamp())
         clamped = max(1, min(limit, settings.x402_search_max_results))
-        return self.store.list_recent(limit=clamped)
+        return [
+            item for item in self.store.list_recent(limit=clamped) if item.term_end_epoch > cutoff
+        ]

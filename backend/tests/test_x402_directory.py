@@ -9,6 +9,7 @@ payment or reaches TestNet.
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any, Never
 
@@ -23,6 +24,7 @@ from x402.schemas.v1 import PaymentRequirementsV1
 from x402.server import x402ResourceServerSync
 
 from app.core import rate_limit as rate_limit_core
+from app.core import serialization
 from app.core.config import settings
 from app.core.http import QueryParams, Request, Response
 from app.modules.x402 import client as x402_client
@@ -34,11 +36,13 @@ from app.modules.x402.settlement import InMemorySettlementStore, SettlementRecor
 from app.modules.x402_directory.api import routes as directory_routes
 from app.modules.x402_directory.models.domain import DirectoryError, StoredListing
 from app.modules.x402_directory.services.listing_service import (
+    MAX_SCHEMA_JSON_BYTES,
     ListingService,
     normalize_url,
     url_hash,
 )
 from app.modules.x402_directory.stores.memory import InMemoryListingStore
+from app.schemas import X402ListingRequest
 
 _PAY_TO = "A" * 58
 
@@ -431,22 +435,22 @@ def test_relisting_the_same_url_replaces_it_rather_than_duplicating(
     """Re-listing a URL replaces the existing entry — the directory holds one listing per endpoint."""
     service = ListingService(store)
     service.create(
-        url="https://api.example.com/v1/quote",
+        normalized_url="https://api.example.com/v1/quote",
         price="$0.01",
         description="first",
         assets=[],
         tags=[],
-        schema=None,
+        schema_json="",
         settlement_tx_id="TX1",
         payer="AGENT1",
     )
     service.create(
-        url="https://API.example.com/v1/quote",
+        normalized_url=normalize_url("https://API.example.com/v1/quote"),
         price="$0.02",
         description="second",
         assets=[],
         tags=[],
-        schema=None,
+        schema_json="",
         settlement_tx_id="TX2",
         payer="AGENT1",
     )
@@ -461,24 +465,24 @@ def test_relisting_by_a_different_payer_is_refused(store: InMemoryListingStore) 
     """A listing already owned by one payer cannot be silently overwritten by another."""
     service = ListingService(store)
     service.create(
-        url="https://api.example.com/v1/quote",
+        normalized_url="https://api.example.com/v1/quote",
         price="$0.01",
         description="the real thing",
         assets=[],
         tags=[],
-        schema=None,
+        schema_json="",
         settlement_tx_id="TX1",
         payer="AGENT1",
     )
 
     with pytest.raises(DirectoryError, match="already listed by a different payer"):
         service.create(
-            url="https://api.example.com/v1/quote",
+            normalized_url="https://api.example.com/v1/quote",
             price="$999.00",
             description="hijacked",
             assets=[],
             tags=[],
-            schema=None,
+            schema_json="",
             settlement_tx_id="TX2",
             payer="AGENT2",
         )
@@ -510,12 +514,12 @@ def test_an_unowned_legacy_listing_can_be_claimed_by_anyone(store: InMemoryListi
     )
 
     service.create(
-        url="https://api.example.com/v1/quote",
+        normalized_url="https://api.example.com/v1/quote",
         price="$0.02",
         description="claimed",
         assets=[],
         tags=[],
-        schema=None,
+        schema_json="",
         settlement_tx_id="TX2",
         payer="AGENT1",
     )
@@ -531,24 +535,24 @@ def test_an_unattributable_payer_cannot_overwrite_an_owned_listing(
     """An empty/unattributable new payer must not bypass the ownership check."""
     service = ListingService(store)
     service.create(
-        url="https://api.example.com/v1/quote",
+        normalized_url="https://api.example.com/v1/quote",
         price="$0.01",
         description="the real thing",
         assets=[],
         tags=[],
-        schema=None,
+        schema_json="",
         settlement_tx_id="TX1",
         payer="AGENT1",
     )
 
     with pytest.raises(DirectoryError, match="already listed by a different payer"):
         service.create(
-            url="https://api.example.com/v1/quote",
+            normalized_url="https://api.example.com/v1/quote",
             price="$0.01",
             description="unattributable overwrite attempt",
             assets=[],
             tags=[],
-            schema=None,
+            schema_json="",
             settlement_tx_id="TX2",
             payer="",
         )
@@ -567,26 +571,208 @@ def test_invalid_endpoint_urls_are_rejected(bad_url: str) -> None:
 
 
 # --------------------------------------------------------------------------- #
+# Nothing chargeable is charged for a request that was already doomed
+# --------------------------------------------------------------------------- #
+@pytest.mark.usefixtures("testnet_settings", "fake_redis")
+@pytest.mark.parametrize(
+    "bad_url",
+    ["ftp://example.com/x", "not-a-url", "https://", "https://x.example/" + "a" * 2100],
+)
+def test_a_malformed_url_is_rejected_before_the_payment_gate(
+    bad_url: str, store: InMemoryListingStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A URL that create() would reject is a 400 BEFORE the gate — never a charged 400.
+
+    Regression: the scheme/host check used to run only inside create(), after
+    require_paid_request had already settled the payment, so listing
+    "ftp://example.com/x" charged the payer and then handed them a 400.
+    """
+    gate_calls: list[str] = []
+
+    def _record_gate(*_args: object, **_kwargs: object) -> Never:
+        gate_calls.append("gate")
+        raise AssertionError("the payment gate must not run for an invalid url")
+
+    monkeypatch.setattr(directory_routes, "listing_service", ListingService(store))
+    monkeypatch.setattr(directory_routes, "require_paid_request", _record_gate)
+
+    response = directory_routes.x402_list(
+        _request(body=json.dumps({"url": bad_url, "price": "$0.01"}).encode())
+    )
+
+    assert response.status_code == 400
+    assert "invalid_request" in response.description
+    # The gate never ran, so nothing was settled and nothing was stored.
+    assert gate_calls == []
+    assert store.list_recent(limit=50) == []
+
+
+@pytest.mark.usefixtures("testnet_settings", "fake_redis")
+def test_an_oversized_schema_is_rejected_before_the_payment_gate(
+    store: InMemoryListingStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A schema blob over the cap is a 400 before the gate — an unbounded paid write that the free search would then serve back inline is never accepted, and never charged for."""
+    gate_calls: list[str] = []
+
+    def _record_gate(*_args: object, **_kwargs: object) -> Never:
+        gate_calls.append("gate")
+        raise AssertionError("the payment gate must not run for an oversized schema")
+
+    monkeypatch.setattr(directory_routes, "listing_service", ListingService(store))
+    monkeypatch.setattr(directory_routes, "require_paid_request", _record_gate)
+
+    response = directory_routes.x402_list(
+        _request(
+            body=json.dumps(
+                {
+                    "url": "https://api.example.com/v1/quote",
+                    "price": "$0.01",
+                    "schema": {"blob": "x" * (MAX_SCHEMA_JSON_BYTES + 1)},
+                }
+            ).encode()
+        )
+    )
+
+    assert response.status_code == 400
+    assert "invalid_request" in response.description
+    assert gate_calls == []
+    assert store.list_recent(limit=50) == []
+
+
+@pytest.mark.usefixtures("testnet_settings", "fake_redis")
+def test_a_schema_within_the_cap_is_still_accepted(
+    store: InMemoryListingStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The cap bounds the field, it does not disable it — a normal request schema still lists."""
+    monkeypatch.setattr(directory_routes, "listing_service", ListingService(store))
+    monkeypatch.setattr(
+        directory_routes, "require_paid_request", lambda *_a, **_kw: _settled_result()
+    )
+
+    response = directory_routes.x402_list(
+        _request(
+            body=json.dumps(
+                {
+                    "url": "https://api.example.com/v1/quote",
+                    "price": "$0.01",
+                    "schema": {"type": "object", "properties": {"pair": {"type": "string"}}},
+                }
+            ).encode()
+        )
+    )
+
+    assert response.status_code == 200
+    listing = json.loads(response.description)["listing"]
+    assert listing["schema"] == {"type": "object", "properties": {"pair": {"type": "string"}}}
+
+
+@pytest.mark.parametrize("field_name", ["assets", "tags"])
+def test_an_overlong_asset_or_tag_item_is_rejected_at_decode(field_name: str) -> None:
+    """Each item of assets/tags is length-bounded, not just the item count — one paid listing cannot carry an unbounded string per item.
+
+    Decoding is the pre-gate step, so this is a 400 the caller is never charged
+    for, on the same pass as the malformed-body rejection.
+    """
+    body = json.dumps(
+        {"url": "https://api.example.com/v1/quote", "price": "$0.01", field_name: ["x" * 65]}
+    ).encode()
+
+    with pytest.raises(serialization.DecodeError):
+        serialization.decode(body, X402ListingRequest)
+
+    # ... and the same field is fine at the bound.
+    ok = json.dumps(
+        {"url": "https://api.example.com/v1/quote", "price": "$0.01", field_name: ["x" * 64]}
+    ).encode()
+    assert getattr(serialization.decode(ok, X402ListingRequest), field_name) == ["x" * 64]
+
+
+# --------------------------------------------------------------------------- #
 # The free search path
 # --------------------------------------------------------------------------- #
+def test_a_listing_whose_term_has_ended_is_no_longer_served(
+    store: InMemoryListingStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A paid term buys N days in the directory, not a permanent entry.
+
+    Regression: nothing on the read path looked at term_end_epoch, so one
+    payment listed a URL forever even though the 402 offer sells N days.
+    """
+    monkeypatch.setattr(settings, "x402_listing_term_days", 30)
+    service = ListingService(store)
+    base = datetime(2026, 8, 1, tzinfo=UTC)
+    service.create(
+        normalized_url="https://api.example.com/v1/quote",
+        price="$0.01",
+        description="expiring",
+        assets=[],
+        tags=[],
+        schema_json="",
+        settlement_tx_id="TX1",
+        payer="AGENT1",
+        now=base,
+    )
+
+    assert len(service.search(limit=50, now=base + timedelta(days=29))) == 1
+    assert service.search(limit=50, now=base + timedelta(days=31)) == []
+
+
+@pytest.mark.usefixtures("fake_redis")
+def test_search_serves_live_listings_and_drops_expired_ones(
+    store: InMemoryListingStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The free search route itself excludes expired listings while still serving live ones."""
+    monkeypatch.setattr(settings, "x402_listing_term_days", 30)
+    monkeypatch.setattr(directory_routes, "listing_service", ListingService(store))
+    service = ListingService(store)
+    now = datetime.now(tz=UTC)
+    service.create(
+        normalized_url="https://expired.example.com/x",
+        price="$0.01",
+        description="term ended",
+        assets=[],
+        tags=[],
+        schema_json="",
+        settlement_tx_id="TX1",
+        payer="AGENT1",
+        now=now - timedelta(days=31),
+    )
+    service.create(
+        normalized_url="https://live.example.com/x",
+        price="$0.01",
+        description="still paid up",
+        assets=[],
+        tags=[],
+        schema_json="",
+        settlement_tx_id="TX2",
+        payer="AGENT2",
+        now=now - timedelta(days=1),
+    )
+
+    result = directory_routes.x402_search(_request(method="GET", path="/api/v1/x402/search"))
+
+    assert [item["description"] for item in result["items"]] == ["still paid up"]
+
+
 @pytest.mark.usefixtures("fake_redis")
 def test_search_returns_listings_newest_first(
     store: InMemoryListingStore, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Search returns JSON listings ordered newest first."""
-    from datetime import UTC, datetime, timedelta
-
     monkeypatch.setattr(directory_routes, "listing_service", ListingService(store))
-    base = datetime(2026, 8, 1, tzinfo=UTC)
+    # Anchored to real now, not a fixed date: this route reads the live clock
+    # to drop expired listings, so a hardcoded base would eventually fall
+    # outside the term and the feed would correctly come back empty.
+    base = datetime.now(tz=UTC) - timedelta(hours=3)
     service = ListingService(store)
     for index in range(3):
         service.create(
-            url=f"https://api{index}.example.com/x",
+            normalized_url=f"https://api{index}.example.com/x",
             price="$0.01",
             description=f"endpoint {index}",
             assets=[],
             tags=[],
-            schema=None,
+            schema_json="",
             settlement_tx_id=f"TX{index}",
             payer=f"AGENT{index}",
             now=base + timedelta(hours=index),
@@ -611,12 +797,12 @@ def test_search_limit_is_clamped_to_the_configured_maximum(
     service = ListingService(store)
     for index in range(5):
         service.create(
-            url=f"https://api{index}.example.com/x",
+            normalized_url=f"https://api{index}.example.com/x",
             price="$0.01",
             description=f"endpoint {index}",
             assets=[],
             tags=[],
-            schema=None,
+            schema_json="",
             settlement_tx_id=f"TX{index}",
             payer=f"AGENT{index}",
         )
