@@ -405,8 +405,8 @@
   "x402PriceDemandLabel": "Read ranked demand",
   "x402PriceDemandValue": "$0.05",
   "x402PriceArticleLabel": "Read a news article",
-  "x402PriceArticleValue": "$0.01",
+  "x402PriceArticleValue": "وړیا",
   "x402PriceNewsSearchLabel": "Search news articles",
-  "x402PriceNewsSearchValue": "$0.02",
+  "x402PriceNewsSearchValue": "$0.001",
   "x402Building": "Building"
 }
