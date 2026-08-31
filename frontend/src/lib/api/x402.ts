@@ -50,7 +50,31 @@ export type X402NewsItem = {
   url: string
 }
 
+// One route as the machine-readable catalog (GET /api/v1/x402) describes it
+// -- see backend app/modules/x402_catalog/services/catalog.py's _route_json.
+// Only a paid route carries a `resource` id; that id is what a promo code
+// scopes to (the admin promo-codes tab's create-form dropdown source).
+export type X402CatalogRoute = {
+  product: string
+  method: string
+  path: string
+  paid: boolean
+  price_usd?: number | null
+  resource?: string | null
+  description: string
+  supports_preview?: boolean
+}
+
+export type X402Catalog = {
+  name: string
+  network: string
+  network_name: string
+  pay_to: string
+  routes: X402CatalogRoute[]
+}
+
 export const X402_PATHS = {
+  catalog: '/api/v1/x402',
   search: '/api/v1/x402/search',
   board: '/api/v1/x402/board',
   features: '/api/v1/x402/features',
@@ -80,6 +104,9 @@ export const X402_CATEGORIES = [
 ] as const
 
 export const x402Api = {
+  async catalog(opts?: RequestOpts): Promise<X402Catalog> {
+    return (await api.getJson(X402_PATHS.catalog, opts)) as unknown as X402Catalog
+  },
   async search(tag: string, category?: string, opts?: RequestOpts): Promise<X402Listing[]> {
     const params = new URLSearchParams()
     const trimmedTag = tag.trim()

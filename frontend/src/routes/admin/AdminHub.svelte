@@ -21,6 +21,7 @@
     { id: 'Seeds', label: 'Seeds', slug: 'seeds', group: 'Sources' },
     { id: 'Tool Insights', label: 'Insights', slug: 'insights', group: 'System' },
     { id: 'Sessions', label: 'Sessions', slug: 'sessions', group: 'System' },
+    { id: 'Promo Codes', label: 'Promo Codes', slug: 'promo-codes', group: 'System' },
     { id: 'System', label: 'System', slug: 'system', group: 'System' },
   ] as const
 
@@ -44,6 +45,7 @@
     'Inbox',
     'System',
     'Queue',
+    'Promo Codes',
   ])
 
   const tabLoaders: Record<TabId, () => Promise<{ default: Component<any> }>> = {
@@ -59,6 +61,7 @@
     Seeds: () => import('./tabs/SeedsTab.svelte'),
     'Tool Insights': () => import('./tabs/ToolInsightsTab.svelte'),
     Sessions: () => import('./tabs/SessionsTab.svelte'),
+    'Promo Codes': () => import('./tabs/PromoCodesTab.svelte'),
     System: () => import('./tabs/SystemTab.svelte'),
   }
 

@@ -150,5 +150,15 @@ export function createAdminApi(wallet: string, token: string | null) {
         {},
         h(),
       ),
+    // x402 promo-code management (CLAUDE.md section 9) -- create/deactivate
+    // routes have lived in backend/app/modules/x402_catalog/api/routes.py
+    // since the promo mechanism shipped; the list route was added alongside
+    // this admin tab.
+    listPromoCodes: (signal?: AbortSignal) =>
+      api.getJson('/api/v1/admin/x402/promo', { headers: h(), signal }),
+    createPromoCode: (body: Record<string, unknown>) =>
+      api.postJson('/api/v1/admin/x402/promo', body, h()),
+    deletePromoCode: (code: string) =>
+      api.deleteJson(`/api/v1/admin/x402/promo?code=${encodeURIComponent(code)}`, h()),
   }
 }

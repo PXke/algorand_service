@@ -1085,6 +1085,15 @@ class X402PromoStmts:
         "SELECT code, resource, starting_count, created_at, expires_at, active "
         "FROM algorand_platform.x402_promo_codes WHERE code = ?"
     )
+    # No WHERE clause -- a full-partition scan bounded by a literal LIMIT,
+    # same convention as GlossaryStmts.LIST_ALL for a small, admin-managed
+    # table, plus a LIMIT since this one is new code (CLAUDE.md section 4: no
+    # unbounded listings). Promo codes are hand-issued by an admin, never
+    # bulk-created, so 500 is generous headroom.
+    LIST_ALL_PROMO_CODES = _Stmt(
+        "SELECT code, resource, starting_count, created_at, expires_at, active "
+        "FROM algorand_platform.x402_promo_codes LIMIT 500"
+    )
     # IF EXISTS, same precedent as the probe badge (097): a deactivate can
     # never upsert a phantom row for a code that was never created.
     DEACTIVATE_PROMO_CODE = _Stmt(

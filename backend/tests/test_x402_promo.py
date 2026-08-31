@@ -58,6 +58,9 @@ class _FakeRedis:
         self.store[key] = str(value)
         return True
 
+    def get(self, key: str) -> str | None:
+        return self.store.get(key)
+
     def incr(self, key: str) -> int:
         value = int(self.store.get(key, "0")) + 1
         self.store[key] = str(value)
@@ -77,6 +80,9 @@ class _BrokenRedis:
     """Every operation fails, to exercise the fail-CLOSED redemption path."""
 
     def set(self, *_args: object, **_kwargs: object) -> Never:
+        raise ConnectionError("redis down")
+
+    def get(self, *_args: object, **_kwargs: object) -> Never:
         raise ConnectionError("redis down")
 
     def incr(self, *_args: object, **_kwargs: object) -> Never:
@@ -470,6 +476,71 @@ def _admin_delete_request(code: str) -> Request:
     return _request(method="DELETE", query={"code": code}, path="/api/v1/admin/x402/promo")
 
 
+def _admin_list_request() -> Request:
+    return _request(method="GET", path="/api/v1/admin/x402/promo")
+
+
+def test_admin_list_promo_without_admin_wallet_is_rejected() -> None:
+    """No admin session configured at all -> the real require_admin_wallet refuses, never a listing."""
+    response = catalog_routes.x402_admin_list_promo(_admin_list_request())
+    assert getattr(response, "status_code", 200) != 200
+
+
+@pytest.mark.usefixtures("fake_redis")
+def test_admin_list_promo_returns_every_code_with_remaining_count(
+    promo_store: InMemoryPromoStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The list route returns every stored code, each carrying its live remaining count."""
+    monkeypatch.setattr(catalog_routes, "require_admin_wallet", lambda _r: None)
+    _seed(promo_store, code="LAUNCH", starting_count=5)
+    _seed(promo_store, code="OTHER", resource="x402-grading-score", starting_count=10)
+    promo_module.set_promo_store(promo_store)
+    try:
+        response = catalog_routes.x402_admin_list_promo(_admin_list_request())
+        assert isinstance(response, dict)
+        items = {item["code"]: item for item in response["items"]}
+        assert set(items) == {"LAUNCH", "OTHER"}
+        # Neither code has been redeemed yet -- Redis key never seeded, so
+        # remaining falls back to the durable starting_count, not 0 or None.
+        assert items["LAUNCH"]["remaining"] == 5
+        assert items["OTHER"]["remaining"] == 10
+        assert items["LAUNCH"]["resource"] == _RESOURCE
+        assert items["LAUNCH"]["active"] is True
+    finally:
+        promo_module.set_promo_store(None)
+
+
+@pytest.mark.usefixtures("fake_redis")
+def test_list_promo_codes_reflects_a_live_redemption(promo_store: InMemoryPromoStore) -> None:
+    """After one redemption, list_promo_codes' remaining count drops by one."""
+    _seed(promo_store, code="LAUNCH", starting_count=5)
+    promo_module.attempt_promo_redemption(
+        _request(headers={"x-real-ip": "1.1.1.1"}),
+        code="LAUNCH",
+        wallet=_WALLET,
+        resource=_RESOURCE,
+        store=promo_store,
+    )
+
+    items = promo_module.list_promo_codes(store=promo_store)
+
+    assert items[0]["remaining"] == 4
+
+
+def test_list_promo_codes_remaining_is_none_when_redis_unreachable(
+    promo_store: InMemoryPromoStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Redis being down degrades just the remaining field to None -- the listing itself still succeeds."""
+    _seed(promo_store, code="LAUNCH", starting_count=5)
+    monkeypatch.setattr(promo_module, "get_redis", lambda **_kw: _BrokenRedis())
+
+    items = promo_module.list_promo_codes(store=promo_store)
+
+    assert items[0]["code"] == "LAUNCH"
+    assert items[0]["remaining"] is None
+    assert items[0]["starting_count"] == 5
+
+
 def test_admin_create_promo_without_admin_wallet_is_rejected() -> None:
     """No admin session configured at all -> the real require_admin_wallet 503s (ADMIN_WALLET_ADDRESSES unset in tests)."""
     response = catalog_routes.x402_admin_create_promo(
@@ -697,6 +768,41 @@ def test_deactivate_code_uses_update_if_exists(monkeypatch: pytest.MonkeyPatch) 
     stmt, params = pairs[0]
     assert "IF EXISTS" in stmt
     assert params == ("LAUNCH",)
+
+
+def test_list_codes_reads_back_every_row_bounded(monkeypatch: pytest.MonkeyPatch) -> None:
+    """list_codes maps every row from the bounded LIST_ALL_PROMO_CODES scan back onto PromoRecord."""
+    rows = [
+        SimpleNamespace(
+            code="LAUNCH",
+            resource=_RESOURCE,
+            starting_count=5,
+            created_at=datetime(2026, 8, 30, tzinfo=UTC),
+            expires_at=None,
+            active=True,
+        ),
+        SimpleNamespace(
+            code="OTHER",
+            resource="x402-grading-score",
+            starting_count=10,
+            created_at=datetime(2026, 8, 31, tzinfo=UTC),
+            expires_at=None,
+            active=False,
+        ),
+    ]
+    session = _patch_cassandra(monkeypatch)
+    session.execute.return_value = rows
+
+    records = CassandraPromoStore().list_codes()
+
+    assert [r.code for r in records] == ["LAUNCH", "OTHER"]
+    assert records[1].active is False
+    # No bind params (a full-partition scan, same convention as
+    # GlossaryStmts.LIST_ALL), so this isn't an execute_pairs case.
+    stmt = session.execute.call_args.args[0]
+    assert "x402_promo_codes" in stmt
+    assert "LIMIT 500" in stmt
+    assert "WHERE" not in stmt
 
 
 def test_get_code_reads_back_a_full_record(monkeypatch: pytest.MonkeyPatch) -> None:

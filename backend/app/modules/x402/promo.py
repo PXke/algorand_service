@@ -142,6 +142,10 @@ class PromoStore(Protocol):
         """Append one redemption, atomically, iff (code, wallet_hash) has never redeemed before."""
         ...
 
+    def list_codes(self) -> list[PromoRecord]:
+        """Every stored code, bounded (see LIST_ALL_PROMO_CODES) -- admin listing only."""
+        ...
+
 
 class CassandraPromoStore:
     """Cassandra-backed promo-code storage (migration 100)."""
@@ -188,6 +192,21 @@ class CassandraPromoStore:
         )
         return bool(result.was_applied)
 
+    def list_codes(self) -> list[PromoRecord]:
+        """Every stored code (bounded LIMIT 500, see LIST_ALL_PROMO_CODES) -- admin listing only."""
+        rows = get_cassandra_session().execute(X402PromoStmts.LIST_ALL_PROMO_CODES)
+        return [
+            PromoRecord(
+                code=row.code,
+                resource=row.resource or "",
+                starting_count=int(row.starting_count or 0),
+                created_at_epoch=_epoch(row.created_at),
+                expires_at_epoch=_epoch(row.expires_at),
+                active=bool(row.active),
+            )
+            for row in rows
+        ]
+
 
 class InMemoryPromoStore:
     """In-memory promo-code storage for dev and tests."""
@@ -223,6 +242,10 @@ class InMemoryPromoStore:
             return False
         self._redemptions.add(key)
         return True
+
+    def list_codes(self) -> list[PromoRecord]:
+        """Every stored code -- admin listing only."""
+        return list(self._codes.values())
 
 
 _factory: StoreFactory[PromoStore] = StoreFactory(
@@ -305,6 +328,57 @@ def create_promo_code(
 def deactivate_promo_code(code: str, *, store: PromoStore | None = None) -> bool:
     """Deactivate one promo code early. Returns False if no such code exists."""
     return (store or get_promo_store()).deactivate_code(code.strip())
+
+
+def _remaining_count(code: str, starting_count: int) -> int | None:
+    """The LIVE remaining-use count for `code`, or None if Redis could not be reached.
+
+    Mirrors _reserve_slot's key format but never mutates it (no SET NX, no
+    DECR) -- this is an admin read, not a redemption attempt. A GET alone
+    cannot tell "key absent" apart from "Redis unreachable", so this
+    function resolves that itself: absent (never redeemed, so nothing has
+    been spent yet) becomes `starting_count`; unreachable becomes None,
+    which the caller shows as unknown rather than a wrong number.
+    """
+    try:
+        raw = get_redis().get(f"{_REMAINING_PREFIX}{code}")
+    except Exception:
+        logger.warning(
+            "x402 promo: Redis unavailable while listing remaining count for code=%s",
+            code,
+            exc_info=True,
+        )
+        return None
+    if raw is None:
+        return starting_count
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def list_promo_codes(*, store: PromoStore | None = None) -> list[dict]:
+    """Every promo code for the admin table, each with its live remaining count.
+
+    `remaining` is the Redis-tracked count, or None when Redis could not be
+    reached -- this list is an admin convenience, not the payment gate, so a
+    Redis blip degrades one field per row rather than erroring the whole
+    call (CLAUDE.md section 2 invariant 9's fail-open spirit, applied to a
+    read this time rather than a write).
+    """
+    records = (store or get_promo_store()).list_codes()
+    return [
+        {
+            "code": record.code,
+            "resource": record.resource,
+            "starting_count": record.starting_count,
+            "remaining": _remaining_count(record.code, record.starting_count),
+            "created_at_epoch": record.created_at_epoch,
+            "expires_at_epoch": record.expires_at_epoch,
+            "active": record.active,
+        }
+        for record in records
+    ]
 
 
 # --------------------------------------------------------------------------- #

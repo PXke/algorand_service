@@ -24,6 +24,7 @@ from app.modules.x402.promo import (
     PromoError,
     create_promo_code,
     deactivate_promo_code,
+    list_promo_codes,
     promo_request_params,
 )
 from app.modules.x402_catalog.services.catalog import (
@@ -138,6 +139,23 @@ def x402_ping(request: Request) -> Response:
     )
 
 
+def x402_admin_list_promo(request: Request) -> Response | dict:
+    """Admin: every promo code with its live remaining-use count.
+
+    There is no payment-path consumer of this route -- it exists purely for
+    the admin promo-codes tab, so it stays a plain bounded read (see
+    X402PromoStmts.LIST_ALL_PROMO_CODES) rather than anything the redemption
+    hot path touches. `remaining` is null for a row when Redis could not be
+    reached for that code (see promo.list_promo_codes) -- a Redis blip
+    degrades one field, not the whole listing.
+    """
+    denied = require_admin_wallet(request)
+    if denied is not None:
+        return denied
+
+    return {"items": list_promo_codes()}
+
+
 def x402_admin_create_promo(request: Request) -> Response | dict:
     """Admin: issue a promo code scoped to one resource for a bounded number of free redemptions.
 
@@ -201,5 +219,6 @@ def register_x402_catalog_routes(app: Router) -> None:
     app.get(CATALOG_PATH)(x402_catalog)
     app.get("/api/v1/x402/settlements/recent")(x402_recent_settlements)
     app.get("/api/v1/x402/ping")(x402_ping)
+    app.get("/api/v1/admin/x402/promo")(x402_admin_list_promo)
     app.post("/api/v1/admin/x402/promo")(x402_admin_create_promo)
     app.delete("/api/v1/admin/x402/promo")(x402_admin_delete_promo)
