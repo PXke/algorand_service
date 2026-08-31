@@ -6,7 +6,11 @@ from dataclasses import dataclass
 
 from app.modules.ai.content_categorizer import categorize_content
 from app.modules.ai.publish_classifier import score_content_for_storage
-from app.modules.crawler.domain_tracker import domain_from_url, update_domain_status
+from app.modules.crawler.domain_tracker import (
+    domain_from_url,
+    get_domain_status,
+    update_domain_status,
+)
 
 
 @dataclass(frozen=True)
@@ -43,6 +47,29 @@ def store_discovery_content(
     storage_score = score_content_for_storage(page_text, url)
     category = categorize_content(page_text, url)
 
+    # A domain is crawled page by page across a session, and this is called
+    # once per page — so the domain's stored score/category must be the BEST
+    # page seen so far, not whichever page happened to be crawled last. A
+    # multi-page site routinely mixes real content pages with thin,
+    # near-textless ones (an interactive UI screen, a bare game board, an
+    # empty state) that legitimately score 0/generic on their own; without
+    # this floor, crawling those after a clearly on-topic page silently
+    # regresses the whole domain to 0/generic and it never produces an
+    # artifact (root-caused 2026-08-31, algochess.org: 16 real pages scored
+    # well, but the 17th and LAST-crawled -- a chess-practice board with only
+    # move-clock UI text -- overwrote the domain to relevance_score=0,
+    # category="generic"). Same reasoning as _best_scored_page in
+    # tasks/url_queue_tasks.py's classify_pending_domains path ("one bad page
+    # must not sink a domain the sample otherwise shows is relevant"), applied
+    # here to this column instead of that one's separate 0-1 metadata verdict.
+    existing_score = float((get_domain_status(domain) or {}).get("relevance_score") or 0.0)
+    if storage_score < existing_score:
+        resolved_score: float | None = None  # preserve the existing (higher) score
+        resolved_category = ""  # preserve the existing category alongside it
+    else:
+        resolved_score = storage_score
+        resolved_category = category
+
     # Per-page SIGNAL only: refresh the domain's score/category/last-crawled, but
     # never set is_relevant here — a single page must not decide (or flip) a whole
     # domain's relevance. That verdict belongs to the admin or to the deliberate
@@ -57,8 +84,8 @@ def store_discovery_content(
     # docstring) specifically so this per-page write never clobbers it.
     update_domain_status(
         domain,
-        relevance_score=storage_score,
-        category=category,
+        relevance_score=resolved_score,
+        category=resolved_category,
         online=True,
     )
 
