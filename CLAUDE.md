@@ -207,6 +207,18 @@ become an excuse to defer proving the one thing the deadline depends on.
     needs the SAME care about process lifecycle a bare script doesn't get).
 18. **Transaction simulation / fuzzing** — per run. Needs a simulate-endpoint
     design (algod's own simulate API is the likely base) before any code.
+18b. **Sandboxed file/tarball scan** (owner idea, 2026-08-31) — an agent hands
+    us a URL to a file it's wary of opening itself; we download, run it
+    through ClamAV (or similar) and/or unpack+inspect an archive, and report
+    back "safe/unsafe" plus contents, so the agent gets isolation without
+    running untrusted code itself. Sells the same shape as 17: a paid,
+    externally-triggered job needing real process-lifecycle discipline. Needs,
+    before any code: a real sandbox design (a fresh, network-isolated,
+    hard-killed container per request — no host filesystem access, no ability
+    to phone home if the scanned content turns out to be malicious), a
+    decision on max file size / scan timeout, and real infra spend (a
+    Docker/container host, not something `workers/` already has). Same
+    "needs deliberate design first" flag as 12/15/16/17.
 19. **Agent-to-agent job escrow** — pay when output passes a test. Overlaps
     5/10 — same resolution needed on the shared escrow primitive.
 20. **Reputation / uptime-proof ledger** — endpoints pay to attach verified
