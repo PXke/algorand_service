@@ -423,6 +423,31 @@ class Settings(msgspec.Struct, kw_only=True):
     # first settle of it is still in flight.
     x402_replay_ttl_seconds: int = 900
 
+    # ── x402 shared payment-gate extensions: preview mode + promo codes ──────
+    # See app/modules/x402/preview.py and app/modules/x402/promo.py. Both are
+    # opt-in per route (require_paid_request's preview / promo_code kwargs
+    # default to off), so a route that does not pass them is unaffected.
+    #
+    # Preview (`?preview=true`, checked by the route, see x402_ping): bypasses
+    # the payment gate entirely -- no facilitator call, nothing settled,
+    # nothing on the ledger -- so it needs its own free-endpoint abuse gate
+    # (CLAUDE.md section 9), own key prefix, fails open like every other
+    # free-read rate limit in this codebase (a Redis blip must not take a
+    # preview surface offline).
+    x402_preview_rate_limit_per_hour: int = 60
+    # Promo-code storage (x402_promo_codes admin table + x402_promo_redemptions
+    # audit log/abuse-cap log, migration 100). "memory" for dev/test, same
+    # StoreFactory[T] + Protocol shape as every other x402 store (CLAUDE.md
+    # section 9).
+    x402_promo_store: str = "memory"
+    # Per-IP budget on redemption ATTEMPTS (not on the code's own remaining
+    # count, which is the separate Redis DECR guard in promo.py) -- a second,
+    # complementary abuse layer alongside the per-(code, wallet) Cassandra LWT
+    # cap. Fails open: an IP-abuse check failing must not block the fallback
+    # to the normal paid gate, which still works either way.
+    x402_promo_rate_limit_per_hour: int = 30
+    # ── end x402 preview + promo ──────────────────────────────────────────────
+
     @property
     def cors_origins(self) -> list[str]:
         """Parse the comma-separated CORS origins setting into a list."""

@@ -50,6 +50,11 @@ class CatalogRoute:
     price_setting: str | None = None
     resource: str | None = None
     input_example: dict[str, Any] | None = None
+    # True for a paid route that also accepts `?preview=true` (see
+    # app/modules/x402/preview.py): a redacted, unpaid, rate-limited response
+    # of the same JSON shape. False (the default) for every route until it is
+    # explicitly wired -- preview is opt-in per route, not automatic.
+    supports_preview: bool = False
 
     @property
     def paid(self) -> bool:
@@ -109,11 +114,14 @@ PRODUCTS: tuple[Product, ...] = (
                 description=(
                     "The marketplace's lowest price, for testing that your x402 client can "
                     "build, sign and settle a real payment here before risking money on a "
-                    "real product. No product data in the response, just a receipt."
+                    "real product. No product data in the response, just a receipt. "
+                    "Supports ?preview=true (redacted, unpaid, rate-limited) as the reference "
+                    "for every future route that wires it in."
                 ),
                 price_setting="x402_ping_price",
                 resource="x402-ping",
                 input_example=None,
+                supports_preview=True,
             ),
         ),
     ),
@@ -407,6 +415,7 @@ def _route_json(product: Product, route: CatalogRoute) -> dict[str, Any]:
         "resource": route.resource,
         "description": route.description,
         "input_example": route.input_example,
+        "supports_preview": route.supports_preview,
     }
 
 

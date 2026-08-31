@@ -459,6 +459,22 @@ def cmd_pay_all() -> None:
         )
 
 
+def cmd_ping() -> None:
+    """Real $0.001 payment through GET /api/v1/x402/ping -- the price-floor test."""
+    addr, mn = load_wallet()
+    http = _build_http_client(addr, mn)
+    session = requests.Session()
+    try:
+        status, body, txid = _paid_call(
+            session, http, "GET", f"{API}/api/v1/x402/ping", dry_run=False
+        )
+    except ProbeAbort as exc:
+        sys.exit(f"ping aborted: {exc}")
+    print("response:", body)
+    ok = status == 200 and _verify_on_chain(txid, addr)
+    print("\nRESULT:", "PASS" if ok else "FAIL", "-- $0.001 settled cleanly" if ok else "")
+
+
 if __name__ == "__main__":
     cmd = sys.argv[1] if len(sys.argv) > 1 else ""
     {
@@ -467,4 +483,5 @@ if __name__ == "__main__":
         "optin": cmd_optin,
         "pay": cmd_pay,
         "pay-all": cmd_pay_all,
+        "ping": cmd_ping,
     }.get(cmd, lambda: sys.exit(__doc__))()

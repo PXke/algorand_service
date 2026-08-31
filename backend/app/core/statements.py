@@ -1060,6 +1060,47 @@ class X402Stmts:
     )
 
 
+class X402PromoStmts:
+    """Prepared statements for the promo-code payment bypass (migration 100).
+
+    Two tables, see modules/x402/promo.py for the redemption logic that uses
+    them. x402_promo_codes is the admin-managed durable record (code,
+    resource, starting_count, expiry, active). x402_promo_redemptions is the
+    append-only audit log AND the per-(code, wallet_hash) abuse cap in one:
+    its primary key IS (code, wallet_hash), so the LWT insert below is the
+    whole cap, not a separate check-then-write (CLAUDE.md section 3 -- no
+    read-then-write race).
+    """
+
+    # Admin create. A lightweight transaction so two concurrent admin creates
+    # of the same code cannot both apply -- the loser's was_applied is False
+    # and the caller reports 409 rather than silently overwriting an existing
+    # code's resource/count/expiry.
+    INSERT_PROMO_CODE_IF_ABSENT = _Stmt(
+        "INSERT INTO algorand_platform.x402_promo_codes ("
+        "code, resource, starting_count, created_at, expires_at, active"
+        ") VALUES (?, ?, ?, ?, ?, ?) IF NOT EXISTS"
+    )
+    GET_PROMO_CODE = _Stmt(
+        "SELECT code, resource, starting_count, created_at, expires_at, active "
+        "FROM algorand_platform.x402_promo_codes WHERE code = ?"
+    )
+    # IF EXISTS, same precedent as the probe badge (097): a deactivate can
+    # never upsert a phantom row for a code that was never created.
+    DEACTIVATE_PROMO_CODE = _Stmt(
+        "UPDATE algorand_platform.x402_promo_codes SET active = false WHERE code = ? IF EXISTS"
+    )
+    # The redemption cap: (code, wallet_hash) is the primary key, so this one
+    # statement is both the append-only audit write and the atomic
+    # once-per-wallet-per-code claim. wallet_hash is a sha256 hex digest of
+    # the wallet address -- the raw address is never stored (see promo.py).
+    INSERT_PROMO_REDEMPTION_IF_ABSENT = _Stmt(
+        "INSERT INTO algorand_platform.x402_promo_redemptions ("
+        "code, wallet_hash, redeemed_at, resource"
+        ") VALUES (?, ?, ?, ?) IF NOT EXISTS"
+    )
+
+
 class X402GradingStmts:
     """Prepared statements for x402 endpoint grading (migration 093)."""
 

@@ -511,6 +511,24 @@ class X402GradeSubmission(msgspec.Struct, kw_only=True):
     comment: Annotated[str, Meta(max_length=280)] = ""
 
 
+class X402PromoCreateRequest(msgspec.Struct, kw_only=True):
+    """Request body for POST /api/v1/admin/x402/promo — issue one promo code.
+
+    `code` is admin-chosen, not generated, so a code can be a memorable
+    campaign name (e.g. "LAUNCH2026"). `resource` scopes the code to exactly
+    one paid route's resource id (the same short id require_paid_request
+    records to the settlement ledger, e.g. "x402-ping") — a code redeems
+    against one resource only. `expires_at_epoch` of 0 (the default) means no
+    expiry. See app/modules/x402/promo.py for the redemption mechanics this
+    creates a code for.
+    """
+
+    code: Annotated[str, Meta(min_length=1, max_length=64)]
+    resource: Annotated[str, Meta(min_length=1, max_length=128)]
+    starting_count: Annotated[int, Meta(ge=1)]
+    expires_at_epoch: Annotated[int, Meta(ge=0)] = 0
+
+
 # ── Metrics ───────────────────────────────────────────────────────────────────
 class PriceMetricsResponse(msgspec.Struct, kw_only=True):
     """Price-metrics brief for the dashboard."""

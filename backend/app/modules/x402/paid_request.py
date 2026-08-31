@@ -53,6 +53,8 @@ from app.core.http import Request
 from app.core.http_errors import json_error_response
 from app.core.request_headers import header_value
 from app.modules.x402.guard import PaymentResult, require_payment
+from app.modules.x402.preview import preview_rate_limited
+from app.modules.x402.promo import attempt_promo_redemption
 from app.modules.x402.replay import claim_payment, release_claim
 from app.modules.x402.settlement import SettlementStore, mark_fulfilled, record_settlement
 
@@ -77,6 +79,9 @@ def require_paid_request(
     extensions: dict[str, Any] | None = None,
     resource_path: str | None = None,
     settlement_store: SettlementStore | None = None,
+    preview: bool = False,
+    promo_code: str = "",
+    promo_wallet: str = "",
 ) -> PaymentResult:
     """Run the shared payment gate with replay protection and settlement logging.
 
@@ -84,7 +89,51 @@ def require_paid_request(
     reads identically: check `.error`, then use `.payer` / `.settlement_headers`.
     On success the ledger row is written as unfulfilled; the route calls
     mark_fulfilled(result.payment_txid, ...) after its product write.
+
+    Every new kwarg below defaults to off, so a caller that never passes them
+    gets byte-for-byte the same behaviour as before they existed.
+
+    `preview`: True bypasses the gate entirely (see guard.require_payment's
+    own `preview` kwarg) after checking the shared preview rate limit — a
+    preview call is still a real request even though nothing is charged
+    (modules/x402/preview.py). The route computes this itself, typically via
+    `preview.preview_requested(request)` on a `?preview=true` query param,
+    and must serve a REDACTED response when `result.is_preview` comes back
+    True, and must NEVER call mark_fulfilled on that result (there is
+    nothing to mark — see settlement.mark_fulfilled's own no-op guard for an
+    empty txid). Checked BEFORE promo: a preview call never spends a promo
+    redemption.
+
+    `promo_code` / `promo_wallet`: an attempted promo-code bypass, checked
+    BEFORE the payment gate (modules/x402/promo.py). The route computes
+    these itself, typically via `promo.promo_request_params(request)` on
+    `?promo=` / `?promo_wallet=` query params. ANY redemption failure (bad
+    code, wrong resource, exhausted, expired, already redeemed by this
+    wallet, an invalid wallet, a rate-limited IP, or Redis/Cassandra being
+    unreachable) falls straight through to the normal payment gate below —
+    it is never a 402/error the caller cannot route around. On success the
+    route serves its REAL response (a promo bypasses payment, not product
+    quality) and must NEVER call mark_fulfilled on the result either (same
+    no-settlement reason as preview).
     """
+    if preview:
+        if preview_rate_limited(request):
+            return PaymentResult(
+                error=json_error_response(
+                    429,
+                    "rate_limited",
+                    "Too many preview requests — please try again later",
+                )
+            )
+        return require_payment(request, price=price, resource=resource, preview=True)
+
+    if promo_code:
+        promo_result = attempt_promo_redemption(
+            request, code=promo_code, wallet=promo_wallet, resource=resource
+        )
+        if promo_result is not None:
+            return promo_result
+
     header = _payment_header(request)
     claim_key, already_seen = claim_payment(header)
     if already_seen:

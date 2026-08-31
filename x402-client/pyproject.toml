@@ -1,0 +1,47 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pxke-x402-client"
+version = "0.1.0"
+description = "Thin client for PXke's x402 marketplace (https://algorand-api.pxke.me): free reads plus x402-signed paid calls on Algorand mainnet."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "PXke" }]
+keywords = ["x402", "algorand", "payments", "agents", "usdc"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Internet :: WWW/HTTP",
+]
+dependencies = [
+  "requests>=2.31.0",
+  "py-algorand-sdk>=2.5.0",
+  "msgpack>=1.0.0",
+  # Same package + version floor the backend pins (backend/pyproject.toml).
+  # We only use the `avm` extra (py-algorand-sdk, already listed above) --
+  # not `[extensions]`, which pulls in jsonschema for the server-side Bazaar
+  # discovery extension this client never parses.
+  "x402-avm[avm]>=2.0.2",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[project.urls]
+Homepage = "https://algorand-api.pxke.me"
+Documentation = "https://algorand-api.pxke.me/api/v1/x402"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["pxke_x402*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

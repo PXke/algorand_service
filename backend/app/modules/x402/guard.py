@@ -57,6 +57,20 @@ class PaymentResult:
     # moment a second asset is accepted. Both None unless error is None.
     asset_id: str | None = None
     network: str | None = None
+    # True when this result bypassed the gate entirely via preview mode: no
+    # facilitator call, nothing settled, nothing on the settlement ledger.
+    # payer/settlement_headers/amount_atomic/payment_txid/asset_id/network
+    # all stay at their empty defaults -- there is nothing to report. The
+    # route must serve a REDACTED response and must never call
+    # settlement.mark_fulfilled on this result (see paid_request.py). See
+    # modules/x402/preview.py.
+    is_preview: bool = False
+    # True when this result bypassed the gate entirely via a promo-code
+    # redemption: no facilitator call, nothing settled, nothing on the
+    # settlement ledger -- same empty-defaults contract as is_preview.
+    # UNLIKE preview, the route serves its REAL response: a promo bypasses
+    # payment, not product quality. See modules/x402/promo.py.
+    is_promo: bool = False
 
 
 def _describe(description: str | None, note: str | None) -> str | None:
@@ -99,6 +113,7 @@ def require_payment(
     description: str | None = None,
     extensions: dict[str, Any] | None = None,
     resource_path: str | None = None,
+    preview: bool = False,
 ) -> PaymentResult:
     """Gate a Falcon handler behind an x402 payment.
 
@@ -122,7 +137,20 @@ def require_payment(
     `extensions` sets RouteConfig.extensions — pass
     `x402.extensions.bazaar.declare_discovery_extension(...)` here to make a
     route Bazaar-discoverable (required for the leaderboard, not automatic).
+
+    `preview` bypasses the gate ENTIRELY when True: no `build_payment_offer`,
+    no resource server, no facilitator call of any kind, nothing verified,
+    nothing settled. Returns immediately with `PaymentResult(error=None,
+    is_preview=True)` — every other field stays at its empty default, so
+    there is nothing a caller could mistake for a real payment. Defaults to
+    False, so a caller that never passes it gets byte-for-byte the same
+    behaviour as before this parameter existed. See modules/x402/preview.py
+    for the request-side trigger (`?preview=true`) and the rate limit that
+    still applies to a preview call even though nothing is charged.
     """
+    if preview:
+        return PaymentResult(error=None, is_preview=True)
+
     offer = build_payment_offer(price)
     # RouteConfig.resource is used VERBATIM by the x402 package as the offer's
     # resource.url (x402_http_server_base.py), and the GoPlausible facilitator
