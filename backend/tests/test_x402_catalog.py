@@ -247,6 +247,18 @@ def test_owner_only_renew_routes_say_a_non_owner_payment_is_still_taken() -> Non
         assert "refused" in text, route.path
 
 
+def test_only_ping_supports_promo(monkeypatch: pytest.MonkeyPatch) -> None:
+    """supports_promo is opt-in per route; today only x402-ping (the reference wiring) has it."""
+    _configure(monkeypatch, **dict.fromkeys(_STORE_GATES.values(), "cassandra"))
+    routes = _catalog_routes(monkeypatch)
+    by_resource = {route["resource"]: route for route in routes if route["resource"]}
+    assert by_resource["x402-ping"]["supports_promo"] is True
+    for resource, route in by_resource.items():
+        if resource == "x402-ping":
+            continue
+        assert route["supports_promo"] is False, resource
+
+
 def test_assets_follow_the_network(monkeypatch: pytest.MonkeyPatch) -> None:
     """The advertised assets are the ones that exist on the configured network, USDC first."""
     _configure(monkeypatch)

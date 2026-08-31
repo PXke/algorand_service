@@ -35,6 +35,22 @@ def _params(**kwargs: Any) -> dict[str, Any]:
     return {k: v for k, v in kwargs.items() if v is not None}
 
 
+def _bypass_params(
+    *, preview: bool, promo_code: str | None, promo_wallet: str | None
+) -> dict[str, Any]:
+    """The shared `?preview=`/`?promo=`/`?promo_wallet=` query params, empty when unused.
+
+    See `docs/x402-marketplace-api.md`'s "Preview and promo codes" section in
+    the PXke Algorand backend repo for what these do server-side. As of this
+    writing the server only wires either mechanism up for `GET
+    /api/v1/x402/ping` (check a route's `supports_preview`/`supports_promo`
+    in `catalog()` before relying on either elsewhere) -- every paid method
+    below accepts these kwargs regardless, so the SDK doesn't need another
+    release once more routes are wired.
+    """
+    return _params(preview=preview or None, promo=promo_code, promo_wallet=promo_wallet)
+
+
 class PxkeClient:
     """A client for the PXke x402 marketplace.
 
@@ -161,6 +177,14 @@ class PxkeClient:
         r1 = self._session.request(
             method, url, params=params, json=json_body, timeout=self._timeout
         )
+        if r1.status_code == 200:
+            # A `preview=true` or a successful `promo=` bypassed the gate
+            # entirely -- there was never a 402 to sign against, so this is
+            # already the final (redacted, for preview; real, for promo)
+            # response. See docs/x402-marketplace-api.md's "Preview and
+            # promo codes" section.
+            body = self._json_or_none(r1)
+            return body if body is not None else {}
         if r1.status_code != 402:
             # The marketplace validates before the payment gate: a malformed
             # request is a plain 4xx here, nothing charged.
@@ -280,12 +304,19 @@ class PxkeClient:
         tags: list[str] | None = None,
         category: str | None = None,
         schema: dict[str, Any] | None = None,
+        preview: bool = False,
+        promo_code: str | None = None,
+        promo_wallet: str | None = None,
     ) -> dict[str, Any]:
         """`POST /api/v1/x402/list` -- list one x402 endpoint in the directory for 30 days.
 
         `price` is the *listed* endpoint's own price text (e.g. "$0.01"), not
         what this call itself costs. `category` is one of: data, ai, finance,
         identity, storage, compute, social, tooling, other.
+
+        `preview`/`promo_code`/`promo_wallet` are the shared payment-gate
+        bypasses (see `PxkeClient.ping`'s docstring) -- as of this writing the
+        server only honors them on `ping()`, not here.
         """
         body: dict[str, Any] = {"url": url, "price": price, "description": description}
         if assets is not None:
@@ -296,38 +327,151 @@ class PxkeClient:
             body["category"] = category
         if schema is not None:
             body["schema"] = schema
-        return self._paid_request("POST", "/api/v1/x402/list", json_body=body)
-
-    def place_on_board(self, link: str, name: str, pitch: str) -> dict[str, Any]:
-        """`POST /api/v1/x402/board` -- place one link/name/pitch tile for 14 days."""
         return self._paid_request(
-            "POST", "/api/v1/x402/board", json_body={"link": link, "name": name, "pitch": pitch}
+            "POST",
+            "/api/v1/x402/list",
+            json_body=body,
+            params=_bypass_params(preview=preview, promo_code=promo_code, promo_wallet=promo_wallet),
         )
 
-    def submit_grade(self, url: str, score: int, comment: str = "") -> dict[str, Any]:
-        """`POST /api/v1/x402/grades` -- grade any http(s) endpoint 1-5; re-grading replaces."""
+    def place_on_board(
+        self,
+        link: str,
+        name: str,
+        pitch: str,
+        *,
+        preview: bool = False,
+        promo_code: str | None = None,
+        promo_wallet: str | None = None,
+    ) -> dict[str, Any]:
+        """`POST /api/v1/x402/board` -- place one link/name/pitch tile for 14 days.
+
+        `preview`/`promo_code`/`promo_wallet` are the shared payment-gate
+        bypasses (see `PxkeClient.ping`'s docstring) -- as of this writing the
+        server only honors them on `ping()`, not here.
+        """
+        return self._paid_request(
+            "POST",
+            "/api/v1/x402/board",
+            json_body={"link": link, "name": name, "pitch": pitch},
+            params=_bypass_params(preview=preview, promo_code=promo_code, promo_wallet=promo_wallet),
+        )
+
+    def submit_grade(
+        self,
+        url: str,
+        score: int,
+        comment: str = "",
+        *,
+        preview: bool = False,
+        promo_code: str | None = None,
+        promo_wallet: str | None = None,
+    ) -> dict[str, Any]:
+        """`POST /api/v1/x402/grades` -- grade any http(s) endpoint 1-5; re-grading replaces.
+
+        `preview`/`promo_code`/`promo_wallet` are the shared payment-gate
+        bypasses (see `PxkeClient.ping`'s docstring) -- as of this writing the
+        server only honors them on `ping()`, not here.
+        """
         return self._paid_request(
             "POST",
             "/api/v1/x402/grades",
             json_body={"url": url, "score": score, "comment": comment},
+            params=_bypass_params(preview=preview, promo_code=promo_code, promo_wallet=promo_wallet),
         )
 
-    def read_score(self, url: str) -> dict[str, Any]:
-        """`GET /api/v1/x402/grades/score` -- credibility-weighted grade aggregate for one url."""
-        return self._paid_request("GET", "/api/v1/x402/grades/score", params={"url": url})
+    def read_score(
+        self,
+        url: str,
+        *,
+        preview: bool = False,
+        promo_code: str | None = None,
+        promo_wallet: str | None = None,
+    ) -> dict[str, Any]:
+        """`GET /api/v1/x402/grades/score` -- credibility-weighted grade aggregate for one url.
 
-    def read_article(self, article_id: str) -> dict[str, Any]:
-        """`GET /api/v1/x402/news/articles/:article_id` -- one full article, by uuid or slug."""
+        `preview`/`promo_code`/`promo_wallet` are the shared payment-gate
+        bypasses (see `PxkeClient.ping`'s docstring) -- as of this writing the
+        server only honors them on `ping()`, not here.
+        """
         return self._paid_request(
-            "GET", f"/api/v1/x402/news/articles/{quote(article_id, safe='')}"
+            "GET",
+            "/api/v1/x402/grades/score",
+            params={
+                "url": url,
+                **_bypass_params(preview=preview, promo_code=promo_code, promo_wallet=promo_wallet),
+            },
         )
 
-    def search_news(self, q: str, limit: int | None = None) -> dict[str, Any]:
-        """`GET /api/v1/x402/news/search` -- ranked full-text search over published articles."""
+    def read_article(
+        self,
+        article_id: str,
+        *,
+        preview: bool = False,
+        promo_code: str | None = None,
+        promo_wallet: str | None = None,
+    ) -> dict[str, Any]:
+        """`GET /api/v1/x402/news/articles/:article_id` -- one full article, by uuid or slug.
+
+        `preview`/`promo_code`/`promo_wallet` are the shared payment-gate
+        bypasses (see `PxkeClient.ping`'s docstring) -- as of this writing the
+        server only honors them on `ping()`, not here.
+        """
         return self._paid_request(
-            "GET", "/api/v1/x402/news/search", params=_params(q=q, limit=limit)
+            "GET",
+            f"/api/v1/x402/news/articles/{quote(article_id, safe='')}",
+            params=_bypass_params(preview=preview, promo_code=promo_code, promo_wallet=promo_wallet),
         )
 
-    def ping(self) -> dict[str, Any]:
-        """`GET /api/v1/x402/ping` -- the marketplace's lowest price ($0.001), for smoke-testing a client."""
-        return self._paid_request("GET", "/api/v1/x402/ping")
+    def search_news(
+        self,
+        q: str,
+        limit: int | None = None,
+        *,
+        preview: bool = False,
+        promo_code: str | None = None,
+        promo_wallet: str | None = None,
+    ) -> dict[str, Any]:
+        """`GET /api/v1/x402/news/search` -- ranked full-text search over published articles.
+
+        `preview`/`promo_code`/`promo_wallet` are the shared payment-gate
+        bypasses (see `PxkeClient.ping`'s docstring) -- as of this writing the
+        server only honors them on `ping()`, not here.
+        """
+        return self._paid_request(
+            "GET",
+            "/api/v1/x402/news/search",
+            params=_params(
+                q=q,
+                limit=limit,
+                **_bypass_params(preview=preview, promo_code=promo_code, promo_wallet=promo_wallet),
+            ),
+        )
+
+    def ping(
+        self,
+        *,
+        preview: bool = False,
+        promo_code: str | None = None,
+        promo_wallet: str | None = None,
+    ) -> dict[str, Any]:
+        """`GET /api/v1/x402/ping` -- the marketplace's lowest price ($0.001), for smoke-testing a client.
+
+        `preview=True` bypasses payment for a redacted response (no
+        facilitator call, nothing settled), rate-limited per IP server-side.
+        `promo_code`/`promo_wallet` attempt an admin-issued promo-code
+        bypass scoped to this route; on success you get the real response
+        with no settlement. Both are silent no-ops server-side if the route
+        doesn't support them or the attempt fails -- `ping()` is the
+        reference route where they actually work today; see
+        `docs/x402-marketplace-api.md`'s "Preview and promo codes" section
+        in the PXke Algorand backend repo. Note this call still needs a
+        client built with a mnemonic (or an injected `http_client`) even
+        when `preview=True`, since the client can't yet tell in advance
+        that no payment will be required.
+        """
+        return self._paid_request(
+            "GET",
+            "/api/v1/x402/ping",
+            params=_bypass_params(preview=preview, promo_code=promo_code, promo_wallet=promo_wallet),
+        )

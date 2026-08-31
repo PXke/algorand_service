@@ -129,6 +129,38 @@ client.place_on_board(
 )
 ```
 
+## Preview and promo codes
+
+Every paid method also accepts `preview: bool = False` and
+`promo_code: str | None = None, promo_wallet: str | None = None` -- the
+client-side plumbing for the marketplace's two payment-gate bypasses. As of
+this writing **the server only honors either on `ping()`**; passing them to
+any other method sends the same query params but the server currently
+ignores them there (check a route's `supports_preview`/`supports_promo` in
+`client.catalog()` before relying on either elsewhere). See
+`docs/x402-marketplace-api.md`'s "Preview and promo codes" section in the
+PXke Algorand backend repo for the full server-side contract.
+
+```python
+# Preview: no payment, a redacted response with the same JSON shape.
+# Still needs a client built with a mnemonic (or an injected http_client) --
+# the client can't yet tell in advance that no payment will be required.
+receipt = client.ping(preview=True)
+print(receipt["settlement_tx_id"])  # "<preview>"
+
+# Promo code: an admin-issued code redeems for a bounded number of free
+# uses. There is no public way to create one -- codes are issued only
+# through the marketplace operator's admin UI. On success you get the REAL
+# response (a promo bypasses payment, not product quality), tagged
+# `via: "promo"`, with an empty settlement_tx_id (nothing was settled).
+receipt = client.ping(promo_code="LAUNCH50", promo_wallet=client.address)
+print(receipt.get("via"))  # "promo"
+
+# A failed promo attempt (unknown/expired/exhausted/already-redeemed code,
+# etc.) is a silent no-op server-side -- the call just falls through to a
+# normal paid request, so it's always safe to pass promo_code speculatively.
+```
+
 Every paid method raises `PxkePaymentError` on failure -- check
 `.settlement_tx_id` (set whenever the response body carried one) and
 `.settled` (`True` when the payment went through even though the call was

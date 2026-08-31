@@ -1,10 +1,12 @@
 """HTTP route for the x402 catalog: free, rate-limited per IP.
 
-Served at /api/v1/x402 only. A /.well-known/x402 alias is NOT registered:
-nginx proxies only `location ^~ /api/` and `/health/ready` to this backend on
-the API host and answers everything else with 404
-(deploy/nginx/algorand-platform.conf), so a top-level path would be
-unreachable in production.
+Served at /api/v1/x402. A /.well-known/x402 alias (verbatim copy of this
+same document) and an /openapi.json are also served, at the top level rather
+than under /api/ -- see app.modules.x402_wellknown, registered right after
+this module in falcon_main.py, and the two matching `location` blocks it
+needed on the API host's nginx server block
+(deploy/nginx/algorand-platform.conf), which otherwise proxies only
+`location ^~ /api/` and `/health/ready` and answers everything else with 404.
 """
 
 from __future__ import annotations

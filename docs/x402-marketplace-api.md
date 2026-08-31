@@ -1,9 +1,13 @@
 # PXke x402 marketplace — API reference for agents
 
-Base URL: `https://algorand-api.pxke.me`. Every route below is under `/api/v1/`;
-nothing else on that host is proxied to the API. All bodies and responses are
-JSON. Written from the route code in `backend/app/modules/x402_*/api/routes.py`
-and `backend/app/modules/kya/api/routes.py` on 2026-08-30; the live catalog
+Base URL: `https://algorand-api.pxke.me`. Every route below is under `/api/v1/`,
+plus two top-level manifests: `GET /.well-known/x402` (re-serves the catalog
+verbatim — no ratified well-known spec exists to conform to instead, see
+`backend/app/modules/x402_wellknown/`) and `GET /openapi.json` (a real OpenAPI
+3.1 document generated from the same route roster). Nothing else on that host
+is proxied to the API. All bodies and responses are JSON. Written from the
+route code in `backend/app/modules/x402_*/api/routes.py` and
+`backend/app/modules/kya/api/routes.py` on 2026-08-30; the live catalog
 (`GET /api/v1/x402`) is authoritative for prices and for which routes are
 registered right now.
 
@@ -26,7 +30,8 @@ an agent needs before paying:
   "routes": [
     {"product": "directory", "method": "POST", "path": "/api/v1/x402/list",
      "paid": true, "price_usd": "$0.10", "resource": "x402-directory-list",
-     "description": "...", "input_example": {...}},
+     "description": "...", "input_example": {...},
+     "supports_preview": false, "supports_promo": false},
     ...
   ]
 }
@@ -83,6 +88,49 @@ Rules every paid route follows:
 Discovery: every paid route declares a Bazaar discovery extension (input
 example, JSON Schema, output example) in its 402 offer, which is what the
 catalog's `input_example` mirrors.
+
+## Preview and promo codes
+
+Two general bypass mechanisms exist on the shared payment gate. Both are
+**opt-in per route**: a route only honors them if the live catalog says so.
+Check `GET /api/v1/x402` before assuming either works on a given route --
+each entry in `routes[]` carries `supports_preview` and `supports_promo`
+booleans. As of this writing only `GET /api/v1/x402/ping` has either set;
+every other route lists both as `false` even though the mechanism itself is
+generic and future routes may wire it in without a new catalog shape.
+
+**`?preview=true`** (also `1`/`yes`, case-insensitive) bypasses payment
+entirely and returns a **redacted** version of the same response shape, with
+no facilitator call and nothing settled -- this is still a real request the
+server serves for free, so it is rate-limited per IP (fail-open on a Redis
+blip) independently of the catalog's other free-route budgets. On `ping`,
+preview returns `{"pong": true, "settlement_tx_id": "<preview>",
+"served_at_epoch": 0}` -- the literal string `"<preview>"` and a zeroed
+timestamp mark the values as not real, since nothing was settled.
+
+**`?promo=CODE&promo_wallet=ADDRESS`** attempts to redeem an admin-issued
+promo code for a bounded number of uses, scoped to one route. **There is no
+public way to create a promo code** -- codes are issued only through the
+admin UI (`X-Admin-Wallet`-gated), never self-service. On success the
+response is the **real, non-redacted** response (a promo bypasses payment,
+not product quality) with an added `via: "promo"` field and an empty
+`settlement_tx_id` (nothing settled). On `ping`, that looks like
+`{"pong": true, "settlement_tx_id": "", "served_at_epoch": <real>, "via":
+"promo"}`. Any redemption failure -- unknown code, wrong resource, expired,
+exhausted, already redeemed by that wallet, a malformed wallet, a
+rate-limited IP, or a storage blip -- is silent: the request just falls
+through to the normal payment gate. A promo attempt is never itself a
+402/error the caller can't route around; if you see a `402`, either no promo
+was attempted, or it failed and payment is still required as normal.
+
+Preview is checked before promo, so a `?preview=true` call never spends a
+promo redemption even if both query params are present.
+
+**Neither preview nor a promo redemption is ever a settlement.** Redeeming
+one does not write to the settlement ledger, never appears in
+`GET /api/v1/x402/settlements/recent`, and is excluded from every ranking,
+score and leaderboard the same way operator/probe traffic is -- there is
+simply no settlement row for either to be counted from.
 
 ## Rate limits (free routes)
 

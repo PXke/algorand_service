@@ -55,6 +55,13 @@ class CatalogRoute:
     # of the same JSON shape. False (the default) for every route until it is
     # explicitly wired -- preview is opt-in per route, not automatic.
     supports_preview: bool = False
+    # True for a paid route that also accepts an admin-issued
+    # `?promo=CODE&promo_wallet=ADDRESS` bypass (see app/modules/x402/promo.py):
+    # a real (non-redacted) response with no settlement. False (the default)
+    # for every route until it is explicitly wired -- same opt-in-per-route
+    # shape as supports_preview. There is no public way to create a promo
+    # code; this flag only says a route honors one if presented.
+    supports_promo: bool = False
 
     @property
     def paid(self) -> bool:
@@ -115,13 +122,15 @@ PRODUCTS: tuple[Product, ...] = (
                     "The marketplace's lowest price, for testing that your x402 client can "
                     "build, sign and settle a real payment here before risking money on a "
                     "real product. No product data in the response, just a receipt. "
-                    "Supports ?preview=true (redacted, unpaid, rate-limited) as the reference "
-                    "for every future route that wires it in."
+                    "Supports ?preview=true (redacted, unpaid, rate-limited) and an "
+                    "admin-issued ?promo=CODE&promo_wallet=ADDRESS bypass, as the reference "
+                    "for every future route that wires either in."
                 ),
                 price_setting="x402_ping_price",
                 resource="x402-ping",
                 input_example=None,
                 supports_preview=True,
+                supports_promo=True,
             ),
         ),
     ),
@@ -416,6 +425,7 @@ def _route_json(product: Product, route: CatalogRoute) -> dict[str, Any]:
         "description": route.description,
         "input_example": route.input_example,
         "supports_preview": route.supports_preview,
+        "supports_promo": route.supports_promo,
     }
 
 

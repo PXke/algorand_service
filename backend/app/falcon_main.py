@@ -37,6 +37,7 @@ from app.modules.x402_directory.api.routes import register_x402_directory_routes
 from app.modules.x402_features.api.routes import register_x402_features_routes
 from app.modules.x402_grading.api.routes import register_x402_grading_routes
 from app.modules.x402_news.api.routes import register_x402_news_routes
+from app.modules.x402_wellknown.api.routes import register_x402_wellknown_routes
 
 
 class CorsMiddleware:
@@ -172,6 +173,11 @@ def create_app() -> falcon.App:
         # (it re-evaluates the same gates), so it comes last and is gated
         # only on the shared switch.
         register_x402_catalog_routes(router)
+        # /.well-known/x402 and /openapi.json are meta/bootstrap routes, like
+        # the catalog itself: no product store gate of their own, they just
+        # reshape whatever register_x402_catalog_routes's build_catalog()
+        # already produced.
+        register_x402_wellknown_routes(router)
     register_seo_routes(router)
     return app
 
