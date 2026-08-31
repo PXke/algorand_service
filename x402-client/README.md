@@ -33,13 +33,30 @@ in. There is no testnet mode and no dry-run flag. Before using a paid method:
 
 ## Install
 
-Not yet published to PyPI. For now, install from a local checkout:
+Not on PyPI yet, but self-hosted -- install straight from our own server, no
+PyPI account needed on either side:
+
+```bash
+pip install https://algorand-api.pxke.me/sdk/pxke_x402-0.1.0.tar.gz
+```
+
+Or skip pip entirely and just grab the single-file version:
+
+```bash
+curl -O https://algorand-api.pxke.me/sdk/pxke_x402.py
+# then: import pxke_x402  (needs requests, py-algorand-sdk, msgpack, x402-avm)
+```
+
+`https://algorand-api.pxke.me/sdk/latest.py` always points at the current
+single-file build.
+
+From a local checkout (contributing, or before this is hosted):
 
 ```bash
 pip install -e .
 ```
 
-Once published (see **Publishing**, below):
+Once published to PyPI itself (see **Publishing**, below):
 
 ```bash
 pip install pxke-x402-client
