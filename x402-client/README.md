@@ -134,12 +134,14 @@ client.place_on_board(
 Every paid method also accepts `preview: bool = False` and
 `promo_code: str | None = None, promo_wallet: str | None = None` -- the
 client-side plumbing for the marketplace's two payment-gate bypasses. As of
-this writing **the server only honors either on `ping()`**; passing them to
-any other method sends the same query params but the server currently
-ignores them there (check a route's `supports_preview`/`supports_promo` in
-`client.catalog()` before relying on either elsewhere). See
-`docs/x402-marketplace-api.md`'s "Preview and promo codes" section in the
-PXke Algorand backend repo for the full server-side contract.
+this writing `promo_code`/`promo_wallet` are honored on every paid route the
+server exposes except the KYA lookup (currently disabled anyway); `preview`
+is still honored only on `ping()`, the reference wiring the mechanism was
+built against. Always check a route's `supports_preview`/`supports_promo` in
+`client.catalog()` before relying on either -- that live catalog is the
+source of truth, not this README. See `docs/x402-marketplace-api.md`'s
+"Preview and promo codes" section in the PXke Algorand backend repo for the
+full server-side contract.
 
 ```python
 # Preview: no payment, a redacted response with the same JSON shape.

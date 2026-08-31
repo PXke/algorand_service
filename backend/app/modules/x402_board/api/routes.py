@@ -17,6 +17,7 @@ from app.core.query_params import query_param
 from app.modules.admin.auth import require_admin_wallet
 from app.modules.x402.discovery import describe_json_endpoint
 from app.modules.x402.paid_request import mark_fulfilled, require_paid_request
+from app.modules.x402.promo import promo_request_params
 from app.modules.x402_board.models.domain import BoardError, StoredPlacement
 from app.modules.x402_board.services.board_service import BoardService, normalize_link
 from app.modules.x402_board.services.rate_limit import (
@@ -83,10 +84,13 @@ def x402_board_place(request: Request) -> Response:
         return json_error_from_platform(exc)
 
     term_days = settings.x402_board_term_days
+    promo_code, promo_wallet = promo_request_params(request)
     result = require_paid_request(
         request,
         price=settings.x402_board_price,
         resource="x402-board-place",
+        promo_code=promo_code,
+        promo_wallet=promo_wallet,
         # Reaches the payer as the 402's resource.description, before they
         # commit — the term length is not derivable from the price alone.
         description=(
@@ -124,7 +128,10 @@ def x402_board_place(request: Request) -> Response:
             normalized_link=normalized_link,
             name=payload.name,
             pitch=payload.pitch,
-            payer=result.payer or "",
+            # A promo redemption settles nothing, so result.payer is empty —
+            # attribute the placement to the caller's own claimed wallet
+            # instead (already validated in promo.attempt_promo_redemption).
+            payer=result.payer or promo_wallet,
             settlement_tx_id=result.payment_txid or "",
         )
     except BoardError as exc:
@@ -137,7 +144,8 @@ def x402_board_place(request: Request) -> Response:
         # ending in a 4xx, so a new rule belongs before the gate, not after it.
         return json_error_from_platform(exc)
 
-    mark_fulfilled(result.payment_txid, resource="x402-board-place")
+    if not result.is_promo:
+        mark_fulfilled(result.payment_txid, resource="x402-board-place")
     return Response(
         status_code=200,
         headers={"Content-Type": "application/json", **result.settlement_headers},
@@ -146,6 +154,7 @@ def x402_board_place(request: Request) -> Response:
                 "placement": _placement_json(placement),
                 "settlement_tx_id": result.payment_txid or "",
                 "term_days": term_days,
+                **({"via": "promo"} if result.is_promo else {}),
             }
         ),
     )
@@ -202,10 +211,13 @@ def x402_board_renew(request: Request) -> Response:
         )
 
     term_days = settings.x402_board_term_days
+    promo_code, promo_wallet = promo_request_params(request)
     result = require_paid_request(
         request,
         price=settings.x402_board_price,
         resource="x402-board-renew",
+        promo_code=promo_code,
+        promo_wallet=promo_wallet,
         description=(
             f"Extend your existing PXke x402 board placement by {term_days} more days, "
             f"from the later of now and its current term end. Only the wallet that "
@@ -235,7 +247,9 @@ def x402_board_renew(request: Request) -> Response:
     try:
         renewed = board_service.renew(
             placement=placement,
-            payer=result.payer or "",
+            # See x402_board_place's identical fallback: a promo redemption
+            # settles nothing, so result.payer is empty on a promo result.
+            payer=result.payer or promo_wallet,
             settlement_tx_id=result.payment_txid or "",
         )
     except BoardError as exc:
@@ -247,7 +261,8 @@ def x402_board_renew(request: Request) -> Response:
             description=serialization.dumps({"error": {"code": exc.code, "message": exc.message}}),
         )
 
-    mark_fulfilled(result.payment_txid, resource="x402-board-renew")
+    if not result.is_promo:
+        mark_fulfilled(result.payment_txid, resource="x402-board-renew")
     return Response(
         status_code=200,
         headers={"Content-Type": "application/json", **result.settlement_headers},
@@ -256,6 +271,7 @@ def x402_board_renew(request: Request) -> Response:
                 "placement": _placement_json(renewed),
                 "settlement_tx_id": result.payment_txid or "",
                 "term_days": term_days,
+                **({"via": "promo"} if result.is_promo else {}),
             }
         ),
     )

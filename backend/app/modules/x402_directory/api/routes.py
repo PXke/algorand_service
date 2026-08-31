@@ -17,6 +17,7 @@ from app.core.query_params import query_param
 from app.modules.admin.auth import require_admin_wallet
 from app.modules.x402.discovery import describe_json_endpoint
 from app.modules.x402.paid_request import mark_fulfilled, require_paid_request
+from app.modules.x402.promo import promo_request_params
 from app.modules.x402_directory.models.domain import (
     CATEGORY_TAG_PREFIX,
     LISTING_CATEGORIES,
@@ -129,10 +130,13 @@ def x402_list(request: Request) -> Response:
         return json_error_from_platform(exc)
 
     term_days = settings.x402_listing_term_days
+    promo_code, promo_wallet = promo_request_params(request)
     result = require_paid_request(
         request,
         price=settings.x402_listing_price,
         resource="x402-directory-list",
+        promo_code=promo_code,
+        promo_wallet=promo_wallet,
         # Reaches the payer as the 402's resource.description, before they
         # commit — the term length is not derivable from the price alone.
         description=(
@@ -211,7 +215,10 @@ def x402_list(request: Request) -> Response:
             tags=tags,
             schema_json=schema_json,
             settlement_tx_id=result.payment_txid or "",
-            payer=result.payer or "",
+            # A promo redemption settles nothing, so result.payer is empty —
+            # attribute the listing to the caller's own claimed wallet
+            # instead (already validated in promo.attempt_promo_redemption).
+            payer=result.payer or promo_wallet,
             category=category,
         )
     except DirectoryError as exc:
@@ -223,7 +230,8 @@ def x402_list(request: Request) -> Response:
         # before it. A new validation rule belongs there too, never here.
         return json_error_from_platform(exc)
 
-    mark_fulfilled(result.payment_txid, resource="x402-directory-list")
+    if not result.is_promo:
+        mark_fulfilled(result.payment_txid, resource="x402-directory-list")
     return Response(
         status_code=200,
         headers={"Content-Type": "application/json", **result.settlement_headers},
@@ -232,6 +240,7 @@ def x402_list(request: Request) -> Response:
                 "listing": _listing_json(listing),
                 "settlement_tx_id": result.payment_txid or "",
                 "term_days": term_days,
+                **({"via": "promo"} if result.is_promo else {}),
             }
         ),
     )
@@ -264,10 +273,13 @@ def x402_renew(request: Request) -> Response:
         return json_error_response(404, "not_found", "No listing for that url")
 
     term_days = settings.x402_listing_term_days
+    promo_code, promo_wallet = promo_request_params(request)
     result = require_paid_request(
         request,
         price=settings.x402_listing_price,
         resource="x402-directory-renew",
+        promo_code=promo_code,
+        promo_wallet=promo_wallet,
         description=(
             f"Extend an existing PXke x402 directory listing by {term_days} more days, "
             f"from the later of now and its current term end; nothing else about the "
@@ -298,7 +310,9 @@ def x402_renew(request: Request) -> Response:
     try:
         renewed = listing_service.renew(
             normalized_url=normalized_url,
-            payer=result.payer or "",
+            # See x402_list's identical fallback: a promo redemption settles
+            # nothing, so result.payer is empty on a promo result.
+            payer=result.payer or promo_wallet,
             settlement_tx_id=result.payment_txid or "",
         )
     except DirectoryError as exc:
@@ -312,7 +326,8 @@ def x402_renew(request: Request) -> Response:
             description=serialization.dumps({"error": {"code": exc.code, "message": exc.message}}),
         )
 
-    mark_fulfilled(result.payment_txid, resource="x402-directory-renew")
+    if not result.is_promo:
+        mark_fulfilled(result.payment_txid, resource="x402-directory-renew")
     return Response(
         status_code=200,
         headers={"Content-Type": "application/json", **result.settlement_headers},
@@ -321,6 +336,7 @@ def x402_renew(request: Request) -> Response:
                 "listing": _listing_json(renewed),
                 "settlement_tx_id": result.payment_txid or "",
                 "term_days": term_days,
+                **({"via": "promo"} if result.is_promo else {}),
             }
         ),
     )

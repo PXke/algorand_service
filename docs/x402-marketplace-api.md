@@ -95,9 +95,14 @@ Two general bypass mechanisms exist on the shared payment gate. Both are
 **opt-in per route**: a route only honors them if the live catalog says so.
 Check `GET /api/v1/x402` before assuming either works on a given route --
 each entry in `routes[]` carries `supports_preview` and `supports_promo`
-booleans. As of this writing only `GET /api/v1/x402/ping` has either set;
-every other route lists both as `false` even though the mechanism itself is
-generic and future routes may wire it in without a new catalog shape.
+booleans. As of this writing `supports_promo` is set on every paid route
+except `GET /api/v1/kyc/verify` (KYA's lookup route triggers a real payout to
+the looked-up wallet on a hit -- see services/payout_service.py -- and is
+deliberately left unwired rather than assumed safe by copying the same
+pattern as every other paid route). `supports_preview` is set only on
+`GET /api/v1/x402/ping`, the reference wiring the mechanism was built
+against; the underlying mechanism is generic and future routes may wire it
+in without a new catalog shape.
 
 **`?preview=true`** (also `1`/`yes`, case-insensitive) bypasses payment
 entirely and returns a **redacted** version of the same response shape, with
@@ -125,6 +130,13 @@ was attempted, or it failed and payment is still required as normal.
 
 Preview is checked before promo, so a `?preview=true` call never spends a
 promo redemption even if both query params are present.
+
+On a route whose product write needs a wallet to attribute (a directory
+listing, a board placement, a vote, a claim, a grade), a promo hit uses
+`promo_wallet` itself for that attribution -- there is no settled payer to
+read it from. That wallet is validated as a syntactically real Algorand
+address before redemption succeeds, but -- same as everywhere else in this
+marketplace -- it is not cryptographic proof of ownership.
 
 **Neither preview nor a promo redemption is ever a settlement.** Redeeming
 one does not write to the settlement ledger, never appears in

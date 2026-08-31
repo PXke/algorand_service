@@ -20,6 +20,7 @@ from app.core.query_params import query_param
 from app.modules.admin.auth import require_admin_wallet
 from app.modules.x402.discovery import describe_json_endpoint
 from app.modules.x402.paid_request import mark_fulfilled, require_paid_request
+from app.modules.x402.promo import promo_request_params
 
 # The ONLY import of x402_directory anywhere in this module, and read-only:
 # the tag leaderboard needs the directory's public ListingService to say which
@@ -182,10 +183,13 @@ def x402_grade_submit(request: Request) -> Response:
     except GradingError as exc:
         return json_error_from_platform(exc)
 
+    promo_code, promo_wallet = promo_request_params(request)
     result = require_paid_request(
         request,
         price=settings.x402_grading_grade_price,
         resource="x402-grading-submit",
+        promo_code=promo_code,
+        promo_wallet=promo_wallet,
         # Reaches the payer as the 402's resource.description, before they
         # commit. It states the overwrite rule and how the grade will be
         # weighted, because neither is derivable from the price.
@@ -223,7 +227,10 @@ def x402_grade_submit(request: Request) -> Response:
     if result.error:
         return result.error
 
-    payer = result.payer or ""
+    # A promo redemption settles nothing, so result.payer is empty -- fall
+    # back to the caller's own claimed wallet instead (already validated in
+    # promo.attempt_promo_redemption, so this is never empty on a promo hit).
+    payer = result.payer or promo_wallet
     if not payer.strip():
         # The gate settled a payment it could not attribute. GradingService
         # .submit refuses this too -- see there for why an unattributable grade
@@ -273,7 +280,8 @@ def x402_grade_submit(request: Request) -> Response:
             description=serialization.dumps({"error": {"code": exc.code, "message": exc.message}}),
         )
 
-    mark_fulfilled(result.payment_txid, resource="x402-grading-submit")
+    if not result.is_promo:
+        mark_fulfilled(result.payment_txid, resource="x402-grading-submit")
     return Response(
         status_code=200,
         headers={"Content-Type": "application/json", **result.settlement_headers},
@@ -283,6 +291,7 @@ def x402_grade_submit(request: Request) -> Response:
                 "url": grade.url,
                 "grade": _grade_json(grade),
                 "settlement_tx_id": result.payment_txid or "",
+                **({"via": "promo"} if result.is_promo else {}),
             }
         ),
     )
@@ -325,10 +334,13 @@ def x402_grade_score(request: Request) -> Response:
             "endpoint that has at least one grade, free of charge.",
         )
 
+    promo_code, promo_wallet = promo_request_params(request)
     result = require_paid_request(
         request,
         price=settings.x402_grading_score_price,
         resource="x402-grading-score",
+        promo_code=promo_code,
+        promo_wallet=promo_wallet,
         description=(
             "Read the aggregate grade for one x402 endpoint: the credibility-weighted "
             "mean, the plain unweighted mean, the grader count, the full 1-5 distribution, "
@@ -364,12 +376,17 @@ def x402_grade_score(request: Request) -> Response:
         return result.error
 
     aggregate = grading_service.aggregate(endpoint)
-    mark_fulfilled(result.payment_txid, resource="x402-grading-score")
+    if not result.is_promo:
+        mark_fulfilled(result.payment_txid, resource="x402-grading-score")
     return Response(
         status_code=200,
         headers={"Content-Type": "application/json", **result.settlement_headers},
         description=serialization.dumps(
-            {**_aggregate_json(aggregate), "settlement_tx_id": result.payment_txid or ""}
+            {
+                **_aggregate_json(aggregate),
+                "settlement_tx_id": result.payment_txid or "",
+                **({"via": "promo"} if result.is_promo else {}),
+            }
         ),
     )
 
@@ -463,10 +480,13 @@ def x402_grade_top(request: Request) -> Response:
             f"and GET /api/v1/x402/grades/summary?url= each one's grade count, free.",
         )
 
+    promo_code, promo_wallet = promo_request_params(request)
     result = require_paid_request(
         request,
         price=settings.x402_grading_score_price,
         resource="x402-grading-top",
+        promo_code=promo_code,
+        promo_wallet=promo_wallet,
         description=(
             f"Read the top graded x402 endpoints listed under one directory tag, ranked "
             f"by credibility-weighted mean grade, with each endpoint's plain mean and "
@@ -508,7 +528,8 @@ def x402_grade_top(request: Request) -> Response:
         return result.error
 
     aggregates = grading_service.rank_leaderboard(candidates)
-    mark_fulfilled(result.payment_txid, resource="x402-grading-top")
+    if not result.is_promo:
+        mark_fulfilled(result.payment_txid, resource="x402-grading-top")
     return Response(
         status_code=200,
         headers={"Content-Type": "application/json", **result.settlement_headers},
@@ -522,6 +543,7 @@ def x402_grade_top(request: Request) -> Response:
                 "weights_resolved": all(item.weights_resolved for item in aggregates),
                 "candidates_considered": len(aggregates),
                 "settlement_tx_id": result.payment_txid or "",
+                **({"via": "promo"} if result.is_promo else {}),
             }
         ),
     )

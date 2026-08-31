@@ -724,6 +724,38 @@ def test_a_schema_within_the_cap_is_still_accepted(
     assert listing["schema"] == {"type": "object", "properties": {"pair": {"type": "string"}}}
 
 
+def test_a_promo_redemption_lists_the_endpoint_attributed_to_the_promo_wallet(
+    store: InMemoryListingStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """?promo=&promo_wallet= lists the endpoint for real, owned by the promo wallet (result.payer is empty on a promo hit, so the route falls back to it), settles nothing, and is never marked fulfilled."""
+    monkeypatch.setattr(directory_routes, "listing_service", ListingService(store))
+    monkeypatch.setattr(
+        directory_routes,
+        "require_paid_request",
+        lambda *_a, **_kw: x402_guard.PaymentResult(error=None, is_promo=True),
+    )
+    fulfilled: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        directory_routes,
+        "mark_fulfilled",
+        lambda txid, *, resource: fulfilled.append((txid, resource)),
+    )
+
+    response = directory_routes.x402_list(
+        _request(
+            query={"promo": "LAUNCH50", "promo_wallet": "PROMOWALLET" + "A" * 47},
+            body=json.dumps({"url": "https://api.example.com/v1/quote", "price": "$0.01"}).encode(),
+        )
+    )
+
+    assert response.status_code == 200
+    body = json.loads(response.description)
+    assert body["listing"]["payer"] == "PROMOWALLET" + "A" * 47
+    assert body["settlement_tx_id"] == ""
+    assert body["via"] == "promo"
+    assert fulfilled == []
+
+
 @pytest.mark.parametrize("field_name", ["assets", "tags"])
 def test_an_overlong_asset_or_tag_item_is_rejected_at_decode(field_name: str) -> None:
     """Each item of assets/tags is length-bounded, not just the item count — one paid listing cannot carry an unbounded string per item.

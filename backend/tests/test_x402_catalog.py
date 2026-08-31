@@ -249,16 +249,26 @@ def test_owner_only_renew_routes_say_a_non_owner_payment_is_still_taken() -> Non
         assert "refused" in text, route.path
 
 
-def test_only_ping_supports_promo(monkeypatch: pytest.MonkeyPatch) -> None:
-    """supports_promo is opt-in per route; today only x402-ping (the reference wiring) has it."""
+def test_every_paid_route_supports_promo_except_the_unwired_kya_lookup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """supports_promo is opt-in per route, but wired everywhere by now except kyc-verify.
+
+    kyc-verify triggers a real payout to the looked-up wallet on a hit
+    (services/payout_service.py) -- a promo bypass there would need its own
+    review of what a $0-amount lookup does to that payout path, so it is
+    deliberately left unwired rather than assumed safe by copying the same
+    pattern as every other paid route.
+    """
     _configure(monkeypatch, **dict.fromkeys(_STORE_GATES.values(), "cassandra"))
     routes = _catalog_routes(monkeypatch)
     by_resource = {route["resource"]: route for route in routes if route["resource"]}
-    assert by_resource["x402-ping"]["supports_promo"] is True
+    assert by_resource
     for resource, route in by_resource.items():
-        if resource == "x402-ping":
-            continue
-        assert route["supports_promo"] is False, resource
+        if resource == "kyc-verify":
+            assert route["supports_promo"] is False, resource
+        else:
+            assert route["supports_promo"] is True, resource
 
 
 def test_assets_follow_the_network(monkeypatch: pytest.MonkeyPatch) -> None:

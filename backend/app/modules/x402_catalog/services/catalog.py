@@ -157,6 +157,7 @@ PRODUCTS: tuple[Product, ...] = (
                     "tags": ["fx", "market-data"],
                     "category": "finance",
                 },
+                supports_promo=True,
             ),
             CatalogRoute(
                 method="POST",
@@ -170,6 +171,7 @@ PRODUCTS: tuple[Product, ...] = (
                 price_setting="x402_listing_price",
                 resource="x402-directory-renew",
                 input_example={"url": _EXAMPLE_URL},
+                supports_promo=True,
             ),
             CatalogRoute(
                 method="GET",
@@ -216,6 +218,7 @@ PRODUCTS: tuple[Product, ...] = (
                     "name": "Example Agent",
                     "pitch": "Autonomous FX arbitrage agent. Live on Algorand since 2026.",
                 },
+                supports_promo=True,
             ),
             CatalogRoute(
                 method="GET",
@@ -231,6 +234,7 @@ PRODUCTS: tuple[Product, ...] = (
                 ),
                 price_setting="x402_board_price",
                 resource="x402-board-renew",
+                supports_promo=True,
             ),
             CatalogRoute(
                 method="GET",
@@ -261,6 +265,7 @@ PRODUCTS: tuple[Product, ...] = (
                 price_setting="x402_features_demand_price",
                 resource="x402-features-demand",
                 input_example={"limit": 25},
+                supports_promo=True,
             ),
             CatalogRoute(
                 method="POST",
@@ -268,6 +273,7 @@ PRODUCTS: tuple[Product, ...] = (
                 description="Add one unit of paid demand to a request; paying again votes again.",
                 price_setting="x402_features_vote_price",
                 resource="x402-features-vote",
+                supports_promo=True,
             ),
             CatalogRoute(
                 method="POST",
@@ -275,6 +281,7 @@ PRODUCTS: tuple[Product, ...] = (
                 description="Publicly declare your wallet is building a request.",
                 price_setting="x402_features_vote_price",
                 resource="x402-features-claim",
+                supports_promo=True,
             ),
         ),
     ),
@@ -297,6 +304,7 @@ PRODUCTS: tuple[Product, ...] = (
                     "score": 4,
                     "comment": "Accurate quotes, ~300ms, spec matched the 402 offer exactly.",
                 },
+                supports_promo=True,
             ),
             CatalogRoute(
                 method="GET",
@@ -312,6 +320,7 @@ PRODUCTS: tuple[Product, ...] = (
                 price_setting="x402_grading_score_price",
                 resource="x402-grading-score",
                 input_example={"url": _EXAMPLE_URL},
+                supports_promo=True,
             ),
             CatalogRoute(
                 method="GET",
@@ -325,6 +334,7 @@ PRODUCTS: tuple[Product, ...] = (
                 price_setting="x402_grading_score_price",
                 resource="x402-grading-top",
                 input_example={"tag": "pricing"},
+                supports_promo=True,
             ),
         ),
     ),
@@ -345,6 +355,7 @@ PRODUCTS: tuple[Product, ...] = (
                 price_setting="x402_news_search_price",
                 resource="x402-news-search",
                 input_example={"q": "tinyman volume", "limit": 10},
+                supports_promo=True,
             ),
             CatalogRoute(
                 method="GET",

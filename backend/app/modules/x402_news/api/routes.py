@@ -15,6 +15,7 @@ from app.core.http_errors import json_error_response
 from app.core.query_params import query_param
 from app.modules.x402.discovery import describe_json_endpoint
 from app.modules.x402.paid_request import mark_fulfilled, require_paid_request
+from app.modules.x402.promo import promo_request_params
 from app.modules.x402_news.services.news_engine_service import NewsEngineService
 from app.modules.x402_news.services.rate_limit import (
     news_article_rate_limited,
@@ -144,10 +145,13 @@ def x402_news_search(request: Request) -> Response:
     if isinstance(limit, Response):
         return limit
 
+    promo_code, promo_wallet = promo_request_params(request)
     result = require_paid_request(
         request,
         price=settings.x402_news_search_price,
         resource=_SEARCH_RESOURCE,
+        promo_code=promo_code,
+        promo_wallet=promo_wallet,
         description=(
             "Full-text search over every published PXke Algorand newspaper article "
             "(Typesense-ranked, typo-tolerant, synonym-aware). Returns up to "
@@ -189,11 +193,18 @@ def x402_news_search(request: Request) -> Response:
         )
         response.headers.update(result.settlement_headers)
         return response
-    mark_fulfilled(result.payment_txid, resource=_SEARCH_RESOURCE)
+    if not result.is_promo:
+        mark_fulfilled(result.payment_txid, resource=_SEARCH_RESOURCE)
     return Response(
         status_code=200,
         headers={"Content-Type": "application/json", **result.settlement_headers},
-        description=serialization.dumps({**payload, "settlement_tx_id": result.payment_txid or ""}),
+        description=serialization.dumps(
+            {
+                **payload,
+                "settlement_tx_id": result.payment_txid or "",
+                **({"via": "promo"} if result.is_promo else {}),
+            }
+        ),
     )
 
 

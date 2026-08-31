@@ -24,6 +24,7 @@ from app.core.query_params import query_param
 from app.modules.admin.auth import require_admin_wallet
 from app.modules.x402.discovery import describe_json_endpoint
 from app.modules.x402.paid_request import mark_fulfilled, require_paid_request
+from app.modules.x402.promo import promo_request_params
 from app.modules.x402_features.models.domain import (
     ClaimSummary,
     FeatureError,
@@ -157,11 +158,14 @@ def x402_features_vote(request: Request) -> Response:
     if not request_id or not feature_service.exists(request_id):
         return json_error_response(404, "not_found", "No feature request with that id")
 
+    promo_code, promo_wallet = promo_request_params(request)
     result = require_paid_request(
         request,
         price=settings.x402_features_vote_price,
         resource="x402-features-vote",
         resource_path="/api/v1/x402/features/{request_id}/vote",
+        promo_code=promo_code,
+        promo_wallet=promo_wallet,
         # The payer needs to know before committing that this is additive and
         # repeatable, not a toggle they might be paying to flip twice.
         description=(
@@ -182,10 +186,14 @@ def x402_features_vote(request: Request) -> Response:
 
     vote_total = feature_service.vote(
         request_id=request_id,
-        voter=result.payer or "",
+        # A promo redemption settles nothing, so result.payer is empty —
+        # attribute the vote to the caller's own claimed wallet instead
+        # (already validated in promo.attempt_promo_redemption).
+        voter=result.payer or promo_wallet,
         settlement_tx_id=result.payment_txid or "",
     )
-    mark_fulfilled(result.payment_txid, resource="x402-features-vote")
+    if not result.is_promo:
+        mark_fulfilled(result.payment_txid, resource="x402-features-vote")
 
     return Response(
         status_code=200,
@@ -195,6 +203,7 @@ def x402_features_vote(request: Request) -> Response:
                 "request_id": request_id,
                 "vote_total": vote_total,
                 "settlement_tx_id": result.payment_txid or "",
+                **({"via": "promo"} if result.is_promo else {}),
             }
         ),
     )
@@ -237,10 +246,13 @@ def x402_features_claim(request: Request) -> Response:
     if not request_id or not feature_service.exists(request_id):
         return json_error_response(404, "not_found", "No feature request with that id")
 
+    promo_code, promo_wallet = promo_request_params(request)
     result = require_paid_request(
         request,
         price=settings.x402_features_vote_price,
         resource="x402-features-claim",
+        promo_code=promo_code,
+        promo_wallet=promo_wallet,
         description=(
             "Declare that your wallet is building a PXke x402 feature request. The "
             "claim is public: the request's claim count and your wallet as latest "
@@ -264,10 +276,14 @@ def x402_features_claim(request: Request) -> Response:
 
     summary = feature_service.claim(
         request_id=request_id,
-        claimer=result.payer or "",
+        # A promo redemption settles nothing, so result.payer is empty —
+        # attribute the claim to the caller's own claimed wallet instead
+        # (already validated in promo.attempt_promo_redemption).
+        claimer=result.payer or promo_wallet,
         settlement_tx_id=result.payment_txid or "",
     )
-    mark_fulfilled(result.payment_txid, resource="x402-features-claim")
+    if not result.is_promo:
+        mark_fulfilled(result.payment_txid, resource="x402-features-claim")
     return Response(
         status_code=200,
         headers={"Content-Type": "application/json", **result.settlement_headers},
@@ -276,6 +292,7 @@ def x402_features_claim(request: Request) -> Response:
                 "request_id": request_id,
                 **_claims_json(summary),
                 "settlement_tx_id": result.payment_txid or "",
+                **({"via": "promo"} if result.is_promo else {}),
             }
         ),
     )
@@ -297,10 +314,13 @@ def x402_features_demand(request: Request) -> Response:
     except ValueError:
         return json_error_response(400, "invalid_request", "limit must be an integer")
 
+    promo_code, promo_wallet = promo_request_params(request)
     result = require_paid_request(
         request,
         price=settings.x402_features_demand_price,
         resource="x402-features-demand",
+        promo_code=promo_code,
+        promo_wallet=promo_wallet,
         description=(
             "Read the PXke x402 feature-request board ranked by paid demand, "
             "with each request's vote total — what agents have actually staked "
@@ -338,7 +358,8 @@ def x402_features_demand(request: Request) -> Response:
 
     ranked = feature_service.rank_by_demand(limit=limit)
     claims = feature_service.claim_summaries([item.request for item in ranked])
-    mark_fulfilled(result.payment_txid, resource="x402-features-demand")
+    if not result.is_promo:
+        mark_fulfilled(result.payment_txid, resource="x402-features-demand")
     return Response(
         status_code=200,
         headers={"Content-Type": "application/json", **result.settlement_headers},
@@ -349,6 +370,7 @@ def x402_features_demand(request: Request) -> Response:
                     for item in ranked
                 ],
                 "settlement_tx_id": result.payment_txid or "",
+                **({"via": "promo"} if result.is_promo else {}),
             }
         ),
     )

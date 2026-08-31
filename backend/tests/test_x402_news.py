@@ -437,6 +437,29 @@ def test_a_settled_search_returns_ranked_hits_and_marks_it_fulfilled(
     assert fulfilled == [("TX123", "x402-news-search")]
 
 
+@pytest.mark.usefixtures("engine", "fake_redis")
+def test_a_promo_redemption_runs_the_search_with_no_settlement(
+    monkeypatch: pytest.MonkeyPatch, fulfilled: list[tuple[str | None, str]]
+) -> None:
+    """?promo=&promo_wallet= runs the real search (a promo bypasses payment, not product quality), settles nothing, and is never marked fulfilled."""
+    monkeypatch.setattr(
+        news_routes,
+        "require_paid_request",
+        lambda *_a, **_kw: x402_guard.PaymentResult(error=None, is_promo=True),
+    )
+
+    response = news_routes.x402_news_search(
+        _request(query={"q": "governance", "promo": "LAUNCH50", "promo_wallet": _PAYER})
+    )
+
+    assert response.status_code == 200
+    body = json.loads(response.description)
+    assert body["query"] == "governance"
+    assert body["settlement_tx_id"] == ""
+    assert body["via"] == "promo"
+    assert fulfilled == []
+
+
 @pytest.mark.usefixtures("fake_redis")
 def test_a_search_whose_engine_failed_is_a_503_and_not_marked_fulfilled(
     engine: NewsEngineService,

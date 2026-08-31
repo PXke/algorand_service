@@ -558,6 +558,41 @@ def test_an_unattributable_payment_cannot_be_stored_as_a_grade(
 
 
 @pytest.mark.usefixtures("ledger")
+def test_a_promo_redemption_stores_the_grade_attributed_to_the_promo_wallet(
+    store: InMemoryGradeStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A promo hit must not trip the "unattributable payment" guard above.
+
+    Its result.payer is empty (nothing settled) -- the route must fall back
+    to the caller's own claimed promo_wallet as the grader instead. That
+    guard exists for a real settled payment that genuinely carried no payer.
+    """
+    monkeypatch.setattr(grading_routes, "grading_service", _service(store))
+    monkeypatch.setattr(
+        grading_routes,
+        "require_paid_request",
+        lambda *_a, **_kw: x402_guard.PaymentResult(error=None, is_promo=True),
+    )
+    fulfilled: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        grading_routes,
+        "mark_fulfilled",
+        lambda txid, *, resource: fulfilled.append((txid, resource)),
+    )
+
+    response = grading_routes.x402_grade_submit(
+        _request(query={"promo": "LAUNCH50", "promo_wallet": _PAYER}, body=_grade_body())
+    )
+
+    assert response.status_code == 200
+    body = json.loads(response.description)
+    assert body["grade"]["grader"] == _PAYER
+    assert body["settlement_tx_id"] == ""
+    assert body["via"] == "promo"
+    assert fulfilled == []
+
+
+@pytest.mark.usefixtures("ledger")
 def test_the_service_refuses_an_unattributable_grade_even_if_a_route_forgets(
     store: InMemoryGradeStore,
 ) -> None:
@@ -981,6 +1016,42 @@ def test_a_graded_url_still_costs_a_payment_to_score(
     )
 
     assert response.status_code == 402
+
+
+@pytest.mark.usefixtures("ledger")
+def test_a_promo_redemption_reads_the_score_with_no_settlement(
+    store: InMemoryGradeStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A pure-read paid route with no payer downstream: promo still returns the real aggregate, is never marked fulfilled, and carries via="promo"."""
+    service = _service(store)
+    _grade(service, grader=_PAYER, score=5)
+    monkeypatch.setattr(grading_routes, "grading_service", service)
+    monkeypatch.setattr(
+        grading_routes,
+        "require_paid_request",
+        lambda *_a, **_kw: x402_guard.PaymentResult(error=None, is_promo=True),
+    )
+    fulfilled: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        grading_routes,
+        "mark_fulfilled",
+        lambda txid, *, resource: fulfilled.append((txid, resource)),
+    )
+
+    response = grading_routes.x402_grade_score(
+        _request(
+            method="GET",
+            query={"url": _URL, "promo": "LAUNCH50", "promo_wallet": _PAYER},
+            path="/api/v1/x402/grades/score",
+        )
+    )
+
+    assert response.status_code == 200
+    body = json.loads(response.description)
+    assert body["count"] == 1
+    assert body["settlement_tx_id"] == ""
+    assert body["via"] == "promo"
+    assert fulfilled == []
 
 
 # --------------------------------------------------------------------------- #
