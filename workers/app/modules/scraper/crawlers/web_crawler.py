@@ -249,6 +249,7 @@ class WebCrawlerDriver:
             single_page_service_id,
         )
         from app.modules.crawler.url_queue import mark_url_crawled, mark_url_done
+        from app.modules.newspaper.service_sources import venue_owner_for_url
 
         url = str(item.get("url", ""))
         queue_id = str(item.get("queue_id", ""))
@@ -270,7 +271,22 @@ class WebCrawlerDriver:
         # crawled dozens of subpages each, hit 429s on wfp.medium.com).
         admin_approved = is_admin_approved_domain(domain)
 
-        service_id = service_id_for_url(url)
+        # A domain already claimed by a real service_registry entry (e.g. an
+        # admin-approved or ensure_monitored_service-created service) owns
+        # this page too -- check that reverse index BEFORE minting a fresh
+        # per-page synthetic id, or every page of an already-known service's
+        # site gets its own orphaned "discovered-web-<hash>" service_id
+        # instead of contributing to the one it actually belongs to
+        # (root-caused 2026-08-31: algochess.org registered as service
+        # "algochess-org" minutes before its crawl, but all 17 crawled pages
+        # still got fragmented discovered-web-* ids -- this check never ran
+        # here even though the exact same reverse index already backs
+        # ingest_signal._insert_artifact_for_signal and
+        # service_reconciliation.backfill_missing_venue_service_ids).
+        candidate_service_id = service_id_for_url(url)
+        service_id = (
+            venue_owner_for_url(url, own_service_id=candidate_service_id) or candidate_service_id
+        )
         # Stamp the cooldown now (before the fetch) so any outcome — success or
         # failure — keeps this exact link out of the crawler for the window.
         mark_url_crawled(url)
