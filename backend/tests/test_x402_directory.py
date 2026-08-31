@@ -1545,6 +1545,94 @@ def test_probe_status_is_rate_limited_per_ip(
     assert "probe" in _status("203.0.113.9")
 
 
+@pytest.mark.usefixtures("fake_redis")
+def test_probe_history_serves_past_probes_newest_first(
+    store: InMemoryListingStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """GET /x402/directory/probe/history?url= serves every past probe row for that listing, newest first (free, no gate)."""
+    monkeypatch.setattr(directory_routes, "listing_service", ListingService(store))
+    listing = _listed(store, "https://api.example.com/q")
+    store.record_probe(_probe(listing.url_hash, probed_at_epoch=1_700_000_000, latency_ms=100))
+    store.record_probe(_probe(listing.url_hash, probed_at_epoch=1_700_001_000, latency_ms=90))
+    store.record_probe(_probe(listing.url_hash, probed_at_epoch=1_700_002_000, latency_ms=80))
+
+    result = directory_routes.x402_probe_history(
+        _request(
+            method="GET",
+            path="/api/v1/x402/directory/probe/history",
+            query={"url": "HTTPS://API.example.com/q#frag"},
+        )
+    )
+
+    assert result["url"] == "https://api.example.com/q"
+    assert [row["latency_ms"] for row in result["history"]] == [80, 90, 100]
+
+
+@pytest.mark.usefixtures("fake_redis")
+def test_probe_history_is_empty_before_the_first_probe_and_404_for_unlisted_urls(
+    store: InMemoryListingStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A listed-but-unprobed URL answers history=[]; an unlisted URL is a 404, a bad URL a 400."""
+    monkeypatch.setattr(directory_routes, "listing_service", ListingService(store))
+    _listed(store, "https://api.example.com/q")
+
+    def _history(url: str) -> Response | dict:
+        return directory_routes.x402_probe_history(
+            _request(method="GET", path="/api/v1/x402/directory/probe/history", query={"url": url})
+        )
+
+    assert _history("https://api.example.com/q")["history"] == []
+    assert _history("https://nobody.example.com/q").status_code == 404
+    assert _history("ftp://api.example.com/q").status_code == 400
+    assert _history("").status_code == 400
+
+
+@pytest.mark.usefixtures("fake_redis")
+def test_probe_history_limit_is_clamped_to_the_configured_maximum(
+    store: InMemoryListingStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A caller cannot ask for an unbounded history read -- the limit is clamped server-side."""
+    monkeypatch.setattr(settings, "x402_probe_history_max_results", 2)
+    monkeypatch.setattr(directory_routes, "listing_service", ListingService(store))
+    listing = _listed(store, "https://api.example.com/q")
+    for i in range(5):
+        store.record_probe(_probe(listing.url_hash, probed_at_epoch=1_700_000_000 + i))
+
+    result = directory_routes.x402_probe_history(
+        _request(
+            method="GET",
+            path="/api/v1/x402/directory/probe/history",
+            query={"url": "https://api.example.com/q", "limit": "9999"},
+        )
+    )
+
+    assert len(result["history"]) == 2
+
+
+@pytest.mark.usefixtures("fake_redis")
+def test_probe_history_is_rate_limited_per_ip(
+    store: InMemoryListingStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The probe-history route shares the search route's per-IP hourly budget."""
+    monkeypatch.setattr(settings, "x402_search_rate_limit_per_hour", 1)
+    monkeypatch.setattr(directory_routes, "listing_service", ListingService(store))
+    _listed(store, "https://api.example.com/q")
+
+    def _history(ip: str) -> Response | dict:
+        return directory_routes.x402_probe_history(
+            _request(
+                method="GET",
+                headers={"X-Real-IP": ip},
+                path="/api/v1/x402/directory/probe/history",
+                query={"url": "https://api.example.com/q"},
+            )
+        )
+
+    assert "history" in _history("203.0.113.7")
+    assert _history("203.0.113.7").status_code == 429
+    assert "history" in _history("203.0.113.9")
+
+
 def test_cassandra_store_reads_badge_and_latest_probe_columns(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1597,6 +1685,42 @@ def test_cassandra_store_reads_badge_and_latest_probe_columns(
     assert (probe.http_status, probe.latency_ms, probe.error) == (402, 9, "")
     assert "x402_probe_latest" in executed[0][0]
     assert executed[0][1] == ("h",)
+
+
+def test_cassandra_store_probe_history_reads_x402_probe_results_bounded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """probe_history binds (url_hash, limit) against x402_probe_results.LIST_HISTORY, never an unbounded scan."""
+    from app.modules.x402_directory.stores import cassandra as cassandra_store
+
+    now = datetime(2026, 8, 30, tzinfo=UTC)
+    probe_row = SimpleNamespace(
+        url_hash="h",
+        url="https://api.example.com/q",
+        probed_at=now,
+        reachable=True,
+        http_status=402,
+        latency_ms=9,
+        served_valid_402=True,
+        payto_seen="AGENT1",
+        error=None,
+    )
+    executed: list[tuple[str, tuple]] = []
+
+    class _Session:
+        def execute(self, stmt: str, params: tuple) -> list[SimpleNamespace]:
+            executed.append((stmt, params))
+            return [probe_row]
+
+    monkeypatch.setattr("app.core.cassandra.prepare_cached", lambda cql: cql)
+    monkeypatch.setattr(cassandra_store, "get_cassandra_session", lambda: _Session())
+
+    history = cassandra_store.CassandraListingStore().probe_history("h", limit=50)
+
+    assert len(history) == 1
+    assert history[0].latency_ms == 9
+    assert "x402_probe_results" in executed[0][0]
+    assert executed[0][1] == ("h", 50)
 
 
 # --------------------------------------------------------------------------- #

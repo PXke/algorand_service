@@ -42,6 +42,16 @@ def test_probe_sends_url_as_a_query_param() -> None:
     assert session.calls[0].params == {"url": "https://example.com"}
 
 
+def test_probe_history_sends_url_and_limit_and_needs_no_mnemonic() -> None:
+    session = FakeSession([FakeResponse(200, {"url": "https://example.com", "history": []})])
+    client = PxkeClient(session=session)
+
+    client.probe_history("https://example.com", limit=10)
+
+    assert session.calls[0].url == f"{BASE_URL}/api/v1/x402/directory/probe/history"
+    assert session.calls[0].params == {"url": "https://example.com", "limit": 10}
+
+
 def test_file_feature_request_is_free_and_needs_no_mnemonic() -> None:
     session = FakeSession([FakeResponse(201, {"request": {"request_id": "abc"}})])
     client = PxkeClient(session=session)  # no mnemonic

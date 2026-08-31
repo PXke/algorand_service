@@ -48,3 +48,7 @@ class ListingStore(Protocol):
     def latest_probe(self, url_hash: str) -> StoredProbe | None:
         """Return the newest probe result for a URL hash, or None if it was never probed."""
         ...
+
+    def probe_history(self, url_hash: str, *, limit: int) -> list[StoredProbe]:
+        """Return up to `limit` probe results for a URL hash, newest first."""
+        ...

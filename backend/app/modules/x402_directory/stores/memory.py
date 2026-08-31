@@ -18,6 +18,7 @@ class InMemoryListingStore:
         self._items: dict[str, StoredListing] = {}
         self._by_tag: dict[str, dict[str, StoredListing]] = {}
         self._probes: dict[str, StoredProbe] = {}
+        self._probe_history: dict[str, list[StoredProbe]] = {}
 
     def insert_if_absent(self, item: StoredListing) -> bool:
         """Store the listing only if its url_hash is not yet present. True if it was stored."""
@@ -75,6 +76,16 @@ class InMemoryListingStore:
         """Return the newest probe for a URL hash, or None if never probed."""
         return self._probes.get(url_hash)
 
+    def probe_history(self, url_hash: str, *, limit: int) -> list[StoredProbe]:
+        """Return up to `limit` probe results for a URL hash, newest first."""
+        return self._probe_history.get(url_hash, [])[: max(0, limit)]
+
     def record_probe(self, probe: StoredProbe) -> None:
-        """Test hook standing in for the workers probe beat: store the latest probe row."""
+        """Test hook standing in for the workers probe beat: store the latest probe row.
+
+        Mirrors x402_probe_results' own newest-first clustering order (097) by
+        inserting at the front, matching Cassandra's (probed_at DESC) so tests
+        see the same ordering as production.
+        """
         self._probes[probe.url_hash] = probe
+        self._probe_history.setdefault(probe.url_hash, []).insert(0, probe)

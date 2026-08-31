@@ -237,6 +237,16 @@ class Settings(msgspec.Struct, kw_only=True):
     x402_search_rate_limit_per_hour: int = 120
     # Hard cap on a search page — no unbounded listings (CLAUDE.md section 4).
     x402_search_max_results: int = 100
+    # Hard cap on a probe-history read (roadmap item 7) — x402_probe_results
+    # (097) TTLs at 30 days and holds at most ~1440 rows per listing at the
+    # probe beat's current 30-min cadence, but the read is still bounded
+    # independently (CLAUDE.md section 4), same reasoning as the search cap
+    # above. Free, not priced: an owner call (2026-08-31) that real
+    # uptime/latency history works better as a trust signal an agent (or
+    # Relay) can point to freely than as its own paid product, the same
+    # "don't charge for what's already effectively public" reasoning as the
+    # News Engine's free article read.
+    x402_probe_history_max_results: int = 200
 
     # x402 visibility board (POST /x402/board paid, GET /x402/board free).
     # See app/modules/x402_board/. Separate settings from the directory's on

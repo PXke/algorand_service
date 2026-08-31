@@ -67,6 +67,12 @@ class X402ProbeStmts:
     GET_LATEST = _Stmt(
         f"SELECT {_PROBE_COLUMNS} FROM algorand_platform.x402_probe_latest WHERE url_hash = ?"
     )
+    # Bounded (CLAUDE.md section 4) -- the caller clamps limit; newest first
+    # is x402_probe_results' own clustering order (097), no ORDER BY needed.
+    LIST_HISTORY = _Stmt(
+        f"SELECT {_PROBE_COLUMNS} FROM algorand_platform.x402_probe_results "
+        "WHERE url_hash = ? LIMIT ?"
+    )
     # Badge writes are the ONE partial UPDATE on the listing tables, made
     # safe with IF EXISTS: a listing deleted (admin delist) between the
     # sweep's read and this write is left deleted instead of resurrected as

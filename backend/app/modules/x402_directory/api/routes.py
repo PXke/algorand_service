@@ -436,6 +436,43 @@ def x402_probe_status(request: Request) -> Response | dict:
     }
 
 
+def x402_probe_history(request: Request) -> Response | dict:
+    """Free: up to x402_probe_history_max_results past probe results for one listed URL, newest first, rate-limited per IP.
+
+    Shares the search route's per-IP hourly budget (search_rate_limited),
+    same free read path over the same directory as x402_probe_status. Real
+    measured uptime/latency history (roadmap item 7) rather than the single
+    latest reading -- kept free rather than priced (2026-08-31 owner call):
+    the marketplace benefits more from this working as a trust signal an
+    agent (or a third party) can point to freely than as its own paid
+    product. `limit` is clamped server-side; an unlisted URL is a 404, same
+    as x402_probe_status. Empty `history` is a listed URL the beat has not
+    reached yet, not an error.
+    """
+    if search_rate_limited(request):
+        return json_error_response(
+            429, "rate_limited", "Too many probe requests — please try again later"
+        )
+    raw_url = query_param(request.query_params.get("url", ""))
+    if not raw_url:
+        return json_error_response(400, "invalid_request", "url is required")
+    try:
+        normalized_url = normalize_url(raw_url)
+    except DirectoryError as exc:
+        return json_error_from_platform(exc)
+
+    raw_limit = query_param(request.query_params.get("limit", ""))
+    try:
+        limit = int(raw_limit) if raw_limit else settings.x402_probe_history_max_results
+    except ValueError:
+        return json_error_response(400, "invalid_request", "limit must be an integer")
+
+    history = listing_service.probe_history(normalized_url, limit=limit)
+    if history is None:
+        return json_error_response(404, "not_found", "No listing for that url")
+    return {"url": normalized_url, "history": [_probe_json(probe) for probe in history]}
+
+
 def x402_admin_delete_listing(request: Request) -> Response | dict:
     """Admin: delist a url outright, without waiting out its paid term.
 
@@ -465,10 +502,11 @@ def x402_admin_delete_listing(request: Request) -> Response | dict:
 
 
 def register_x402_directory_routes(app: Router) -> None:
-    """Register the paid list and renew routes, the free search, detail and probe-status routes, and the admin delist route."""
+    """Register the paid list and renew routes, the free search/detail/probe-status/probe-history routes, and the admin delist route."""
     app.post("/api/v1/x402/list")(x402_list)
     app.post("/api/v1/x402/list/renew")(x402_renew)
     app.get("/api/v1/x402/search")(x402_search)
     app.get("/api/v1/x402/listings")(x402_listing_detail)
     app.get("/api/v1/x402/directory/probe")(x402_probe_status)
+    app.get("/api/v1/x402/directory/probe/history")(x402_probe_history)
     app.delete("/api/v1/admin/x402/listings")(x402_admin_delete_listing)

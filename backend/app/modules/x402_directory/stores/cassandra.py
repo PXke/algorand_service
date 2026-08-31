@@ -234,3 +234,9 @@ class CassandraListingStore:
         session = get_cassandra_session()
         row = session.execute(X402ProbeStmts.GET_LATEST, (url_hash,)).one()
         return None if row is None else _row_to_probe(row)
+
+    def probe_history(self, url_hash: str, *, limit: int) -> list[StoredProbe]:
+        """Bounded read of x402_probe_results (097), newest first (its own clustering order)."""
+        session = get_cassandra_session()
+        rows = session.execute(X402ProbeStmts.LIST_HISTORY, (url_hash, limit))
+        return [_row_to_probe(row) for row in rows]

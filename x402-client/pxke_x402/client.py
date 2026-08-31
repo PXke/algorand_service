@@ -292,6 +292,12 @@ class PxkeClient:
         """`GET /api/v1/x402/directory/probe` -- newest unpaid reachability probe for a listed url."""
         return self._free_request("GET", "/api/v1/x402/directory/probe", params={"url": url})
 
+    def probe_history(self, url: str, limit: int | None = None) -> dict[str, Any]:
+        """`GET /api/v1/x402/directory/probe/history` -- past probe results for a listed url, newest first."""
+        return self._free_request(
+            "GET", "/api/v1/x402/directory/probe/history", params=_params(url=url, limit=limit)
+        )
+
     def file_feature_request(self, title: str, description: str) -> dict[str, Any]:
         """`POST /api/v1/x402/features` -- free, anonymous. File one feature request."""
         return self._free_request(

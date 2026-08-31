@@ -197,6 +197,17 @@ PRODUCTS: tuple[Product, ...] = (
                     "for one listed ?url=."
                 ),
             ),
+            CatalogRoute(
+                method="GET",
+                path="/api/v1/x402/directory/probe/history",
+                description=(
+                    "Up to x402_probe_history_max_results past probe results "
+                    "(reachability, latency, 402 validity), newest first, for one "
+                    "listed ?url=; optional ?limit=. Free -- real measured uptime "
+                    "history as a trust signal, not its own paid product."
+                ),
+                input_example={"url": _EXAMPLE_URL},
+            ),
         ),
     ),
     Product(

@@ -472,3 +472,18 @@ class ListingService:
         if listing is None:
             return None
         return listing, self.store.latest_probe(key)
+
+    def probe_history(self, normalized_url: str, *, limit: int) -> list[StoredProbe] | None:
+        """Free read: up to `limit` past probe results for a URL, newest first, or None if unlisted.
+
+        Same existence gate as probe_status() and for the same reason: only
+        listed URLs are answerable, so an unlisted URL can't be used to
+        enumerate x402_probe_results by hash. An empty list (not None) is a
+        listed URL the beat has not reached yet -- see probe_status()'s own
+        (listing, None) case.
+        """
+        key = url_hash(normalized_url)
+        if self.store.get(key) is None:
+            return None
+        clamped = max(1, min(limit, settings.x402_probe_history_max_results))
+        return self.store.probe_history(key, limit=clamped)

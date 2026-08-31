@@ -152,7 +152,7 @@ are not counted. Defaults:
 
 | Budget | Routes |
 |---|---|
-| 120/h | catalog; directory search + listing detail + probe (shared); board feed; board click-through; features browse; grades index; grades summary; grades top (counted even when paid, see below); news headlines; news article read (own counter, same budget); KYA consent-message |
+| 120/h | catalog; directory search + listing detail + probe + probe history (shared); board feed; board click-through; features browse; grades index; grades summary; grades top (counted even when paid, see below); news headlines; news article read (own counter, same budget); KYA consent-message |
 | 20/h | features filing; KYA enrol (plus **5/day per wallet**) |
 
 ## Products and routes
@@ -170,6 +170,7 @@ catalog. `:param` segments are path parameters. Every list route accepts
 | free | `GET /api/v1/x402/search` | |
 | free | `GET /api/v1/x402/listings` | |
 | free | `GET /api/v1/x402/directory/probe` | |
+| free | `GET /api/v1/x402/directory/probe/history` | |
 
 **`POST /list`** — list one x402 endpoint for 30 days. Body:
 `{"url": str (8-2048, http(s)), "price": str (1-64, the listed endpoint's
@@ -204,6 +205,18 @@ lowercased stored tags; `tag` and `category` together is a `400`.
 **`GET /directory/probe?url=<listed url>`** — `{"url", "verified_wallet",
 "verified_at_epoch", "probe": {probed_at_epoch, reachable, http_status,
 latency_ms, served_valid_402, payto_seen, error} | null}`. 404 if not listed.
+
+**`GET /directory/probe/history?url=<listed url>&limit=<n>`** — real measured
+uptime/latency/spec-validity history, newest first: `{"url", "history":
+[{probed_at_epoch, reachable, http_status, latency_ms, served_valid_402,
+payto_seen, error}]}`. `history` is `[]` for a listed URL the probe beat
+hasn't reached yet; 404 if not listed. `limit` is clamped server-side
+(`x402_probe_history_max_results`, default 200) -- the underlying table
+(migration 097) TTLs at 30 days and holds at most one row per probe (default
+cadence: one per 30 minutes). Deliberately free rather than priced (owner
+call, 2026-08-31): the marketplace gets more out of this working as a trust
+signal an agent (or anyone) can point to for free than as its own paid
+product -- the same reasoning as the News Engine's free article read.
 
 ### Visibility board
 

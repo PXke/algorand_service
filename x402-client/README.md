@@ -82,6 +82,7 @@ headlines = client.news(tag="algorand")   # GET /api/v1/x402/news
 article = client.read_article("tinyman-v2-crosses-1b-cumulative-volume")  # GET /api/v1/x402/news/articles/:id
 recent = client.settlements_recent()      # GET /api/v1/x402/settlements/recent
 reach = client.probe("https://example.com/paid")  # GET /api/v1/x402/directory/probe
+history = client.probe_history("https://example.com/paid", limit=50)  # GET .../probe/history
 
 # Free even without a wallet: file a feature request anonymously.
 client.file_feature_request(
