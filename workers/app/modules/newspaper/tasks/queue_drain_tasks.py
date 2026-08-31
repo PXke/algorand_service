@@ -398,11 +398,33 @@ def _artifact_to_queued_row(
         meta.get("display_name") or (content.title if content else "") or artifact.service_id or ""
     )
     created_at = artifact.created_at
+    # A one-time gap from the 2026-08-25 publish_queue->artifacts migration
+    # (this module's own docstring): artifacts backfilled that day carry no
+    # "payload" at all, so publish_kind was landing here as "" -- and
+    # PublishKind("") raises in _publish_standard_row below, which silently
+    # failed (and permanently stalled) every drain_to_compose run that drew
+    # one of them, not just those artifacts (root-caused 2026-08-31: 49 of a
+    # 50-artifact PENDING sample were empty this way). SERVICE_DISCOVERY, not
+    # CONTENT_UPDATE, is the correct default: evaluate_enqueue's diff-based
+    # gates (is_significant_diff/diff_is_reformat/relevance floor) only apply
+    # to CONTENT_UPDATE and these migrated rows carry no diff at all -- they
+    # are first-time discoveries, the exact shape SERVICE_DISCOVERY already
+    # covers unconditionally.
+    raw_publish_kind = payload.get("publish_kind")
+    if not raw_publish_kind:
+        logger.warning(
+            "artifact %s (service=%s) has no publish_kind in its payload -- "
+            "defaulting to service_discovery (pre-2026-08-25 migration gap, "
+            "or a new signal path that forgot to set it)",
+            artifact.artifact_id,
+            artifact.service_id,
+        )
+        raw_publish_kind = PublishKind.SERVICE_DISCOVERY.value
     return QueuedPublishRow(
         queue_id=artifact.artifact_id,
         priority=int(artifact.priority),
         topic=str(payload.get("topic", "")),
-        publish_kind=str(payload.get("publish_kind", "")),
+        publish_kind=str(raw_publish_kind),
         service_id=artifact.service_id or "",
         display_name=display_name,
         scrape_url=artifact.url or "",
