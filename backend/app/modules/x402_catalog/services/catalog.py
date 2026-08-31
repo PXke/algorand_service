@@ -350,11 +350,9 @@ PRODUCTS: tuple[Product, ...] = (
                 method="GET",
                 path="/api/v1/x402/news/articles/:article_id",
                 description=(
-                    "One published article in full (body markdown, sources, translations) "
-                    "by uuid or slug."
+                    "Free: one published article in full (body markdown, sources, "
+                    "translations) by uuid or slug."
                 ),
-                price_setting="x402_news_article_price",
-                resource="x402-news-article",
                 input_example={"article_id": "tinyman-v2-crosses-1b-cumulative-volume"},
             ),
         ),

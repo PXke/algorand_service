@@ -53,13 +53,14 @@ Add this line to the bottom of the **Business Intelligence** subsection in
 the `---` that follows it:
 
 ```markdown
-- [PXke x402 Marketplace](https://algorand-api.pxke.me/api/v1/x402/list) — Composite x402 marketplace on Algorand mainnet, settled through the GoPlausible facilitator in USDC, EURQ or USDQ under one payTo: pay-per-call search/read from the PXke Algorand newspaper ($0.01-$0.02), an endpoint directory to list or search other x402 services ($0.10/30 days), a visibility board ($0.05/14 days), a feature-request board with paid demand ranking ($0.02-$0.05), and endpoint grading ($0.02-$0.03); free catalog with every route and live price at `GET /api/v1/x402`. Example: `POST /api/v1/x402/list {"url":"https://api.example.com/v1/quote","price":"$0.01","description":"Live FX quote, one currency pair per call.","assets":["USDC"],"tags":["fx","market-data"],"category":"finance"}`. ([Docs](https://algorand.pxke.me/x402))
+- [PXke x402 Marketplace](https://algorand-api.pxke.me/api/v1/x402/list) — Composite x402 marketplace on Algorand mainnet, settled through the GoPlausible facilitator in USDC, EURQ or USDQ under one payTo: pay-per-call search from the PXke Algorand newspaper ($0.001, article reads are free), an endpoint directory to list or search other x402 services ($0.10/30 days), a visibility board ($0.05/14 days), a feature-request board with paid demand ranking ($0.02-$0.05), and endpoint grading ($0.02-$0.03); free catalog with every route and live price at `GET /api/v1/x402`. Example: `POST /api/v1/x402/list {"url":"https://api.example.com/v1/quote","price":"$0.01","description":"Live FX quote, one currency pair per call.","assets":["USDC"],"tags":["fx","market-data"],"category":"finance"}`. ([Docs](https://algorand.pxke.me/x402))
 ```
 
 Notes on the content itself:
 - Prices are pulled straight from the live catalog (`GET
-  https://algorand-api.pxke.me/api/v1/x402`, fetched 2026-08-31), not
-  memorized — re-check before merging if time has passed.
+  https://algorand-api.pxke.me/api/v1/x402`, updated 2026-08-31 after the
+  News Engine's article route was made free and search dropped to $0.001),
+  not memorized — re-check before merging if time has passed.
 - The `Example:` body is copy-pasted from the marketplace's own
   `input_example` for `POST /list`, and is the exact body used to confirm
   the live `402` above.
@@ -84,7 +85,7 @@ git checkout -b add-pxke-x402-marketplace
 #    Intelligence" section, insert the line above right after the
 #    "PayAPI Market" entry. (Or use the sed one-liner below if the
 #    PayAPI Market line text hasn't changed upstream.)
-sed -i '/\[PayAPI Market\]/a - [PXke x402 Marketplace](https://algorand-api.pxke.me/api/v1/x402/list) — Composite x402 marketplace on Algorand mainnet, settled through the GoPlausible facilitator in USDC, EURQ or USDQ under one payTo: pay-per-call search/read from the PXke Algorand newspaper ($0.01-$0.02), an endpoint directory to list or search other x402 services ($0.10/30 days), a visibility board ($0.05/14 days), a feature-request board with paid demand ranking ($0.02-$0.05), and endpoint grading ($0.02-$0.03); free catalog with every route and live price at `GET /api/v1/x402`. Example: `POST /api/v1/x402/list {"url":"https://api.example.com/v1/quote","price":"$0.01","description":"Live FX quote, one currency pair per call.","assets":["USDC"],"tags":["fx","market-data"],"category":"finance"}`. ([Docs](https://algorand.pxke.me/x402))' directory/apis.md
+sed -i '/\[PayAPI Market\]/a - [PXke x402 Marketplace](https://algorand-api.pxke.me/api/v1/x402/list) — Composite x402 marketplace on Algorand mainnet, settled through the GoPlausible facilitator in USDC, EURQ or USDQ under one payTo: pay-per-call search from the PXke Algorand newspaper ($0.001, article reads are free), an endpoint directory to list or search other x402 services ($0.10/30 days), a visibility board ($0.05/14 days), a feature-request board with paid demand ranking ($0.02-$0.05), and endpoint grading ($0.02-$0.03); free catalog with every route and live price at `GET /api/v1/x402`. Example: `POST /api/v1/x402/list {"url":"https://api.example.com/v1/quote","price":"$0.01","description":"Live FX quote, one currency pair per call.","assets":["USDC"],"tags":["fx","market-data"],"category":"finance"}`. ([Docs](https://algorand.pxke.me/x402))' directory/apis.md
 
 # 4. Verify the diff looks right (should be exactly one added line)
 git diff directory/apis.md

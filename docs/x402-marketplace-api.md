@@ -140,7 +140,7 @@ are not counted. Defaults:
 
 | Budget | Routes |
 |---|---|
-| 120/h | catalog; directory search + listing detail + probe (shared); board feed; board click-through; features browse; grades index; grades summary; grades top (counted even when paid, see below); news headlines; KYA consent-message |
+| 120/h | catalog; directory search + listing detail + probe (shared); board feed; board click-through; features browse; grades index; grades summary; grades top (counted even when paid, see below); news headlines; news article read (own counter, same budget); KYA consent-message |
 | 20/h | features filing; KYA enrol (plus **5/day per wallet**) |
 
 ## Products and routes
@@ -288,22 +288,25 @@ reads count against that budget too.
 | | Route | Price |
 |---|---|---|
 | free | `GET /api/v1/x402/news` | |
-| paid | `GET /api/v1/x402/news/search` | $0.02 |
-| paid | `GET /api/v1/x402/news/articles/:article_id` | $0.01 |
+| free | `GET /api/v1/x402/news/articles/:article_id` | |
+| paid | `GET /api/v1/x402/news/search` | $0.001 |
+
+The article content is already free on the public website, so the article
+route carries no payment gate — only the paid search over the archive does.
 
 **`GET /news?tag=&limit=`** — `{"items": [{article_id, slug, title, summary,
 tags, published_at_epoch, url}]}`, newest first (max 50).
+
+**`GET /news/articles/:article_id`** — free; `article_id` is the uuid or the
+slug. `{article_id, slug, title, summary, body_markdown, tags, service_id,
+trigger_kind, sources, image_url, published_at_epoch, updated_at_epoch, url,
+translations_available}`. 404 for anything not published. Rate-limited per
+IP (own counter, same budget as the headline list).
 
 **`GET /news/search?q=&limit=`** — paid; `q` is 1-200 characters. `{query,
 engine, items: [{article_id, slug, title, summary, snippet, score,
 published_at_epoch, url}], settlement_tx_id}`. `503 search_unavailable` if
 the engine failed (the payment is recorded as unfulfilled for reconciliation).
-
-**`GET /news/articles/:article_id`** — paid; `article_id` is the uuid or the
-slug. `{article_id, slug, title, summary, body_markdown, tags, service_id,
-trigger_kind, sources, image_url, published_at_epoch, updated_at_epoch, url,
-translations_available, settlement_tx_id}`. 404 (free) for anything not
-published.
 
 ### Know Your Agent (KYA) — not currently enabled
 

@@ -1,4 +1,4 @@
-"""HTTP routes for the x402 News Engine: free headlines, paid article, paid search.
+"""HTTP routes for the x402 News Engine: free headlines, free article, paid search.
 
 Route paths are /api/v1/x402/news/*: nginx only proxies `location ^~ /api/`
 to this backend on the API host (deploy/nginx/algorand-platform.conf).
@@ -27,7 +27,6 @@ logger = logging.getLogger(__name__)
 # use, so this is safe as a module-level singleton shared by all routes.
 news_engine = NewsEngineService()
 
-_ARTICLE_RESOURCE = "x402-news-article"
 _SEARCH_RESOURCE = "x402-news-search"
 
 _MIN_QUERY_LENGTH = 1
@@ -36,24 +35,6 @@ _MAX_QUERY_LENGTH = 200
 _EXAMPLE_ID = "6f1c2a4e-3b5d-4c7e-9a1b-2d3e4f5a6b7c"
 _EXAMPLE_SLUG = "tinyman-v2-crosses-1b-cumulative-volume"
 _EXAMPLE_URL = f"https://algorand.pxke.me/news/articles/{_EXAMPLE_SLUG}"
-
-_ARTICLE_OUTPUT_EXAMPLE = {
-    "article_id": _EXAMPLE_ID,
-    "slug": _EXAMPLE_SLUG,
-    "title": "Tinyman v2 crosses $1B cumulative volume",
-    "summary": "The Algorand DEX passed the milestone on 2026-08-28, driven by ALGO/USDC.",
-    "body_markdown": "## What happened\n\nTinyman v2 ...\n\n## Sources\n\n- https://...",
-    "tags": ["defi", "tinyman"],
-    "service_id": "tinyman",
-    "trigger_kind": "editorial",
-    "sources": ["https://tinyman.org/blog/1b"],
-    "image_url": "https://algorand.pxke.me/og/article/example.png",
-    "published_at_epoch": 1756377600,
-    "updated_at_epoch": None,
-    "url": _EXAMPLE_URL,
-    "translations_available": ["de", "es", "fr", "ja", "ko", "ru", "zh"],
-    "settlement_tx_id": "...",
-}
 
 _SEARCH_OUTPUT_EXAMPLE = {
     "query": "tinyman volume",
@@ -88,7 +69,7 @@ def x402_news_list(request: Request) -> Response | dict:
     """Free: the latest published headlines, newest first, rate-limited per IP.
 
     Optional `tag` narrows to one topic, optional `limit` is clamped to
-    x402_news_max_results. Each item carries the id and slug the paid article
+    x402_news_max_results. Each item carries the id and slug the free article
     route accepts, plus the public site URL.
     """
     if news_list_rate_limited(request):
@@ -105,16 +86,15 @@ def x402_news_list(request: Request) -> Response | dict:
 
 
 def x402_news_article(request: Request) -> Response:
-    """Paid: one published article in full -- body markdown, sources, translations.
+    """Free: one published article in full -- body markdown, sources, translations.
 
-    The id (or slug) is resolved BEFORE the payment gate: an unknown, deleted
-    or unpublished article is a 404 and nobody is charged for it. The article
-    read itself happens once, pre-gate, and is what the settled payment buys.
-    Because that read is free and unpaid, it sits behind a per-IP hourly
-    rate limit (its own counter, same budget as the headline list).
+    Rate-limited per IP (its own counter, same budget as the headline list):
+    the article content is already free on the public website, so charging
+    agents again for the same read would be redundant -- the paid search
+    route is the marketplace's actual differentiated capability here.
 
-    The translations list is a nice-to-have: if its lookup fails after
-    payment the article is still served, with an empty list, and fulfilled.
+    The translations list is a nice-to-have: if its lookup fails the article
+    is still served, with an empty list.
     """
     raw = request.path_params.get("article_id", "")
     if not raw:
@@ -134,41 +114,11 @@ def x402_news_article(request: Request) -> Response:
             "the latest headlines, free of charge.",
         )
 
-    result = require_paid_request(
-        request,
-        price=settings.x402_news_article_price,
-        resource=_ARTICLE_RESOURCE,
-        description=(
-            "Read one published PXke Algorand newspaper article in full: title, "
-            "summary, the complete body as markdown, tags, source URLs, publication "
-            "and last-update timestamps, the public site URL, and the list of "
-            "languages a translation exists for. The free headline list at "
-            "GET /api/v1/x402/news gives the ids and slugs this route accepts."
-        ),
-        extensions=describe_json_endpoint(
-            input={"article_id": _EXAMPLE_SLUG},
-            input_schema={
-                "type": "object",
-                "properties": {
-                    "article_id": {
-                        "type": "string",
-                        "description": "Article uuid or permanent slug (path segment).",
-                    }
-                },
-                "required": ["article_id"],
-            },
-            output_example=_ARTICLE_OUTPUT_EXAMPLE,
-        ),
-    )
-    if result.error:
-        return result.error
-
     payload = news_engine.article_json(detail)
-    mark_fulfilled(result.payment_txid, resource=_ARTICLE_RESOURCE)
     return Response(
         status_code=200,
-        headers={"Content-Type": "application/json", **result.settlement_headers},
-        description=serialization.dumps({**payload, "settlement_tx_id": result.payment_txid or ""}),
+        headers={"Content-Type": "application/json"},
+        description=serialization.dumps(payload),
     )
 
 
@@ -203,7 +153,7 @@ def x402_news_search(request: Request) -> Response:
             "(Typesense-ranked, typo-tolerant, synonym-aware). Returns up to "
             f"{settings.x402_news_max_results} ranked hits with title, summary, a "
             "highlighted snippet, the public site URL, and the id/slug to pass to "
-            "the paid article route for the full body."
+            "the free article route for the full body."
         ),
         extensions=describe_json_endpoint(
             input={"q": "tinyman volume", "limit": 10},
@@ -248,7 +198,7 @@ def x402_news_search(request: Request) -> Response:
 
 
 def register_x402_news_routes(app: Router) -> None:
-    """Register the free headline list and the two paid News Engine routes."""
+    """Register the two free News Engine routes and the one paid search route."""
     app.get("/api/v1/x402/news")(x402_news_list)
     app.get("/api/v1/x402/news/search")(x402_news_search)
     app.get("/api/v1/x402/news/articles/:article_id")(x402_news_article)

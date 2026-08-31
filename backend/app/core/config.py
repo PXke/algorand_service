@@ -378,20 +378,18 @@ class Settings(msgspec.Struct, kw_only=True):
     # raising this.
     x402_grading_spend_scan_limit: int = 500
 
-    # ── x402 News Engine pay-per-call (GET /x402/news free, GET
-    # /x402/news/articles/:id paid, GET /x402/news/search paid). See
+    # ── x402 News Engine pay-per-call (GET /x402/news and GET
+    # /x402/news/articles/:id both free, GET /x402/news/search paid). See
     # app/modules/x402_news/. Roadmap item 1: the newspaper's own live
     # articles resold per call. No store setting of its own -- the module
     # reads through the news module's store, so route registration is gated
     # on news_store != "memory" instead.
-    # Fee to read one article in full. Money strings, parsed by the tagged
-    # money parser in modules/x402/client.py (which is also what attaches the
-    # challenge tag). The cheapest paid read in the marketplace: one article
-    # is one datum, and the article already exists (no per-call cost to us).
-    x402_news_article_price: str = "$0.01"
-    # Fee for one ranked search. Priced above a single article read because a
-    # search runs a Typesense query per call and returns many hits' metadata.
-    x402_news_search_price: str = "$0.02"
+    # Fee for one ranked search. Money strings, parsed by the tagged money
+    # parser in modules/x402/client.py (which is also what attaches the
+    # challenge tag). Kept deliberately near-zero: the article content is
+    # already free on the public site, so search is the only thing here an
+    # agent can't already get for nothing, and it should stay a trivial call.
+    x402_news_search_price: str = "$0.001"
     # Free-endpoint abuse gate (CLAUDE.md section 9: rate limit every free
     # endpoint per IP), counted under its own key prefix, separate from the
     # other x402 products' budgets. Only the free headline list is counted.

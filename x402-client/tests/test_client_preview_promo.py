@@ -99,16 +99,6 @@ def test_search_news_merges_bypass_params_with_q_and_limit() -> None:
     }
 
 
-def test_read_article_sends_bypass_params_on_a_path_only_route() -> None:
-    session = FakeSession([FakeResponse(200, {"article_id": "a"})])
-    client = PxkeClient(session=session, http_client=FakePaymentHTTPClient())
-
-    client.read_article("a", preview=True)
-
-    assert session.calls[0].url == f"{BASE_URL}/api/v1/x402/news/articles/a"
-    assert session.calls[0].params == {"preview": True}
-
-
 def test_post_methods_send_bypass_params_as_query_params_not_in_the_body() -> None:
     """list_endpoint / place_on_board / submit_grade are POSTs with a JSON body;
     preview/promo must land in the query string, not get mixed into the body."""

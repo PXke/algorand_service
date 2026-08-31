@@ -274,6 +274,14 @@ class PxkeClient:
             "GET", "/api/v1/x402/news", params=_params(tag=tag, limit=limit)
         )
 
+    def read_article(self, article_id: str) -> dict[str, Any]:
+        """`GET /api/v1/x402/news/articles/:article_id` -- one full article, by uuid or slug.
+
+        Free: the content is already free on the public website. No wallet
+        needed, no preview/promo bypass to pass -- there is no gate here.
+        """
+        return self._free_request("GET", f"/api/v1/x402/news/articles/{quote(article_id, safe='')}")
+
     def settlements_recent(self, limit: int | None = None) -> dict[str, Any]:
         """`GET /api/v1/x402/settlements/recent` -- proof-of-volume feed, real payments only."""
         return self._free_request(
@@ -401,26 +409,6 @@ class PxkeClient:
                 "url": url,
                 **_bypass_params(preview=preview, promo_code=promo_code, promo_wallet=promo_wallet),
             },
-        )
-
-    def read_article(
-        self,
-        article_id: str,
-        *,
-        preview: bool = False,
-        promo_code: str | None = None,
-        promo_wallet: str | None = None,
-    ) -> dict[str, Any]:
-        """`GET /api/v1/x402/news/articles/:article_id` -- one full article, by uuid or slug.
-
-        `preview`/`promo_code`/`promo_wallet` are the shared payment-gate
-        bypasses (see `PxkeClient.ping`'s docstring) -- as of this writing the
-        server only honors them on `ping()`, not here.
-        """
-        return self._paid_request(
-            "GET",
-            f"/api/v1/x402/news/articles/{quote(article_id, safe='')}",
-            params=_bypass_params(preview=preview, promo_code=promo_code, promo_wallet=promo_wallet),
         )
 
     def search_news(

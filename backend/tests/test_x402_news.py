@@ -1,4 +1,4 @@
-"""x402 News Engine tests: free headline list, paid article read, paid search.
+"""x402 News Engine tests: free headline list, free article read, paid search.
 
 Fully offline. The facilitator is a stub that never touches the network (same
 shape as test_x402_board.py's), Redis is a fake at the get_redis seam, the
@@ -10,9 +10,9 @@ Replay protection and the settlement ledger are shared infrastructure
 (modules/x402/) already covered by test_x402_directory.py -- they are not
 re-tested here. What IS News-Engine-specific and tested here: the pre-gate
 404 for unknown/draft articles, the pre-gate query validation for search, the
-paid payloads, the free list's bounds and rate limit, the article route's
-own pre-gate rate limit, and the two paid-but-degraded paths (translations
-lookup failing, search engine failing).
+paid search payload, the free list's and free article's bounds and rate
+limits, and the two paid-but-degraded search paths (translations lookup
+failing after a free article read, search engine failing after payment).
 """
 
 from __future__ import annotations
@@ -310,75 +310,41 @@ def test_headline_list_is_rate_limited_per_ip(monkeypatch: pytest.MonkeyPatch) -
 
 
 # --------------------------------------------------------------------------- #
-# The paid article read
+# The free article read
 # --------------------------------------------------------------------------- #
 @pytest.mark.usefixtures("engine", "fake_redis")
 @pytest.mark.parametrize("raw_id", [_UNKNOWN_ID, "no-such-slug", _DRAFT_ID, "unpublished-scoop"])
-def test_an_unknown_or_unpublished_article_is_a_404_before_the_gate(
-    raw_id: str, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """An unknown id/slug, or a draft's, is a 404 taken BEFORE the gate -- nobody is charged for an article that cannot be served."""
-    monkeypatch.setattr(news_routes, "require_paid_request", _must_not_charge)
-
+def test_an_unknown_or_unpublished_article_is_a_404(raw_id: str) -> None:
+    """An unknown id/slug, or a draft's, is a 404 -- nothing to serve."""
     response = news_routes.x402_news_article(_request(path_params={"article_id": raw_id}))
 
     assert response.status_code == 404
     assert "not_found" in response.description
 
 
-@pytest.mark.usefixtures("engine", "testnet_settings", "fake_redis")
-def test_article_without_payment_returns_402_with_the_article_price_and_discovery() -> None:
-    """A published article without a payment header yields a 402 carrying the configured payTo, the article price, the challenge tag, and a Bazaar discovery extension whose example output shows the body field."""
-    from x402.http.utils import decode_payment_required_header
-
-    response = news_routes.x402_news_article(_request(path_params={"article_id": _LIVE_ID}))
-
-    assert response.status_code == 402
-    payment_required = decode_payment_required_header(response.headers["PAYMENT-REQUIRED"])
-    offer = payment_required.accepts[0]
-    assert offer.pay_to == _PAY_TO
-    assert offer.network == ALGORAND_TESTNET_CAIP2
-    # $0.01 USDC in atomic units at 6 decimals.
-    assert offer.amount == "10000"
-    assert offer.extra["tag"] == x402_client.CHALLENGE_TAG
-    assert "body" in (payment_required.resource.description or "")
-    bazaar = (payment_required.extensions or {}).get("bazaar")
-    assert bazaar is not None
-    assert "body_markdown" in json.dumps(bazaar)
-
-
 @pytest.mark.usefixtures("engine", "fake_redis")
-def test_a_settled_payment_returns_the_full_article_and_marks_it_fulfilled(
-    monkeypatch: pytest.MonkeyPatch, fulfilled: list[tuple[str | None, str]]
-) -> None:
-    """Once payment settles the full body, sources, translations and public URL come back, and the settlement is marked fulfilled."""
-    monkeypatch.setattr(news_routes, "require_paid_request", lambda *_a, **_kw: _settled_result())
-
+def test_a_published_article_is_served_free_with_no_payment_required() -> None:
+    """A published article comes back as a plain 200, full body, sources, translations and public URL, no payment gate involved."""
     response = news_routes.x402_news_article(
         _request(path_params={"article_id": "tinyman-v2-crosses-one-billion"})
     )
 
     assert response.status_code == 200
-    assert response.headers["PAYMENT-RESPONSE"] == "ok"
     body = json.loads(response.description)
     assert body["article_id"] == _LIVE_ID
     assert body["body_markdown"].startswith("## Body")
     assert body["sources"] == ["https://source.example/post"]
     assert body["translations_available"] == ["de", "fr"]
     assert body["url"].endswith("/news/articles/tinyman-v2-crosses-one-billion")
-    assert body["settlement_tx_id"] == "TX123"
-    assert fulfilled == [("TX123", "x402-news-article")]
 
 
 @pytest.mark.usefixtures("fake_redis")
-def test_a_failed_translations_lookup_still_serves_the_paid_article_and_fulfils_it(
+def test_a_failed_translations_lookup_still_serves_the_free_article(
     engine: NewsEngineService,
     monkeypatch: pytest.MonkeyPatch,
-    fulfilled: list[tuple[str | None, str]],
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """The translations list is a nice-to-have read made after payment: when it raises the article body is still served (with an empty list), the settlement is marked fulfilled, and the failure is logged."""
-    monkeypatch.setattr(news_routes, "require_paid_request", lambda *_a, **_kw: _settled_result())
+    """The translations list is a nice-to-have read: when it raises the article body is still served, with an empty list, and the failure is logged."""
 
     def _boom(_article_id: str) -> Never:
         raise RuntimeError("cassandra read timed out")
@@ -389,23 +355,16 @@ def test_a_failed_translations_lookup_still_serves_the_paid_article_and_fulfils_
         response = news_routes.x402_news_article(_request(path_params={"article_id": _LIVE_ID}))
 
     assert response.status_code == 200
-    assert response.headers["PAYMENT-RESPONSE"] == "ok"
     body = json.loads(response.description)
     assert body["body_markdown"].startswith("## Body")
     assert body["translations_available"] == []
-    assert body["settlement_tx_id"] == "TX123"
-    assert fulfilled == [("TX123", "x402-news-article")]
     assert any("translation lookup failed" in rec.message for rec in caplog.records)
 
 
 @pytest.mark.usefixtures("engine", "fake_redis")
-def test_the_article_route_is_rate_limited_per_ip_before_the_pre_gate_read(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The unpaid pre-gate article read is capped per IP on its own counter: over budget is a 429 before the store is read or the gate runs; the headline list's counter is separate."""
+def test_the_article_route_is_rate_limited_per_ip(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The free article read is capped per IP on its own counter: over budget is a 429 before the store is read; the headline list's counter is separate."""
     monkeypatch.setattr(settings, "x402_news_rate_limit_per_hour", 2)
-    monkeypatch.setattr(news_routes, "require_paid_request", lambda *_a, **_kw: _settled_result())
-    monkeypatch.setattr(news_routes, "mark_fulfilled", lambda *_a, **_kw: True)
 
     def _read(ip: str) -> Response:
         return news_routes.x402_news_article(
@@ -419,7 +378,6 @@ def test_the_article_route_is_rate_limited_per_ip_before_the_pre_gate_read(
     assert _read("203.0.113.9").status_code == 200
     assert "items" in news_routes.x402_news_list(_request(headers={"X-Real-IP": "203.0.113.7"}))
 
-    monkeypatch.setattr(news_routes, "require_paid_request", _must_not_charge)
     monkeypatch.setattr(news_routes.news_engine, "resolve_article", _must_not_charge)
     limited = _read("203.0.113.7")
     assert limited.status_code == 429
@@ -452,8 +410,8 @@ def test_search_without_payment_returns_402_with_the_search_price() -> None:
 
     assert response.status_code == 402
     payment_required = decode_payment_required_header(response.headers["PAYMENT-REQUIRED"])
-    # $0.02 USDC in atomic units at 6 decimals.
-    assert payment_required.accepts[0].amount == "20000"
+    # $0.001 USDC in atomic units at 6 decimals.
+    assert payment_required.accepts[0].amount == "1000"
     bazaar = (payment_required.extensions or {}).get("bazaar")
     assert bazaar is not None
     assert "search" in (payment_required.resource.description or "").lower()

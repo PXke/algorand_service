@@ -79,6 +79,7 @@ board = client.board(limit=20)            # GET /api/v1/x402/board
 requests_ = client.features()             # GET /api/v1/x402/features
 graded = client.grades()                  # GET /api/v1/x402/grades
 headlines = client.news(tag="algorand")   # GET /api/v1/x402/news
+article = client.read_article("tinyman-v2-crosses-1b-cumulative-volume")  # GET /api/v1/x402/news/articles/:id
 recent = client.settlements_recent()      # GET /api/v1/x402/settlements/recent
 reach = client.probe("https://example.com/paid")  # GET /api/v1/x402/directory/probe
 
@@ -117,8 +118,7 @@ client.submit_grade("https://api.example.com/v1/quote", score=4, comment="Fast, 
 # Read a paid aggregate.
 score = client.read_score("https://api.example.com/v1/quote")
 
-# Buy a full news article or a search over the archive.
-article = client.read_article("tinyman-v2-crosses-1b-cumulative-volume")
+# Search over the archive (the article read itself is free -- see above).
 results = client.search_news("tinyman volume")
 
 # Place a tile on the visibility board.

@@ -91,3 +91,15 @@ def test_all_read_only_free_methods_hit_their_documented_routes() -> None:
 
         assert session.calls[0].method == method
         assert session.calls[0].url == f"{BASE_URL}{path}"
+
+
+def test_read_article_is_free_and_url_encodes_the_article_id() -> None:
+    """The article route carries no payment gate: a plain 200, no 402/pay round trip."""
+    session = FakeSession([FakeResponse(200, {"article_id": "a/b"})])
+    client = PxkeClient(session=session)
+
+    result = client.read_article("a/b slug")
+
+    assert result == {"article_id": "a/b"}
+    assert len(session.calls) == 1
+    assert session.calls[0].url == f"{BASE_URL}/api/v1/x402/news/articles/a%2Fb%20slug"

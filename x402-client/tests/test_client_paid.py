@@ -91,17 +91,6 @@ def test_list_endpoint_includes_optional_fields_when_given() -> None:
     }
 
 
-def test_read_article_url_encodes_the_article_id() -> None:
-    session = FakeSession(
-        [FakeResponse(402, headers=_offer_headers()), FakeResponse(200, {"article_id": "a/b"})]
-    )
-    client = PxkeClient(session=session, http_client=FakePaymentHTTPClient())
-
-    client.read_article("a/b slug")
-
-    assert session.calls[0].url == f"{BASE_URL}/api/v1/x402/news/articles/a%2Fb%20slug"
-
-
 def test_a_validation_error_before_the_gate_raises_http_error_and_never_pays() -> None:
     """A malformed body is a plain 4xx, not a 402 -- nothing charged, no payment built."""
     session = FakeSession([FakeResponse(400, {"error": {"code": "bad_request", "message": "score must be 1-5"}})])

@@ -17,7 +17,6 @@ _PAID_CALLS = [
     lambda c: c.place_on_board("https://example.com", "Agent", "pitch"),
     lambda c: c.submit_grade("https://example.com", 5),
     lambda c: c.read_score("https://example.com"),
-    lambda c: c.read_article("some-slug"),
     lambda c: c.search_news("tinyman"),
 ]
 
@@ -54,3 +53,11 @@ def test_free_methods_still_work_on_a_client_with_no_mnemonic() -> None:
     client = PxkeClient(session=session)
 
     assert client.catalog() == {"name": "PXke x402 marketplace"}
+
+
+def test_read_article_needs_no_mnemonic() -> None:
+    """The article read is free -- no payment gate, so no wallet is required."""
+    session = FakeSession([FakeResponse(200, {"article_id": "a", "title": "t"})])
+    client = PxkeClient(session=session)
+
+    assert client.read_article("a") == {"article_id": "a", "title": "t"}

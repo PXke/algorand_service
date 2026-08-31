@@ -214,10 +214,12 @@ def test_prices_come_from_settings(monkeypatch: pytest.MonkeyPatch) -> None:
     """Prices are read from settings at build time, never copied into the roster."""
     _configure(monkeypatch, **dict.fromkeys(_STORE_GATES.values(), "cassandra"))
     monkeypatch.setattr(settings, "x402_listing_price", "$1.23")
-    monkeypatch.setattr(settings, "x402_news_article_price", "$0.07")
+    monkeypatch.setattr(settings, "x402_news_search_price", "$0.07")
     by_key = {(r["method"], r["path"]): r for r in _catalog_routes(monkeypatch)}
     assert by_key[("POST", "/api/v1/x402/list")]["price_usd"] == "$1.23"
-    assert by_key[("GET", "/api/v1/x402/news/articles/:article_id")]["price_usd"] == "$0.07"
+    assert by_key[("GET", "/api/v1/x402/news/search")]["price_usd"] == "$0.07"
+    assert by_key[("GET", "/api/v1/x402/news/articles/:article_id")]["price_usd"] is None
+    assert by_key[("GET", "/api/v1/x402/news/articles/:article_id")]["paid"] is False
     assert by_key[("GET", "/api/v1/x402/search")]["price_usd"] is None
     assert by_key[("GET", "/api/v1/x402/search")]["paid"] is False
     assert by_key[("POST", "/api/v1/x402/list")]["paid"] is True
