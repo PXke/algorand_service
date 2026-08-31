@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+from app.core.config import settings
 from app.core.http import QueryParams, Request
 from app.modules.news.models.schemas import ArticleDetail, ArticleFeedItem
 from app.modules.seo import feeds, render, shell, sitemap, topics
@@ -1215,3 +1216,20 @@ def test_beacon_accepts_slug_article_paths() -> None:
     assert not _is_known_app_path("/news/articles/x/y")
     assert not _is_known_app_path("/news/articles/")
     assert not _is_known_app_path("/news/articles/" + "a" * 100)
+
+
+def test_x402_ssr_news_pricing_matches_the_live_search_price() -> None:
+    """Pins the SSR news pricing dl to the live search-price setting.
+
+    The dl is a static mirror (render.py's own comment says so, not a live
+    settings read) -- it drifted from the real price once already (article
+    $0.01/search $0.02 shipped stale after the route went free at $0.001,
+    caught by a marketing agent re-verifying the live page before this test
+    existed). This pins the news rows so a future price change can't
+    silently re-drift.
+    """
+    rows = dict(render._X402_PRICING_ROWS)
+    assert rows["Read one news article"] == "free"
+    assert rows["Search news articles"] == settings.x402_news_search_price
+    assert "$0.001" in render._X402_TAB_DESCRIPTIONS["news"]
+    assert "free" in render._X402_TAB_DESCRIPTIONS["news"]

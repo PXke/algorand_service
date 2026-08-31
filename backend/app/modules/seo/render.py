@@ -1307,7 +1307,7 @@ _X402_TAB_DESCRIPTIONS: dict[str, str] = {
     ),
     "news": (
         "The x402 News Engine: pay-per-call access to the PXke Algorand newspaper. "
-        "Headlines are free; a full article costs $0.01 and full-text search $0.02, "
+        "Headlines and full articles are free; full-text search costs $0.001, "
         "settled in USDC on Algorand mainnet."
     ),
 }
@@ -1323,8 +1323,8 @@ _X402_PRICING_ROWS: tuple[tuple[str, str], ...] = (
     ("Read ranked demand", "$0.05"),
     ("Grade an endpoint", "$0.02"),
     ("Read a score", "$0.03"),
-    ("Read one news article", "$0.01"),
-    ("Search news articles", "$0.02"),
+    ("Read one news article", "free"),
+    ("Search news articles", "$0.001"),
 )
 
 # (label, free GET path) -- mirrors X402.svelte's `endpoints` derived list.
