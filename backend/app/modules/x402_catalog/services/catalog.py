@@ -103,6 +103,18 @@ PRODUCTS: tuple[Product, ...] = (
                     "probe payments are excluded, never counted here as customer volume."
                 ),
             ),
+            CatalogRoute(
+                method="GET",
+                path="/api/v1/x402/ping",
+                description=(
+                    "The marketplace's lowest price, for testing that your x402 client can "
+                    "build, sign and settle a real payment here before risking money on a "
+                    "real product. No product data in the response, just a receipt."
+                ),
+                price_setting="x402_ping_price",
+                resource="x402-ping",
+                input_example=None,
+            ),
         ),
     ),
     Product(

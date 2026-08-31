@@ -411,6 +411,11 @@ class Settings(msgspec.Struct, kw_only=True):
     # non-operator settlements across every product. Own key prefix and own
     # budget, separate from the catalog and every product's own limits.
     x402_settlements_rate_limit_per_hour: int = 120
+    # A deliberately trivial paid route (GET /api/v1/x402/ping): proves a
+    # client's signing pipeline actually works, and tests the facilitator's
+    # tolerance for a sub-cent price, before risking money on a real product.
+    # $0.001 == 1000 atomic USDC units at 6 decimals, no rounding loss.
+    x402_ping_price: str = "$0.001"
 
     # Replay window for an already-spent payment header. Must be >= 2x the
     # facilitator's own HTTP timeout (FacilitatorConfig.timeout defaults to
