@@ -111,16 +111,29 @@ def _merge_decayed(
     the full set (finding 7, 2026-security-audit: see `_BUCKET_TOP_N`'s own
     docstring for why that bound is still exact for the top-N result this
     function ultimately returns).
+
+    All `_MERGE_HOURS` bucket reads are queued on one `client.pipeline()`
+    and sent in a single round trip (optimization pass, 2026-09-02) --
+    previously each of the 24 `zrevrange` calls was its own blocking
+    request, on every free trending read, despite the write side two
+    functions above already using a pipeline for the identical reason.
     """
     moment = now or datetime.now(tz=UTC)
     try:
         client = get_redis()
-        totals: dict[str, float] = {}
+        pipe = client.pipeline()
+        keys: list[str] = []
+        decays: list[float] = []
         for age in range(_MERGE_HOURS):
             bucket_time = moment.timestamp() - age * 3600
             key = f"{prefix}{datetime.fromtimestamp(bucket_time, tz=UTC).strftime('%Y%m%d%H')}"
-            decay = (_MERGE_HOURS - age) / _MERGE_HOURS
-            for member, score in client.zrevrange(key, 0, _BUCKET_TOP_N - 1, withscores=True):
+            keys.append(key)
+            decays.append((_MERGE_HOURS - age) / _MERGE_HOURS)
+            pipe.zrevrange(key, 0, _BUCKET_TOP_N - 1, withscores=True)
+        bucket_results = pipe.execute()
+        totals: dict[str, float] = {}
+        for decay, members in zip(decays, bucket_results, strict=True):
+            for member, score in members:
                 totals[member] = totals.get(member, 0.0) + float(score) * decay
     except Exception:
         logger.warning("x402 social trending: read failed, serving an empty result", exc_info=True)

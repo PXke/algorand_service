@@ -39,6 +39,7 @@ from types import SimpleNamespace
 from typing import Any, Never
 
 import pytest
+from conftest import patch_cassandra
 
 pytest.importorskip("x402")
 
@@ -49,6 +50,7 @@ from x402.mechanisms.avm.constants import ALGORAND_TESTNET_CAIP2
 from app.core import rate_limit as rate_limit_core
 from app.core.config import settings
 from app.core.http import QueryParams, Request
+from app.core.statements import X402SocialStmts
 from app.modules.x402 import circuit_breaker as circuit_breaker_module
 from app.modules.x402 import guard as x402_guard
 from app.modules.x402 import paid_request as payment_service
@@ -153,6 +155,11 @@ class _FakePipeline:
         self._ops.append(("expire", key, seconds))
         return self
 
+    def zrevrange(self, key: str, start: int, end: int, withscores: bool = False) -> _FakePipeline:
+        """Queued for trending_service._merge_decayed's now-pipelined bucket reads (optimization pass, 2026-09-02)."""
+        self._ops.append(("zrevrange", key, start, end, withscores))
+        return self
+
     def execute(self) -> list[object]:
         results: list[object] = []
         for op in self._ops:
@@ -160,6 +167,8 @@ class _FakePipeline:
                 results.append(self._client.zincrby(op[1], op[2], op[3]))
             elif op[0] == "expire":
                 results.append(self._client.expire(op[1], op[2]))
+            elif op[0] == "zrevrange":
+                results.append(self._client.zrevrange(op[1], op[2], op[3], withscores=op[4]))
         self._ops = []
         return results
 
@@ -1805,3 +1814,130 @@ def test_group_create_rejects_embedded_html_in_name_and_description(
             settlement_tx_id="TX-HTML2",
         )
     assert exc_info.value.code == "embedded_html_rejected"
+
+
+# --------------------------------------------------------------------------- #
+# Optimization pass (2026-09-02): home feed fan-out is batched per backend,
+# not one round-trip per followee/group; comment_count reads a narrow
+# projection, not full comment rows; trending's bucket reads are pipelined.
+# --------------------------------------------------------------------------- #
+def test_cassandra_home_feed_fanout_is_one_batched_call_per_half_not_a_loop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """list_posts_by_authors/list_group_feeds must fan out via execute_parallel_with_args (one concurrent batch), not session.execute called once per author/group -- the N+1 shape the optimization pass replaced.
+
+    Accessing a _Stmt attribute (X402SocialStmts.LIST_POSTS_BY_AUTHOR etc.)
+    always triggers prepare_cached, including as an argument expression
+    before the (faked) call it's passed into ever runs -- patch_cassandra
+    makes that resolve without a real connection, same as every other
+    store-level Cassandra unit test in this suite.
+    """
+    parallel_calls: list[tuple[object, list[tuple]]] = []
+
+    def _fake_parallel(statement: object, args_seq: list[tuple], **_kw: object) -> list[tuple]:
+        parallel_calls.append((statement, list(args_seq)))
+        return [(True, []) for _ in args_seq]
+
+    def _must_not_call_execute(*_a: object, **_kw: object) -> Never:
+        raise AssertionError(
+            "must not call session.execute directly for a per-author/per-group fan-out -- "
+            "that is exactly the N+1 shape this optimization removed"
+        )
+
+    patch_cassandra(monkeypatch)  # identity prepare_cached -- no real connection
+    monkeypatch.setattr(social_cassandra_store, "execute_parallel_with_args", _fake_parallel)
+    monkeypatch.setattr(
+        social_cassandra_store,
+        "get_cassandra_session",
+        lambda: SimpleNamespace(execute=_must_not_call_execute),
+    )
+    store = CassandraSocialStore()
+
+    authors = [f"wallet-{i}" for i in range(5)]
+    groups = [f"group-{i}" for i in range(3)]
+    assert store.list_posts_by_authors(authors, limit=10) == []
+    assert store.list_group_feeds(groups, limit=10) == []
+
+    assert len(parallel_calls) == 2  # one batched call for authors, one for groups
+    (authors_stmt, authors_args), (groups_stmt, groups_args) = parallel_calls
+    assert authors_stmt is X402SocialStmts.LIST_POSTS_BY_AUTHOR
+    assert [a for a, _limit in authors_args] == authors
+    assert groups_stmt is X402SocialStmts.LIST_GROUP_FEED
+    assert [g for g, _limit in groups_args] == groups
+
+    # Empty input must not even attempt a batch call (nothing to fan out).
+    parallel_calls.clear()
+    assert store.list_posts_by_authors([], limit=10) == []
+    assert store.list_group_feeds([], limit=10) == []
+    assert parallel_calls == []
+
+
+def test_cassandra_count_comments_uses_the_narrow_id_only_projection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """count_comments must read LIST_COMMENT_IDS (comment_id only), never LIST_COMMENTS's full rows (body_md included) -- comment_count() runs on every free GET /posts/{id}.
+
+    Accessing a _Stmt attribute (e.g. X402SocialStmts.LIST_COMMENT_IDS) always
+    triggers prepare_cached -- patch_cassandra (tests/conftest.py) makes that
+    resolve to the raw CQL string instead of dialing a real cluster, the same
+    helper every other store-level Cassandra unit test in this suite uses.
+    """
+    executed: list[object] = []
+
+    def _fake_execute(statement: object, _params: tuple) -> object:
+        executed.append(statement)
+        return [SimpleNamespace(comment_id=f"c{i}") for i in range(3)]
+
+    patch_cassandra(monkeypatch)  # identity prepare_cached -- no real connection
+    monkeypatch.setattr(
+        social_cassandra_store,
+        "get_cassandra_session",
+        lambda: SimpleNamespace(execute=_fake_execute),
+    )
+    store = CassandraSocialStore()
+
+    count = store.count_comments(str(uuid_module.uuid1()), limit=500)
+
+    assert count == 3
+    assert executed == [X402SocialStmts.LIST_COMMENT_IDS]
+    assert X402SocialStmts.LIST_COMMENTS not in executed
+
+
+def test_trending_merge_pipelines_every_bucket_read_into_one_round_trip(
+    fake_redis: _FakeRedis, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """_merge_decayed must queue all _MERGE_HOURS bucket reads on one pipeline and call execute() once, not issue a blocking zrevrange per bucket.
+
+    _FakePipeline.execute() necessarily replays its queued ops against the
+    underlying fake client (it has no real transport to batch over), so the
+    real signal a "one round trip" fake can prove is call COUNTS: one
+    pipeline() call and one execute() call for the whole merge, each
+    queueing/serving _MERGE_HOURS ops -- not _MERGE_HOURS separate
+    pipeline-and-execute pairs, which is what a per-bucket loop would do.
+    """
+    monkeypatch.setattr(trending_service, "get_redis", lambda: fake_redis)
+    pipelines_created: list[_FakePipeline] = []
+    execute_call_op_counts: list[int] = []
+    original_pipeline = fake_redis.pipeline
+    original_execute = _FakePipeline.execute
+
+    def _spy_pipeline() -> _FakePipeline:
+        pipe = original_pipeline()
+        pipelines_created.append(pipe)
+        return pipe
+
+    def _counted_execute(self: _FakePipeline) -> list[object]:
+        execute_call_op_counts.append(len(self._ops))
+        return original_execute(self)
+
+    fake_redis.pipeline = _spy_pipeline  # type: ignore[method-assign]
+    monkeypatch.setattr(_FakePipeline, "execute", _counted_execute)
+
+    top = trending_service.top_topics(limit=5)
+
+    # Exactly one pipeline built and executed for the whole merge, not one
+    # per bucket -- and that one execute() call served all _MERGE_HOURS
+    # queued bucket reads, not just one.
+    assert len(pipelines_created) == 1
+    assert execute_call_op_counts == [trending_service._MERGE_HOURS]
+    assert top == []  # no activity recorded -- just proving the call shape here

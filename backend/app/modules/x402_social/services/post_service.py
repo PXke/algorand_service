@@ -296,11 +296,14 @@ class PostService:
         """(count, truncated) for a post -- a bounded scan (COMMENT_SCAN_LIMIT + 1 rows) so the count saturates honestly rather than silently under-reporting.
 
         Same "ask for one extra row to detect truncation" precedent as
-        x402_grading._scan.
+        x402_grading._scan. Uses count_comments, a narrow-projection count,
+        not list_comments's full rows (optimization pass, 2026-09-02) --
+        this runs on every free GET /posts/{id} and previously pulled every
+        comment's full body_md over the wire just to discard it.
         """
-        rows = self.store.list_comments(post_id, limit=COMMENT_SCAN_LIMIT + 1)
-        truncated = len(rows) > COMMENT_SCAN_LIMIT
-        return (COMMENT_SCAN_LIMIT if truncated else len(rows)), truncated
+        count = self.store.count_comments(post_id, limit=COMMENT_SCAN_LIMIT + 1)
+        truncated = count > COMMENT_SCAN_LIMIT
+        return (COMMENT_SCAN_LIMIT if truncated else count), truncated
 
     # ----------------------------------------------------------------- #
     # Reactions
@@ -388,15 +391,20 @@ class PostService:
         matters to a reader (same post_id => same canonical content), so
         which one wins is not worth tracking further.
         """
-        collected: list[StoredPost] = []
-        for author in followees:
-            collected.extend(self.store.list_posts_by_author(author, limit=FEED_SOURCE_SCAN_LIMIT))
-        for group_id in groups:
-            collected.extend(
-                p
-                for p in self.store.list_group_feed(group_id, limit=FEED_SOURCE_SCAN_LIMIT)
-                if not p.hidden_group
-            )
+        # Fired as two batched, per-backend-concurrent calls rather than a
+        # loop of single-author/single-group reads (optimization pass,
+        # 2026-09-02): the Cassandra store fans these out concurrently
+        # instead of one sequential round-trip per followee/group, turning
+        # up to fanout_limit*2 blocking round-trips into the wall-clock cost
+        # of the slowest one -- see list_posts_by_authors's own docstring.
+        collected: list[StoredPost] = list(
+            self.store.list_posts_by_authors(followees, limit=FEED_SOURCE_SCAN_LIMIT)
+        )
+        collected.extend(
+            p
+            for p in self.store.list_group_feeds(groups, limit=FEED_SOURCE_SCAN_LIMIT)
+            if not p.hidden_group
+        )
         deduped: dict[str, StoredPost] = {}
         for p in collected:
             deduped.setdefault(p.post_id, p)

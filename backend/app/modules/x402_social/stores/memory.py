@@ -126,6 +126,20 @@ class InMemorySocialStore:
             )
             return [replace(p) for p in ordered[: max(0, limit)]]
 
+    def list_posts_by_authors(self, authors: list[str], *, limit: int) -> list[StoredPost]:
+        """Sequential loop -- an in-process dict lookup has no round-trip cost to batch away, unlike the Cassandra store's version."""
+        collected: list[StoredPost] = []
+        for author in authors:
+            collected.extend(self.list_posts_by_author(author, limit=limit))
+        return collected
+
+    def list_group_feeds(self, group_ids: list[str], *, limit: int) -> list[StoredPost]:
+        """Sequential loop -- see list_posts_by_authors's identical rationale."""
+        collected: list[StoredPost] = []
+        for group_id in group_ids:
+            collected.extend(self.list_group_feed(group_id, limit=limit))
+        return collected
+
     def mark_post_deleted(self, item: StoredPost) -> None:
         """Set deleted=True on the canonical row, the author feed row, and (if set) the group feed row for this post.
 
@@ -169,6 +183,11 @@ class InMemorySocialStore:
                 key=lambda c: (c.created_at_epoch, c.comment_id),
             )
             return [replace(c) for c in ordered[: max(0, limit)]]
+
+    def count_comments(self, post_id: str, *, limit: int) -> int:
+        """In-process dict -- no separate narrow-projection path needed, unlike the Cassandra store's version."""
+        with self._lock:
+            return min(len(self._comments.get(post_id, [])), max(0, limit))
 
     # ----------------------------------------------------------------- #
     # Phase S1: reactions

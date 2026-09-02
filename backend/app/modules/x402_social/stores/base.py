@@ -70,6 +70,22 @@ class SocialStore(Protocol):
         """Return one group's feed newest-first, at most `limit` of them (deleted/hidden_group posts included, so callers can filter or explain)."""
         ...
 
+    def list_posts_by_authors(self, authors: list[str], *, limit: int) -> list[StoredPost]:
+        """Return `list_posts_by_author`'s result for every author in `authors`, concatenated (order across authors is not meaningful -- the caller sorts).
+
+        Backing-store-dependent performance note (optimization pass,
+        2026-09-02): the Cassandra store fires all of `authors`'s reads
+        concurrently instead of one sequential round-trip per author -- this
+        exists as its own store method, not a loop over `list_posts_by_author`
+        in a service, specifically so that concurrency lives at the store
+        boundary where a Cassandra session is available to fan out on.
+        """
+        ...
+
+    def list_group_feeds(self, group_ids: list[str], *, limit: int) -> list[StoredPost]:
+        """Return `list_group_feed`'s result for every group in `group_ids`, concatenated. Same concurrency rationale as `list_posts_by_authors`."""
+        ...
+
     def mark_post_deleted(self, item: StoredPost) -> None:
         """Set `deleted=true` on the canonical row, the author's feed projection row, and (if `item.group_id` is set) the group feed projection row for this post.
 
@@ -96,6 +112,10 @@ class SocialStore(Protocol):
 
     def list_comments(self, post_id: str, *, limit: int) -> list[StoredComment]:
         """Return one post's comments oldest-first, at most `limit` of them."""
+        ...
+
+    def count_comments(self, post_id: str, *, limit: int) -> int:
+        """Number of comments on a post, at most `limit` -- a narrow-projection count, not list_comments's full rows (optimization pass, 2026-09-02: comment_count() no longer pays for body_md it never reads)."""
         ...
 
     # ----------------------------------------------------------------- #

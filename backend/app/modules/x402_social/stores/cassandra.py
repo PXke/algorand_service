@@ -6,7 +6,7 @@ import logging
 import uuid
 from datetime import UTC, datetime
 
-from app.core.cassandra import get_cassandra_session
+from app.core.cassandra import execute_parallel_with_args, get_cassandra_session
 from app.core.statements import X402SocialStmts
 from app.modules.x402_social.models.domain import (
     AGENTS_PARTITION,
@@ -361,6 +361,55 @@ class CassandraSocialStore:
         rows = session.execute(X402SocialStmts.LIST_GROUP_FEED, (group_id, limit))
         return [_row_to_post_from_group_feed(row) for row in rows]
 
+    def list_posts_by_authors(self, authors: list[str], *, limit: int) -> list[StoredPost]:
+        """Fan out one single-partition read per author CONCURRENTLY, not sequentially (optimization pass, 2026-09-02).
+
+        home_feed's fan-out is bounded by x402_social_feed_fanout_limit
+        (default 50), but a sequential loop still meant up to 50 fully
+        blocking round-trips before GET /feed could start assembling a
+        response -- the design doc's own acknowledged scaling risk for this
+        route. execute_parallel_with_args (app/core/cassandra.py) is the
+        same fan-out-then-collect helper app/modules/admin already uses for
+        an identical per-item-partition-read shape. raise_on_error=False: one
+        author's read failing must not fail the whole feed -- skipped, not
+        raised, same as this store's other best-effort read paths.
+        """
+        if not authors:
+            return []
+        results = execute_parallel_with_args(
+            X402SocialStmts.LIST_POSTS_BY_AUTHOR,
+            [(author, limit) for author in authors],
+            raise_on_error=False,
+        )
+        collected: list[StoredPost] = []
+        for ok, rows_or_exc in results:
+            if not ok:
+                logger.warning(
+                    "x402 social home_feed: a followee's post read failed: %s", rows_or_exc
+                )
+                continue
+            collected.extend(_row_to_post_from_author(row) for row in rows_or_exc)
+        return collected
+
+    def list_group_feeds(self, group_ids: list[str], *, limit: int) -> list[StoredPost]:
+        """Fan out one single-partition read per group CONCURRENTLY. See list_posts_by_authors's identical rationale."""
+        if not group_ids:
+            return []
+        results = execute_parallel_with_args(
+            X402SocialStmts.LIST_GROUP_FEED,
+            [(group_id, limit) for group_id in group_ids],
+            raise_on_error=False,
+        )
+        collected: list[StoredPost] = []
+        for ok, rows_or_exc in results:
+            if not ok:
+                logger.warning(
+                    "x402 social home_feed: a joined group's feed read failed: %s", rows_or_exc
+                )
+                continue
+            collected.extend(_row_to_post_from_group_feed(row) for row in rows_or_exc)
+        return collected
+
     def mark_post_deleted(self, item: StoredPost) -> None:
         """Set deleted=true on the canonical row, the author feed row, and (if set) the group feed row for this post, all via UPDATE ... IF EXISTS.
 
@@ -417,6 +466,22 @@ class CassandraSocialStore:
         session = get_cassandra_session()
         rows = session.execute(X402SocialStmts.LIST_COMMENTS, (parsed, limit))
         return [_row_to_comment(row) for row in rows]
+
+    def count_comments(self, post_id: str, *, limit: int) -> int:
+        """Number of comments on a post, at most `limit` (a LIMIT+1 caller detects truncation from the returned value equalling `limit`).
+
+        Reads comment_id only, not the full row (optimization pass,
+        2026-09-02): comment_count() previously called list_comments and
+        threw away every field but the row count, paying for up to
+        MAX_COMMENT_BYTES of body_md per row on every free GET /posts/{id}
+        for nothing this function needs.
+        """
+        parsed = _try_uuid(post_id)
+        if parsed is None:
+            return 0
+        session = get_cassandra_session()
+        rows = session.execute(X402SocialStmts.LIST_COMMENT_IDS, (parsed, limit))
+        return sum(1 for _ in rows)
 
     # ----------------------------------------------------------------- #
     # Phase S1: reactions

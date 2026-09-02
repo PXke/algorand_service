@@ -1336,6 +1336,16 @@ class X402SocialStmts:
         "SELECT post_id, created_at, comment_id, author, body_md, settlement_tx_id, deleted "
         "FROM algorand_platform.x402_social_comments WHERE post_id = ? LIMIT ?"
     )
+    # Narrow column projection for comment_count (optimization pass,
+    # 2026-09-02): GET /posts/{id} runs this on every free read just to
+    # produce an integer, and the full LIST_COMMENTS row includes body_md
+    # (up to MAX_COMMENT_BYTES each) -- worst case ~500 rows of dead weight
+    # over the wire and materialized into driver objects for a number
+    # nothing downstream reads. comment_id alone is enough to count and
+    # detect the LIMIT+1 truncation sentinel the same way LIST_COMMENTS does.
+    LIST_COMMENT_IDS = _Stmt(
+        "SELECT comment_id FROM algorand_platform.x402_social_comments WHERE post_id = ? LIMIT ?"
+    )
     # The whole "one reaction per wallet per post, forever" rule: an LWT on
     # the full primary key, applied BEFORE the counter increment below (see
     # post_service.py's react()). Never retried on failure.
