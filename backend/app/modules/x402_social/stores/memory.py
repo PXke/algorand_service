@@ -127,7 +127,13 @@ class InMemorySocialStore:
             return [replace(p) for p in ordered[: max(0, limit)]]
 
     def mark_post_deleted(self, item: StoredPost) -> None:
-        """Set deleted=True on the canonical row and the author feed row for this post."""
+        """Set deleted=True on the canonical row, the author feed row, and (if set) the group feed row for this post.
+
+        Mirrors the Cassandra store's group feed fix (finding 1,
+        2026-security-audit): a deleted group post must stop serving its
+        body via the group feed projection too, not just the canonical row
+        and the author's own feed.
+        """
         with self._lock:
             canonical = self._posts.get(item.post_id)
             if canonical is not None:
@@ -135,6 +141,10 @@ class InMemorySocialStore:
             for row in self._posts_by_author.get(item.author, []):
                 if row.post_id == item.post_id:
                     row.deleted = True
+            if item.group_id:
+                for row in self._group_feed.get(item.group_id, []):
+                    if row.post_id == item.post_id:
+                        row.deleted = True
 
     def mark_post_hidden_in_group(self, item: StoredPost) -> None:
         """Set hidden_group=True on the canonical row and the group feed row ONLY."""
@@ -227,6 +237,12 @@ class InMemorySocialStore:
                 return False
             self._group_names[name_norm] = group_id
             return True
+
+    def release_group_name(self, *, name_norm: str, group_id: str) -> None:
+        """Best-effort compensating release of a name claim THIS group_id won (finding 3, 2026-security-audit). See base.SocialStore.release_group_name's own docstring."""
+        with self._lock:
+            if self._group_names.get(name_norm) == group_id:
+                del self._group_names[name_norm]
 
     def insert_group(self, item: StoredGroup) -> None:
         """Store a newly-claimed group: canonical row and recency projection."""

@@ -37,6 +37,12 @@ _HTML_OPEN_RE = re.compile(r"<\s*[!/a-zA-Z]")
 _AUTOLINK_RE = re.compile(r"<(?:[a-zA-Z][a-zA-Z0-9+.-]*:|mailto:)[^\s<>]+>")
 
 
+def _contains_embedded_html(text: str) -> bool:
+    """Shared detector: does `text` contain a '<' immediately followed by a tag name, '/', or '!', outside a CommonMark autolink?"""
+    scan_target = _AUTOLINK_RE.sub("", text)
+    return bool(_HTML_OPEN_RE.search(scan_target))
+
+
 def validate_markdown_body(raw: str, *, max_bytes: int) -> str:
     """Trim, size-cap, and HTML-reject a markdown body. Returns the trimmed body or raises SocialError.
 
@@ -55,8 +61,7 @@ def validate_markdown_body(raw: str, *, max_bytes: int) -> str:
             f"body_md must be at most {max_bytes} bytes (got {encoded_len})",
             http_status=400,
         )
-    scan_target = _AUTOLINK_RE.sub("", body)
-    if _HTML_OPEN_RE.search(scan_target):
+    if _contains_embedded_html(body):
         raise SocialError(
             "embedded_html_rejected",
             "body_md appears to contain embedded HTML (a '<' immediately followed by a tag "
@@ -66,3 +71,34 @@ def validate_markdown_body(raw: str, *, max_bytes: int) -> str:
             http_status=400,
         )
     return body
+
+
+def reject_embedded_html(value: str, *, field_name: str) -> None:
+    """Reject (never strip) embedded HTML in a plain, non-markdown, self-declared text field -- profile name/bio/mission/location/each interest, group name/description (finding 9, 2026-security-audit, defense in depth).
+
+    Same detector and the same "reject over strip" reasoning
+    validate_markdown_body's own docstring gives, extended to fields that
+    were previously length-checked ONLY: a profile bio or group description
+    flows into every JSON response and the prose template renderer exactly
+    like a post body does, so `&lt;script&gt;...&lt;/script&gt;` (well under
+    any of these fields' byte caps) being accepted and stored verbatim is
+    the same class of gap, just on a field nobody thought of as
+    "content." The CommonMark autolink exemption is kept even though these
+    fields are not markdown -- it only widens what is ALLOWED (a bare
+    `<https://example.com>` pasted into a bio), never what is rejected, so
+    there is no reason to special-case it away here.
+
+    Called BEFORE the payment gate on POST /register (validate_profile_fields
+    runs pre-gate there) and unconditionally on PATCH /profile and group
+    create -- same "checkable without a payer, check it first where
+    possible" precedent as every other validator in this module and
+    services/markdown_guard.py.
+    """
+    if _contains_embedded_html(value):
+        raise SocialError(
+            "embedded_html_rejected",
+            f"{field_name} appears to contain embedded HTML (a '<' immediately followed by a "
+            "tag name, '/', or '!'). This is rejected, not stripped, the same way a post body "
+            "is.",
+            http_status=400,
+        )

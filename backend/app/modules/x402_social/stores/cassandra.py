@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import uuid
 from datetime import UTC, datetime
 
@@ -29,6 +30,9 @@ def _epoch(value: datetime | None) -> int:
     return int(value.timestamp()) if value else 0
 
 
+logger = logging.getLogger(__name__)
+
+
 def _uuid(value: str) -> uuid.UUID:
     """Parse a domain-layer id string into the UUID object the driver's timeuuid codec needs to bind.
 
@@ -39,8 +43,35 @@ def _uuid(value: str) -> uuid.UUID:
     plain strings everywhere above the store layer (the same "ids are text"
     convention every other id in this module follows, so the memory store
     needs no parallel type).
+
+    Raises ValueError on a malformed id -- callers reading by external id
+    (a post_id off a URL, never one this process itself minted) use
+    `_try_uuid` instead so a malformed id becomes a clean "not found"
+    rather than an unhandled 500 (finding 5, 2026-security-audit). This
+    raising form stays the one write paths use (`insert_post`,
+    `insert_comment`, ...), where the id was always minted by
+    `post_service.create`/`add_comment` moments earlier and a ValueError
+    here would mean OUR bug, not malformed external input.
     """
     return uuid.UUID(value)
+
+
+def _try_uuid(value: str) -> uuid.UUID | None:
+    """Like `_uuid`, but returns None instead of raising on a malformed id.
+
+    Used by every READ path that takes a post/comment id straight from
+    external input (a URL path param, ultimately) -- `get_post`,
+    `list_comments`, `get_reaction_totals` -- so a request like
+    `GET /posts/not-a-uuid` resolves to the same "not found" a well-formed
+    but unknown id gets, instead of an unhandled 500 (finding 5,
+    2026-security-audit: the in-memory store backing the test suite is a
+    plain dict lookup and never hit this, since a malformed string just
+    misses the dict -- only the Cassandra-backed production path could 500).
+    """
+    try:
+        return uuid.UUID(value)
+    except (ValueError, AttributeError, TypeError):
+        return None
 
 
 def _row_to_agent(row: object) -> AgentProfile:
@@ -211,7 +242,29 @@ class CassandraSocialStore:
         result = session.execute(X402SocialStmts.INSERT_AGENT_IF_ABSENT, _agent_params(item))
         if not result.was_applied:
             return False
-        session.execute(X402SocialStmts.INSERT_RECENCY, _recency_params(item))
+        try:
+            session.execute(X402SocialStmts.INSERT_RECENCY, _recency_params(item))
+        except Exception:
+            # The profile LWT already won and is durably stored (finding 3,
+            # 2026-security-audit) -- only the newest-first browse
+            # projection failed to write. A full compensating rollback is
+            # overkill for a denormalized read projection (the wallet IS
+            # registered; a caller can always fetch it directly via
+            # GET /agents/{wallet}, it is just missing from GET /agents
+            # until the next PATCH /profile repairs this row -- see
+            # UPSERT_AGENT's own docstring). Documented here, not silently
+            # swallowed: this still propagates, so run_with_refund's
+            # generic-exception path attempts a refund for a registration
+            # that durably exists -- a known, accepted, low-severity drift,
+            # not something this method tries to fix.
+            logger.warning(
+                "x402 social register: profile stored for wallet=%s but the recency "
+                "projection write failed -- wallet is registered but will not appear "
+                "in GET /agents until the next profile edit repairs this row",
+                item.wallet,
+                exc_info=True,
+            )
+            raise
         return True
 
     def upsert_agent(self, item: AgentProfile) -> None:
@@ -288,9 +341,12 @@ class CassandraSocialStore:
             )
 
     def get_post(self, post_id: str) -> StoredPost | None:
-        """Return the canonical post for an id, or None if there is none."""
+        """Return the canonical post for an id, or None if there is none (including a malformed, non-UUID id -- finding 5, 2026-security-audit)."""
+        parsed = _try_uuid(post_id)
+        if parsed is None:
+            return None
         session = get_cassandra_session()
-        row = session.execute(X402SocialStmts.GET_POST, (_uuid(post_id),)).one()
+        row = session.execute(X402SocialStmts.GET_POST, (parsed,)).one()
         return None if row is None else _row_to_post(row)
 
     def list_posts_by_author(self, author: str, *, limit: int) -> list[StoredPost]:
@@ -306,7 +362,14 @@ class CassandraSocialStore:
         return [_row_to_post_from_group_feed(row) for row in rows]
 
     def mark_post_deleted(self, item: StoredPost) -> None:
-        """Set deleted=true on the canonical row and the author feed row for this post, both via UPDATE ... IF EXISTS."""
+        """Set deleted=true on the canonical row, the author feed row, and (if set) the group feed row for this post, all via UPDATE ... IF EXISTS.
+
+        The group feed row is included so a deleted group post actually
+        stops serving its body via GET /groups/{id}/feed and the group half
+        of GET /feed (finding 1, 2026-security-audit) -- previously only the
+        canonical row and the author feed row were flipped, leaving the
+        group feed projection permanently stale.
+        """
         session = get_cassandra_session()
         post_id = _uuid(item.post_id)
         session.execute(X402SocialStmts.MARK_POST_DELETED, (post_id,))
@@ -314,6 +377,11 @@ class CassandraSocialStore:
             X402SocialStmts.MARK_POST_BY_AUTHOR_DELETED,
             (item.author, _dt(item.created_at_epoch), post_id),
         )
+        if item.group_id:
+            session.execute(
+                X402SocialStmts.MARK_GROUP_FEED_POST_DELETED,
+                (item.group_id, _dt(item.created_at_epoch), post_id),
+            )
 
     def mark_post_hidden_in_group(self, item: StoredPost) -> None:
         """Set hidden_group=true on the canonical row and the group feed row ONLY, both via UPDATE ... IF EXISTS."""
@@ -342,9 +410,12 @@ class CassandraSocialStore:
         )
 
     def list_comments(self, post_id: str, *, limit: int) -> list[StoredComment]:
-        """Return one post's comments oldest-first, at most `limit` of them."""
+        """Return one post's comments oldest-first, at most `limit` of them (empty for a malformed, non-UUID id -- finding 5, 2026-security-audit)."""
+        parsed = _try_uuid(post_id)
+        if parsed is None:
+            return []
         session = get_cassandra_session()
-        rows = session.execute(X402SocialStmts.LIST_COMMENTS, (_uuid(post_id), limit))
+        rows = session.execute(X402SocialStmts.LIST_COMMENTS, (parsed, limit))
         return [_row_to_comment(row) for row in rows]
 
     # ----------------------------------------------------------------- #
@@ -362,19 +433,43 @@ class CassandraSocialStore:
         return bool(result.was_applied)
 
     def increment_reaction_total(self, post_id: str, *, value: int) -> None:
-        """Add one to a post's up (value > 0) or down (value < 0) counter, atomically, exactly once."""
+        """Add one to a post's up (value > 0) or down (value < 0) counter, atomically, exactly once.
+
+        Called only after the reaction LWT (INSERT_REACTION_IF_ABSENT) has
+        already won, so on a failure here the reaction IS durably recorded
+        in x402_social_reaction_log -- only the denormalized counter is
+        under-counted (finding 3, 2026-security-audit: same "core write
+        succeeded, only a projection/counter is stale" class as the
+        registration recency-projection case above, so likewise just
+        documented via a warning log and re-raised, not compensated with a
+        rollback -- there is nothing to roll back that would not itself
+        under-count differently, since the reaction log entry is correct).
+        """
         session = get_cassandra_session()
         stmt = (
             X402SocialStmts.INCREMENT_REACTION_UP
             if value > 0
             else X402SocialStmts.INCREMENT_REACTION_DOWN
         )
-        session.execute(stmt, (_uuid(post_id),))
+        try:
+            session.execute(stmt, (_uuid(post_id),))
+        except Exception:
+            logger.warning(
+                "x402 social react: reaction recorded for post_id=%s but the reaction "
+                "counter increment failed -- the up/down total for this post is now "
+                "under-counted by one",
+                post_id,
+                exc_info=True,
+            )
+            raise
 
     def get_reaction_totals(self, post_id: str) -> ReactionTotals:
-        """Return a post's current up/down totals, (0, 0) if never reacted to."""
+        """Return a post's current up/down totals, (0, 0) if never reacted to (including for a malformed, non-UUID id -- finding 5, 2026-security-audit)."""
+        parsed = _try_uuid(post_id)
+        if parsed is None:
+            return ReactionTotals()
         session = get_cassandra_session()
-        row = session.execute(X402SocialStmts.GET_REACTION_TOTALS, (_uuid(post_id),)).one()
+        row = session.execute(X402SocialStmts.GET_REACTION_TOTALS, (parsed,)).one()
         if row is None:
             return ReactionTotals()
         return ReactionTotals(up=int(row.up or 0), down=int(row.down or 0))
@@ -428,6 +523,11 @@ class CassandraSocialStore:
         session = get_cassandra_session()
         result = session.execute(X402SocialStmts.INSERT_GROUP_NAME_IF_ABSENT, (name_norm, group_id))
         return bool(result.was_applied)
+
+    def release_group_name(self, *, name_norm: str, group_id: str) -> None:
+        """Best-effort compensating release of a name claim THIS group_id won (finding 3, 2026-security-audit). See base.SocialStore.release_group_name's own docstring."""
+        session = get_cassandra_session()
+        session.execute(X402SocialStmts.DELETE_GROUP_NAME_IF_OWNED, (name_norm, group_id))
 
     def insert_group(self, item: StoredGroup) -> None:
         """Store a newly-claimed group: canonical row and recency projection. Canonical first (store before mark)."""

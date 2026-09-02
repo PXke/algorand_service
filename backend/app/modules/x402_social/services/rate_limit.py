@@ -18,7 +18,7 @@ from app.core.request_headers import client_ip
 
 _READ_IP_PREFIX = "algorand:x402social:read_rl_ip:"
 _SESSION_IP_PREFIX = "algorand:x402social:session_rl_ip:"
-_SESSION_WALLET_PREFIX = "algorand:x402social:session_rl_wallet:"
+_SESSION_WALLET_FAIL_PREFIX = "algorand:x402social:session_rl_wallet_fail:"
 _FREE_WRITE_WALLET_PREFIX = "algorand:x402social:free_write_rl_wallet:"
 _WINDOW_SECONDS = 3600
 
@@ -41,28 +41,56 @@ def read_rate_limited(request: Request) -> bool:
     return count > settings.x402_social_read_rate_limit_per_hour
 
 
-def session_rate_limited(request: Request, *, wallet: str) -> bool:
-    """True when this IP OR this wallet has exceeded the hourly session-issuance budget.
+def session_rate_limited(request: Request) -> bool:
+    """True when this IP has exceeded the hourly session-issuance budget.
 
     Shared by POST /auth/challenge and POST /auth/session (design doc
-    section 4.2 treats them as one issuance flow). Checked on both axes
-    independently -- either one tripping is enough to refuse -- so a wallet
-    cannot dodge its own per-wallet budget by rotating IPs, nor can one IP
-    dodge the per-IP budget by rotating claimed wallets.
+    section 4.2 treats them as one issuance flow). Per-IP ONLY (finding 2,
+    2026-security-audit removed the per-wallet axis that used to be checked
+    here): the `wallet` in either route's request body is an UNAUTHENTICATED
+    claim at this point -- nothing has proven the caller holds that wallet's
+    key yet -- so keying a rate limit on it let anyone burn an arbitrary
+    victim wallet's shared budget with zero proof of key possession, 429ing
+    the real wallet owner out of both routes. See
+    session_verification_failed for the replacement per-wallet guard, which
+    only counts PROVEN-bad POST /auth/session attempts, checked strictly
+    after signature verification.
     """
-    limit = settings.x402_social_session_rate_limit_per_hour
     ip = client_ip(request.headers)
-    if ip:
-        count = incr_with_expiry(f"{_SESSION_IP_PREFIX}{ip}", window_seconds=_WINDOW_SECONDS)
-        if count is not None and count > limit:
-            return True
-    if wallet:
-        count = incr_with_expiry(
-            f"{_SESSION_WALLET_PREFIX}{wallet}", window_seconds=_WINDOW_SECONDS
-        )
-        if count is not None and count > limit:
-            return True
-    return False
+    if not ip:
+        return False
+    count = incr_with_expiry(f"{_SESSION_IP_PREFIX}{ip}", window_seconds=_WINDOW_SECONDS)
+    if count is None:
+        return False
+    return count > settings.x402_social_session_rate_limit_per_hour
+
+
+def session_verification_failed(*, wallet: str) -> bool:
+    """Record one FAILED POST /auth/session signature verification for `wallet`; True if this wallet has now exceeded its hourly failed-verification budget.
+
+    Finding 2, 2026-security-audit: replaces the old blanket per-wallet
+    counter that incremented on EVERY attempt regardless of whether the
+    caller proved key possession. Call this ONLY after
+    verify_challenge_signature has already returned False for this request
+    -- a wallet's own successful logins, however frequent, never touch this
+    counter (there is nothing to rate-limit about a correctly-proven login),
+    and an attacker who does not hold the wallet's key can only ever cause
+    FAILURES here, so this counter genuinely bounds repeated bad attempts
+    against one wallet name (e.g. signature brute-forcing) without giving
+    an attacker any way to consume the real owner's budget through failures
+    the owner never made. Combined with session_service's (wallet,
+    nonce)-keyed challenge, an attacker's garbage attempts can no longer
+    invalidate the owner's real pending challenge either -- this is what
+    remains to bound volume.
+    """
+    if not wallet:
+        return False
+    count = incr_with_expiry(
+        f"{_SESSION_WALLET_FAIL_PREFIX}{wallet}", window_seconds=_WINDOW_SECONDS
+    )
+    if count is None:
+        return False
+    return count > settings.x402_social_session_rate_limit_per_hour
 
 
 def free_write_rate_limited(*, wallet: str) -> bool:

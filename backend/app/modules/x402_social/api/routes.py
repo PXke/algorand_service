@@ -63,6 +63,7 @@ from app.modules.x402_social.services.rate_limit import (
     free_write_rate_limited,
     read_rate_limited,
     session_rate_limited,
+    session_verification_failed,
 )
 from app.modules.x402_social.services.session_service import (
     SessionStoreError,
@@ -80,11 +81,26 @@ from app.modules.x402_social.services.session_service import (
 # long after both names exist), so the definition order here is cosmetic,
 # not a real dependency.
 profile_service = ProfileService()
-group_service = GroupService()
+
+
+def _is_registered(wallet: str) -> bool:
+    """Whether `wallet` has a registered profile (finding 4, 2026-security-audit).
+
+    The shared is_registered lookup wired into every service that gates a
+    paid action on registration (post/react/comment, follow,
+    group-create/join). Same closure-over-module-level-name precedent as
+    post_service's own membership_lookup lambda below -- profile_service
+    already exists by the time any of these are actually called (a request).
+    """
+    return profile_service.get(wallet) is not None
+
+
+group_service = GroupService(is_registered=_is_registered)
 post_service = PostService(
-    membership_lookup=lambda group_id, wallet: group_service.is_member(group_id, wallet)
+    membership_lookup=lambda group_id, wallet: group_service.is_member(group_id, wallet),
+    is_registered=_is_registered,
 )
-graph_service = GraphService()
+graph_service = GraphService(is_registered=_is_registered)
 
 _REGISTER_RESOURCE = "x402-social-register"
 _POST_RESOURCE = "x402-social-post"
@@ -270,7 +286,7 @@ def x402_social_auth_challenge(request: Request) -> Response | dict:
         return json_error_response(
             400, "invalid_request", "wallet must be a valid Algorand address"
         )
-    if session_rate_limited(request, wallet=payload.wallet):
+    if session_rate_limited(request):
         return json_error_response(
             429, "rate_limited", "Too many challenge requests — please try again later"
         )
@@ -290,7 +306,16 @@ def x402_social_auth_challenge(request: Request) -> Response | dict:
 
 
 def x402_social_auth_session(request: Request) -> Response | dict:
-    """Free: verify a signed challenge and mint a bearer session token (design doc section 4.2)."""
+    """Free: verify a signed challenge and mint a bearer session token (design doc section 4.2).
+
+    Rate limiting here is per-IP up front (session_rate_limited) plus, on a
+    FAILED verification only, a per-wallet failed-attempt budget
+    (session_verification_failed) -- finding 2, 2026-security-audit. A
+    successful, correctly-signed login never touches the per-wallet counter
+    at all, so an attacker who does not hold `payload.wallet`'s key cannot
+    consume the real owner's budget through their own garbage attempts; they
+    can only ever trip their own failure counter.
+    """
     try:
         payload = serialization.decode(request.body, SessionRequest)
     except serialization.DecodeError as exc:
@@ -299,7 +324,7 @@ def x402_social_auth_session(request: Request) -> Response | dict:
         return json_error_response(
             400, "invalid_request", "wallet must be a valid Algorand address"
         )
-    if session_rate_limited(request, wallet=payload.wallet):
+    if session_rate_limited(request):
         return json_error_response(
             429, "rate_limited", "Too many session requests — please try again later"
         )
@@ -319,6 +344,12 @@ def x402_social_auth_session(request: Request) -> Response | dict:
             "Session challenge store unavailable — please try again shortly",
         )
     if not verified:
+        if session_verification_failed(wallet=payload.wallet):
+            return json_error_response(
+                429,
+                "rate_limited",
+                "Too many failed session attempts for this wallet — please try again later",
+            )
         return json_error_response(
             401,
             "invalid_signature_or_nonce",
@@ -682,7 +713,14 @@ def x402_social_post_detail(request: Request) -> Response | dict:
         )
     post_id = query_param(request.path_params.get("post_id", ""))
     post = post_service.get(post_id) if post_id else None
-    if post is None:
+    # A deleted post is treated as fully gone from every free read surface
+    # (finding 1, 2026-security-audit): same "deleted == not found" contract
+    # x402_social_comment_create and x402_social_react already apply
+    # (`post is None or post.deleted`), now made consistent here too, so
+    # GET /posts/{id}, the author feed, the group feed, and the home feed
+    # all agree on ONE behavior for a deleted post -- it never serves body
+    # text again, in either output format.
+    if post is None or post.deleted:
         return json_error_response(404, "not_found", "No post with that id")
     reactions = post_service.reaction_totals(post_id)
     comment_count, truncated = post_service.comment_count(post_id)

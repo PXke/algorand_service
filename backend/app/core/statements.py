@@ -1309,6 +1309,16 @@ class X402SocialStmts:
         "UPDATE algorand_platform.x402_social_posts_by_author SET deleted = true "
         "WHERE author = ? AND created_at = ? AND post_id = ? IF EXISTS"
     )
+    # Author-tombstone flip on the group_feed projection row too (finding 1,
+    # 2026-security-audit): without this, a deleted group post kept serving
+    # its full body forever via GET /groups/{id}/feed and the group half of
+    # GET /feed -- the canonical row and the author-feed projection were the
+    # only two rows ever flipped. Same IF EXISTS tombstone precedent as the
+    # other two MARK_POST_*_DELETED statements above.
+    MARK_GROUP_FEED_POST_DELETED = _Stmt(
+        "UPDATE algorand_platform.x402_social_group_feed SET deleted = true "
+        "WHERE group_id = ? AND created_at = ? AND post_id = ? IF EXISTS"
+    )
     MARK_POST_HIDDEN_GROUP = _Stmt(
         "UPDATE algorand_platform.x402_social_posts SET hidden_group = true "
         "WHERE post_id = ? IF EXISTS"
@@ -1377,6 +1387,16 @@ class X402SocialStmts:
     INSERT_GROUP_NAME_IF_ABSENT = _Stmt(
         "INSERT INTO algorand_platform.x402_social_group_names (name_norm, group_id) "
         "VALUES (?, ?) IF NOT EXISTS"
+    )
+    # Best-effort compensation (finding 3, 2026-security-audit) for a group
+    # create that wins the name-claim LWT but then fails to store the group
+    # row or the owner membership: without this, the claimed name is
+    # permanently unusable by anyone (payment kept, correctly, but nobody
+    # actually owns the name). IF group_id = ? so this can only ever release
+    # the exact claim THIS call won, never a different group's legitimate
+    # claim on the same name.
+    DELETE_GROUP_NAME_IF_OWNED = _Stmt(
+        "DELETE FROM algorand_platform.x402_social_group_names WHERE name_norm = ? IF group_id = ?"
     )
     INSERT_GROUP = _Stmt(
         "INSERT INTO algorand_platform.x402_social_groups ("

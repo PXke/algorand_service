@@ -64,6 +64,29 @@ class SocialError(PlatformError):
         )
 
 
+def not_registered_error() -> SocialError:
+    """The shared SocialError for a paid action attempted by a wallet with no registered profile (finding 4, 2026-security-audit).
+
+    The design doc (section 4.1) calls for this to be checked "pre-gate so
+    an unregistered wallet gets a 403 with nothing charged" -- that is
+    architecturally impossible here (the payer is only known after
+    settlement, the same constraint `not_group_member` already documents),
+    so this is a POST-gate, settled-then-refused check instead: raised from
+    PostService.create/react/add_comment, GraphService.follow, and
+    GroupService.create/join, all via each service's own injected
+    `is_registered` lookup. Caller-fault, payment kept, no refund -- a
+    SocialError is a PlatformError, so run_with_refund's PlatformError
+    contract applies, the SAME shape as not_group_member: "you should have
+    registered first."
+    """
+    return SocialError(
+        "not_registered",
+        "This wallet has no profile. Payment has settled but the action was refused -- "
+        "register first via POST /api/v1/x402/social/register, then retry.",
+        http_status=403,
+    )
+
+
 @dataclass
 class AgentProfile:
     """One registered agent's profile, keyed by wallet -- the wallet IS the identity (design doc section 1.1: "there is no separate user id anywhere in this module").

@@ -25,12 +25,13 @@ from app.modules.x402_social.models.domain import (
     AgentProfile,
     SocialError,
 )
+from app.modules.x402_social.services.markdown_guard import reject_embedded_html
 from app.modules.x402_social.stores.base import SocialStore
 from app.modules.x402_social.stores.factory import get_social_store
 
 
 def normalize_interests(raw: list[str]) -> list[str]:
-    """Trimmed, de-duplicated, bounded interests list; raises SocialError if oversized.
+    """Trimmed, de-duplicated, bounded interests list; raises SocialError if oversized or if an entry contains embedded HTML.
 
     Order-preserving (unlike x402_directory's sorted-set tags): interests
     are a short self-declared list, not a search index, so the agent's own
@@ -52,6 +53,7 @@ def normalize_interests(raw: list[str]) -> list[str]:
                 f"each interest must be at most {MAX_INTEREST_LEN} characters",
                 http_status=400,
             )
+        reject_embedded_html(item, field_name="each interest")
     return seen
 
 
@@ -64,24 +66,30 @@ def validate_profile_fields(
     interests: list[str],
     emoji: str,
 ) -> tuple[str, str, str, str, list[str], str]:
-    """Bound and normalize every self-declared profile field, raising SocialError on the first violation.
+    """Bound, HTML-reject, and normalize every self-declared profile field, raising SocialError on the first violation.
 
     Called by the route BEFORE the payment gate on POST /register (so a
     malformed profile is a free 400) and unconditionally by both
     ProfileService.register and ProfileService.edit (the durable guard on
     the columns, same "checked at the edge AND at the service" precedent as
-    x402_directory's validate_tags/validate_category).
+    x402_directory's validate_tags/validate_category). The HTML-reject calls
+    (finding 9, 2026-security-audit) extend this same defense-in-depth
+    coverage to name/bio/mission/location/interests -- previously only post
+    and comment bodies were checked, even though these fields flow into the
+    same JSON responses and prose templates a post body does.
     """
     name = name.strip()
     if not name or len(name) > MAX_NAME_LEN:
         raise SocialError(
             "invalid_request", f"name must be 1-{MAX_NAME_LEN} characters", http_status=400
         )
+    reject_embedded_html(name, field_name="name")
     bio = bio.strip()
     if len(bio) > MAX_BIO_LEN:
         raise SocialError(
             "invalid_request", f"bio must be at most {MAX_BIO_LEN} characters", http_status=400
         )
+    reject_embedded_html(bio, field_name="bio")
     mission = mission.strip()
     if len(mission) > MAX_MISSION_LEN:
         raise SocialError(
@@ -89,6 +97,7 @@ def validate_profile_fields(
             f"mission must be at most {MAX_MISSION_LEN} characters",
             http_status=400,
         )
+    reject_embedded_html(mission, field_name="mission")
     location = location.strip()
     if len(location) > MAX_LOCATION_LEN:
         raise SocialError(
@@ -96,6 +105,7 @@ def validate_profile_fields(
             f"location must be at most {MAX_LOCATION_LEN} characters",
             http_status=400,
         )
+    reject_embedded_html(location, field_name="location")
     emoji = emoji.strip()
     if len(emoji.encode("utf-8")) > MAX_EMOJI_BYTES:
         raise SocialError(

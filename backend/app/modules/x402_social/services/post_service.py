@@ -10,6 +10,7 @@ real lookup in.
 
 from __future__ import annotations
 
+import random
 import uuid
 from collections.abc import Callable
 from dataclasses import replace
@@ -25,6 +26,7 @@ from app.modules.x402_social.models.domain import (
     SocialError,
     StoredComment,
     StoredPost,
+    not_registered_error,
 )
 from app.modules.x402_social.services.markdown_guard import validate_markdown_body
 from app.modules.x402_social.stores.base import SocialStore
@@ -35,6 +37,34 @@ from app.modules.x402_social.stores.factory import get_social_store
 # None; a group that does not exist has no members either, so this one
 # check also stands in for "does the group exist" without a second lookup.
 MembershipLookup = Callable[[str, str], bool]
+
+# wallet -> does this wallet have a registered profile. Bound in
+# api/routes.py to profile_service.ProfileService.get(...) is not None --
+# same decoupling precedent as MembershipLookup above, so this module never
+# has to import profile_service (finding 4, 2026-security-audit).
+IsRegisteredLookup = Callable[[str], bool]
+
+
+def _new_post_or_comment_id() -> str:
+    """A fresh timeuuid-compatible id for a post/comment, with a random node instead of this process's real MAC address.
+
+    Plain `uuid.uuid1()` embeds the local NIC's MAC address in the node
+    field of every generated id (that is the whole point of a version-1
+    UUID's node field when the multicast bit is unset) -- minting public
+    post_id/comment_id values straight off the network card leaks a stable
+    hardware identifier of the server into every response, forever (finding
+    5, 2026-security-audit). Forcing the multicast bit (`0x01` in the node
+    field's top byte) on a randomly generated 48-bit node is the standard
+    RFC 4122 way to mint a time-based UUID with no real MAC in it --
+    Cassandra only validates the version nibble ("1"), which this preserves
+    exactly (see stores/cassandra.py's `_uuid` docstring). No existing
+    driver-level timeuuid-minting convention was found elsewhere in this
+    codebase to reuse instead (checked x402_directory and neighboring
+    modules) -- this keeps post_service.py store-agnostic (stdlib `uuid`
+    only), consistent with it never otherwise importing the Cassandra
+    driver.
+    """
+    return str(uuid.uuid1(node=random.getrandbits(48) | 0x010000000000))
 
 
 def normalize_tags(raw: list[str]) -> list[str]:
@@ -68,17 +98,35 @@ class PostService:
     """Creates and reads posts and comments, records reactions, and assembles the bounded home-feed fan-out."""
 
     def __init__(
-        self, store: SocialStore | None = None, *, membership_lookup: MembershipLookup | None = None
+        self,
+        store: SocialStore | None = None,
+        *,
+        membership_lookup: MembershipLookup | None = None,
+        is_registered: IsRegisteredLookup | None = None,
     ) -> None:
         """Take explicit collaborators for tests; otherwise resolve the configured store lazily.
 
         `membership_lookup` has no lazy default: without one, posting into a
         group always refuses (see `create`) rather than silently allowing
         it -- the honest state for a service constructed with no way to
-        check membership.
+        check membership. `is_registered` (finding 4, 2026-security-audit)
+        has the same no-lazy-default, fail-closed contract: without one,
+        `create`/`react`/`add_comment` always refuse as not_registered
+        rather than silently allowing an unregistered wallet through.
         """
         self._store = store
         self._membership_lookup = membership_lookup
+        self._is_registered = is_registered
+
+    def _require_registered(self, wallet: str) -> None:
+        """Raise not_registered_error() unless `wallet` has a registered profile (finding 4, 2026-security-audit).
+
+        POST-gate (payer only known after settlement, same constraint the
+        group-membership check documents) -- called first thing from
+        `create`, `react`, and `add_comment`.
+        """
+        if self._is_registered is None or not self._is_registered(wallet):
+            raise not_registered_error()
 
     @property
     def store(self) -> SocialStore:
@@ -113,7 +161,12 @@ class PostService:
         it is caller-fault, same settled-then-refused contract as
         x402_board_renew's ownership check, which has the identical
         "only knowable after the gate" constraint.
+
+        Raises SocialError("not_registered", ..., 403) if `author` has no
+        registered profile (finding 4, 2026-security-audit) -- checked
+        first, before anything else.
         """
+        self._require_registered(author)
         body = validate_markdown_body(body_md, max_bytes=settings.x402_social_post_max_bytes)
         clean_tags = normalize_tags(tags)
         clean_group_id = group_id.strip()
@@ -131,7 +184,7 @@ class PostService:
                 )
         moment = now or datetime.now(tz=UTC)
         post = StoredPost(
-            post_id=str(uuid.uuid1()),
+            post_id=_new_post_or_comment_id(),
             author=author,
             group_id=clean_group_id,
             body_md=body,
@@ -147,9 +200,22 @@ class PostService:
         return self.store.get_post(post_id) if post_id else None
 
     def list_by_author(self, author: str, *, limit: int) -> list[StoredPost]:
-        """Return one author's own posts newest-first, clamped to x402_social_max_results."""
+        """Return one author's own NON-deleted posts newest-first, clamped to x402_social_max_results.
+
+        Deleted (author-tombstoned) posts are filtered out here (finding 1,
+        2026-security-audit): a deleted post is treated as fully gone from
+        every free read surface, the same "deleted == not found" contract
+        `add_comment`'s and `react`'s callers already apply at the route
+        level (`post is None or post.deleted`) -- this is that same rule
+        applied to a feed listing instead of a single-post lookup. Note this
+        clamps BEFORE filtering (same as every other list_* here), so a
+        feed with many deleted posts near the front can legitimately return
+        fewer than `limit` live posts -- acceptable at this module's scale,
+        same bounded-scan trade `home_feed` documents.
+        """
         clamped = max(1, min(limit, settings.x402_social_max_results))
-        return self.store.list_posts_by_author(author, limit=clamped)
+        posts = self.store.list_posts_by_author(author, limit=clamped)
+        return [p for p in posts if not p.deleted]
 
     def list_group_feed(self, group_id: str, *, limit: int) -> list[StoredPost]:
         """Return one group's feed newest-first, clamped to x402_social_max_results."""
@@ -203,12 +269,16 @@ class PostService:
         an unknown post must be free) -- this method does not re-check, the
         same "existence check lives before the gate, the write lives after"
         split x402_features.vote's caller (exists()) uses.
+
+        Raises SocialError("not_registered", ..., 403) if `author` has no
+        registered profile (finding 4, 2026-security-audit).
         """
+        self._require_registered(author)
         body = validate_markdown_body(body_md, max_bytes=MAX_COMMENT_BYTES)
         moment = now or datetime.now(tz=UTC)
         comment = StoredComment(
             post_id=post_id,
-            comment_id=str(uuid.uuid1()),
+            comment_id=_new_post_or_comment_id(),
             author=author,
             body_md=body,
             created_at_epoch=int(moment.timestamp()),
@@ -256,7 +326,12 @@ class PostService:
         LWT-then-counter, in that order and never retried: try_add_reaction
         is the atomic slot-win; increment_reaction_total runs ONLY after it
         returns True, exactly once.
+
+        Raises SocialError("not_registered", ..., 403) if `wallet` has no
+        registered profile (finding 4, 2026-security-audit) -- checked
+        first, before the reaction LWT is ever attempted.
         """
+        self._require_registered(wallet)
         moment = now or datetime.now(tz=UTC)
         won = self.store.try_add_reaction(
             post_id=post_id,
@@ -303,6 +378,15 @@ class PostService:
         post is excluded from this merge (it is scoped OUT of that group's
         feed) even though it still exists on the author's own feed, which is
         exactly why it is not filtered out of the `followees` half.
+
+        Deduped by post_id (finding 6, 2026-security-audit): a post whose
+        author is BOTH directly followed AND a member of a joined group
+        would otherwise be collected from both halves above and appear
+        twice. Whichever copy is seen first (arbitrary -- dict insertion
+        order over `collected`, which is not itself meaningfully ordered
+        pre-sort) is kept; the two copies are equal in every field that
+        matters to a reader (same post_id => same canonical content), so
+        which one wins is not worth tracking further.
         """
         collected: list[StoredPost] = []
         for author in followees:
@@ -313,7 +397,10 @@ class PostService:
                 for p in self.store.list_group_feed(group_id, limit=FEED_SOURCE_SCAN_LIMIT)
                 if not p.hidden_group
             )
-        visible = [p for p in collected if not p.deleted]
+        deduped: dict[str, StoredPost] = {}
+        for p in collected:
+            deduped.setdefault(p.post_id, p)
+        visible = [p for p in deduped.values() if not p.deleted]
         visible.sort(key=lambda p: (-p.created_at_epoch, p.post_id))
         clamped = max(1, min(limit, settings.x402_social_max_results))
         return visible[:clamped]

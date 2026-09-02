@@ -8,20 +8,40 @@ never a third materialized table.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import UTC, datetime
 
 from app.core.config import settings
-from app.modules.x402_social.models.domain import GRAPH_SCAN_LIMIT, FollowEdge
+from app.modules.x402_social.models.domain import (
+    GRAPH_SCAN_LIMIT,
+    FollowEdge,
+    SocialError,
+    not_registered_error,
+)
 from app.modules.x402_social.stores.base import SocialStore
 from app.modules.x402_social.stores.factory import get_social_store
+
+# wallet -> does this wallet have a registered profile. Bound in
+# api/routes.py to profile_service.ProfileService.get(...) is not None --
+# same decoupling precedent as post_service.IsRegisteredLookup (finding 4,
+# 2026-security-audit).
+IsRegisteredLookup = Callable[[str], bool]
 
 
 class GraphService:
     """Follows, unfollows, and reads the follow graph (following/followers/friends)."""
 
-    def __init__(self, store: SocialStore | None = None) -> None:
-        """Take an explicit store for tests; otherwise resolve the configured one lazily."""
+    def __init__(
+        self, store: SocialStore | None = None, *, is_registered: IsRegisteredLookup | None = None
+    ) -> None:
+        """Take explicit collaborators for tests; otherwise resolve the configured store lazily.
+
+        `is_registered` has no lazy default: without one, `follow` always
+        refuses as not_registered (fail closed) -- same contract as
+        PostService's own `is_registered` seam.
+        """
         self._store = store
+        self._is_registered = is_registered
 
     @property
     def store(self) -> SocialStore:
@@ -31,12 +51,31 @@ class GraphService:
     def follow(self, *, follower: str, followee: str, now: datetime | None = None) -> None:
         """Write a directed follow edge, idempotent (design doc section 2.4: no duplicate-follow rejection, unlike a reaction).
 
-        The caller is responsible for the "cannot follow yourself" check
-        before the payment gate, if any is wanted -- this method does not
-        refuse it (a self-follow is harmless: it can never make you your
-        own "friend" via the mutual-follow definition unless you also
-        followed yourself back, which is a no-op either way).
+        Raises SocialError("cannot_follow_self", ..., 400) when
+        `followee == follower` (finding 8, 2026-security-audit -- this
+        docstring used to claim a self-follow was harmless because it could
+        "never make you your own friend," which was WRONG: `upsert_follow`
+        writes BOTH direction tables in one call, so a single self-follow
+        satisfies the mutual-follow intersection with yourself and
+        `friends()` would return the wallet itself). Cannot be checked
+        before the payment gate -- `follower` is the settled payment's
+        payer, only known after settlement (same constraint
+        `not_group_member` documents) -- so this is caller-fault,
+        settled-then-refused: payment kept, no refund.
+
+        Raises SocialError("not_registered", ..., 403) if `follower` has no
+        registered profile (finding 4, 2026-security-audit) -- POST-gate,
+        checked first.
         """
+        if self._is_registered is None or not self._is_registered(follower):
+            raise not_registered_error()
+        if followee == follower:
+            raise SocialError(
+                "cannot_follow_self",
+                "A wallet cannot follow itself. Payment has settled but no follow edge was "
+                "created.",
+                http_status=400,
+            )
         moment = now or datetime.now(tz=UTC)
         self.store.upsert_follow(
             follower=follower, followee=followee, created_at_epoch=int(moment.timestamp())

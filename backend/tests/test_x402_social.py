@@ -33,6 +33,8 @@ from __future__ import annotations
 
 import json
 import threading
+import uuid as uuid_module
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any, Never
 
@@ -57,18 +59,28 @@ from app.modules.x402_social.models.domain import (
     MAX_BIO_LEN,
     MAX_INTERESTS,
     REACTION_UP,
+    ReactionTotals,
     SocialError,
+    StoredGroup,
 )
 from app.modules.x402_social.services import prose, session_service, trending_service
+from app.modules.x402_social.services import rate_limit as social_rate_limit
 from app.modules.x402_social.services.graph_service import GraphService
 from app.modules.x402_social.services.group_service import GroupService
 from app.modules.x402_social.services.markdown_guard import validate_markdown_body
-from app.modules.x402_social.services.post_service import PostService
+from app.modules.x402_social.services.post_service import PostService, _new_post_or_comment_id
 from app.modules.x402_social.services.profile_service import ProfileService, validate_profile_fields
+from app.modules.x402_social.stores import cassandra as social_cassandra_store
+from app.modules.x402_social.stores.cassandra import CassandraSocialStore
 from app.modules.x402_social.stores.memory import InMemorySocialStore
 
 _PAYER = encode_address(bytes([2]) + bytes(31))
 _OTHER_PAYER = encode_address(bytes([3]) + bytes(31))
+
+
+def _always_registered(_wallet: str) -> bool:
+    """is_registered stub for tests that are not themselves exercising finding 4's registration gate -- every wallet is treated as already registered."""
+    return True
 
 
 # --------------------------------------------------------------------------- #
@@ -111,6 +123,14 @@ class _FakeRedis:
         self, key: str, start: int, end: int, withscores: bool = False
     ) -> list[tuple[str, float]] | list[str]:
         items = sorted(self.zsets.get(key, {}).items(), key=lambda kv: kv[1])
+        sliced = items[start:] if end == -1 else items[start : end + 1]
+        return sliced if withscores else [member for member, _score in sliced]
+
+    def zrevrange(
+        self, key: str, start: int, end: int, withscores: bool = False
+    ) -> list[tuple[str, float]] | list[str]:
+        """Highest-score-first, the direction trending_service._merge_decayed now reads with (finding 7, 2026-security-audit)."""
+        items = sorted(self.zsets.get(key, {}).items(), key=lambda kv: -kv[1])
         sliced = items[start:] if end == -1 else items[start : end + 1]
         return sliced if withscores else [member for member, _score in sliced]
 
@@ -579,7 +599,7 @@ def test_markdown_guard_rejects_empty_body() -> None:
 # --------------------------------------------------------------------------- #
 def test_post_create_get_and_delete_round_trip(store: InMemorySocialStore) -> None:
     """A post is stored, readable by id, listed on the author's feed, and deletable by its author (tombstone, not a row delete)."""
-    service = PostService(store)
+    service = PostService(store, is_registered=_always_registered)
     post = service.create(
         author=_PAYER,
         body_md="hello world",
@@ -609,7 +629,7 @@ def test_post_create_get_and_delete_round_trip(store: InMemorySocialStore) -> No
 
 def test_post_delete_refuses_a_non_author(store: InMemorySocialStore) -> None:
     """Only the author of a post may delete it."""
-    service = PostService(store)
+    service = PostService(store, is_registered=_always_registered)
     post = service.create(
         author=_PAYER, body_md="mine", tags=[], group_id="", settlement_tx_id="TX-P2"
     )
@@ -620,7 +640,11 @@ def test_post_delete_refuses_a_non_author(store: InMemorySocialStore) -> None:
 
 def test_post_create_in_a_group_requires_membership(store: InMemorySocialStore) -> None:
     """A post into a group the author has not joined is refused -- caller-fault (design doc section 2.2/4.1: this can only be checked AFTER the payment gate, since the author is the settled payer)."""
-    service = PostService(store, membership_lookup=lambda _group_id, _wallet: False)
+    service = PostService(
+        store,
+        membership_lookup=lambda _group_id, _wallet: False,
+        is_registered=_always_registered,
+    )
     with pytest.raises(SocialError) as exc_info:
         service.create(
             author=_PAYER, body_md="hi", tags=[], group_id="some-group", settlement_tx_id="TX-P3"
@@ -631,7 +655,7 @@ def test_post_create_in_a_group_requires_membership(store: InMemorySocialStore) 
 
 def test_comment_create_and_list(store: InMemorySocialStore) -> None:
     """A comment is appended to a post's thread, oldest-first, and counted."""
-    service = PostService(store)
+    service = PostService(store, is_registered=_always_registered)
     post = service.create(
         author=_PAYER, body_md="topic", tags=[], group_id="", settlement_tx_id="TX-P4"
     )
@@ -655,7 +679,7 @@ def test_second_reaction_from_same_wallet_is_refused_caller_fault(
     store: InMemorySocialStore,
 ) -> None:
     """A second reaction from the same wallet on the same post is refused (409), never a second counter increment."""
-    service = PostService(store)
+    service = PostService(store, is_registered=_always_registered)
     post = service.create(
         author=_PAYER, body_md="hi", tags=[], group_id="", settlement_tx_id="TX-P5"
     )
@@ -679,7 +703,7 @@ def test_concurrent_reactions_from_the_same_wallet_produce_exactly_one_counter_i
     store: InMemorySocialStore,
 ) -> None:
     """Two threads racing POST /react for the SAME wallet on the SAME post: the LWT wins exactly once, so the counter is incremented exactly once and every other attempt is refused, never silently dropped or double-counted."""
-    service = PostService(store)
+    service = PostService(store, is_registered=_always_registered)
     post = service.create(
         author=_PAYER, body_md="race me", tags=[], group_id="", settlement_tx_id="TX-P6"
     )
@@ -719,7 +743,7 @@ def test_concurrent_reactions_from_the_same_wallet_produce_exactly_one_counter_i
 # --------------------------------------------------------------------------- #
 def test_follow_unfollow_and_mutual_friends(store: InMemorySocialStore) -> None:
     """A -> follow -> B is one-directional until B follows A back; friends() is exactly the mutual intersection."""
-    service = GraphService(store)
+    service = GraphService(store, is_registered=_always_registered)
     service.follow(follower=_PAYER, followee=_OTHER_PAYER)
 
     assert [e.wallet for e in service.following(_PAYER, limit=10)] == [_OTHER_PAYER]
@@ -739,13 +763,13 @@ def test_follow_unfollow_and_mutual_friends(store: InMemorySocialStore) -> None:
 
 def test_unfollow_a_non_existent_edge_is_a_no_op(store: InMemorySocialStore) -> None:
     """DELETE follow on an edge that was never created just succeeds quietly (free route, nothing to refuse)."""
-    service = GraphService(store)
+    service = GraphService(store, is_registered=_always_registered)
     service.unfollow(follower=_PAYER, followee=_OTHER_PAYER)  # must not raise
 
 
 def test_refollow_is_idempotent_not_caller_fault(store: InMemorySocialStore) -> None:
     """Unlike a reaction, following an already-followed wallet a second time is NOT refused (design doc section 2.4)."""
-    service = GraphService(store)
+    service = GraphService(store, is_registered=_always_registered)
     service.follow(follower=_PAYER, followee=_OTHER_PAYER)
     service.follow(follower=_PAYER, followee=_OTHER_PAYER)  # must not raise
     assert [e.wallet for e in service.following(_PAYER, limit=10)] == [_OTHER_PAYER]
@@ -757,7 +781,7 @@ def test_refollow_is_idempotent_not_caller_fault(store: InMemorySocialStore) -> 
 # --------------------------------------------------------------------------- #
 def test_group_service_name_collision_is_caller_fault(store: InMemorySocialStore) -> None:
     """The SECOND wallet to claim an already-taken group name is refused (409, group_name_taken); the first group is untouched."""
-    service = GroupService(store)
+    service = GroupService(store, is_registered=_always_registered)
     first = service.create(
         owner=_PAYER, name="defi-signals", description="first", settlement_tx_id="TX-G1"
     )
@@ -779,7 +803,9 @@ def test_group_create_route_name_collision_settles_but_is_refused_payment_kept_n
     store: InMemorySocialStore, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Route-level mirror of S0-3: two settled group-create payments for the same name -- the second is refused (409), mark_fulfilled runs only for the first, and NO refund is attempted (SocialError is a PlatformError, exempted from run_with_refund's refund path)."""
-    monkeypatch.setattr(social_routes, "group_service", GroupService(store))
+    monkeypatch.setattr(
+        social_routes, "group_service", GroupService(store, is_registered=_always_registered)
+    )
     fulfilled: list[tuple[str, str]] = []
     monkeypatch.setattr(
         social_routes,
@@ -828,7 +854,7 @@ def test_group_create_route_name_collision_settles_but_is_refused_payment_kept_n
 # --------------------------------------------------------------------------- #
 def test_group_join_leave_and_owner_cannot_leave(store: InMemorySocialStore) -> None:
     """Joining is idempotent, leaving removes membership, and the owner is refused (owner_cannot_leave)."""
-    service = GroupService(store)
+    service = GroupService(store, is_registered=_always_registered)
     group = service.create(owner=_PAYER, name="ai-agents", description="", settlement_tx_id="TX-G3")
 
     membership = service.join(
@@ -850,7 +876,7 @@ def test_group_join_leave_and_owner_cannot_leave(store: InMemorySocialStore) -> 
 
 def test_group_moderator_promote_and_demote(store: InMemorySocialStore) -> None:
     """The owner can promote a member to moderator and back; a non-owner cannot."""
-    service = GroupService(store)
+    service = GroupService(store, is_registered=_always_registered)
     group = service.create(
         owner=_PAYER, name="promo-group", description="", settlement_tx_id="TX-G4"
     )
@@ -876,9 +902,11 @@ def test_group_moderator_promote_and_demote(store: InMemorySocialStore) -> None:
 
 def test_group_hide_post_is_scoped_to_the_group_feed_only(store: InMemorySocialStore) -> None:
     """An owner hiding a post from their group's feed does NOT delete it or hide it on the author's own feed (design doc section 2.7)."""
-    group_service_ = GroupService(store)
+    group_service_ = GroupService(store, is_registered=_always_registered)
     post_service_ = PostService(
-        store, membership_lookup=lambda gid, w: group_service_.is_member(gid, w)
+        store,
+        membership_lookup=lambda gid, w: group_service_.is_member(gid, w),
+        is_registered=_always_registered,
     )
     group_service_._post_service = post_service_
 
@@ -912,7 +940,7 @@ def test_group_hide_post_is_scoped_to_the_group_feed_only(store: InMemorySocialS
 
 def test_group_remove_member_cannot_remove_the_owner(store: InMemorySocialStore) -> None:
     """An owner/moderator can remove a plain member but never the owner."""
-    service = GroupService(store)
+    service = GroupService(store, is_registered=_always_registered)
     group = service.create(
         owner=_PAYER, name="remove-test", description="", settlement_tx_id="TX-G6"
     )
@@ -934,15 +962,19 @@ def test_home_feed_route_truncates_and_reports_truncated_to(
     store: InMemorySocialStore, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """With feed_fanout_limit set below the caller's actual follow count, GET /feed only scans that many followees and reports truncated_to -- it does not silently pretend the feed is exhaustive."""
-    monkeypatch.setattr(social_routes, "post_service", PostService(store))
-    graph = GraphService(store)
+    monkeypatch.setattr(
+        social_routes, "post_service", PostService(store, is_registered=_always_registered)
+    )
+    graph = GraphService(store, is_registered=_always_registered)
     monkeypatch.setattr(social_routes, "graph_service", graph)
-    monkeypatch.setattr(social_routes, "group_service", GroupService(store))
+    monkeypatch.setattr(
+        social_routes, "group_service", GroupService(store, is_registered=_always_registered)
+    )
     monkeypatch.setattr(settings, "x402_social_feed_fanout_limit", 2)
 
     caller = _PAYER
     followees = [encode_address(bytes([10 + i]) + bytes(31)) for i in range(4)]
-    post_service_ = PostService(store)
+    post_service_ = PostService(store, is_registered=_always_registered)
     for i, followee in enumerate(followees):
         graph.follow(follower=caller, followee=followee)
         post_service_.create(
@@ -972,16 +1004,20 @@ def test_home_feed_route_reports_no_truncation_when_the_cap_does_not_bite(
     store: InMemorySocialStore, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """With feed_fanout_limit comfortably above the caller's actual follow count, truncated_to is None."""
-    monkeypatch.setattr(social_routes, "post_service", PostService(store))
-    graph = GraphService(store)
+    monkeypatch.setattr(
+        social_routes, "post_service", PostService(store, is_registered=_always_registered)
+    )
+    graph = GraphService(store, is_registered=_always_registered)
     monkeypatch.setattr(social_routes, "graph_service", graph)
-    monkeypatch.setattr(social_routes, "group_service", GroupService(store))
+    monkeypatch.setattr(
+        social_routes, "group_service", GroupService(store, is_registered=_always_registered)
+    )
     monkeypatch.setattr(settings, "x402_social_feed_fanout_limit", 50)
 
     caller = _PAYER
     followee = _OTHER_PAYER
     graph.follow(follower=caller, followee=followee)
-    PostService(store).create(
+    PostService(store, is_registered=_always_registered).create(
         author=followee, body_md="only post", tags=[], group_id="", settlement_tx_id="TX-HF-X"
     )
 
@@ -1107,7 +1143,9 @@ def test_post_create_route_end_to_end(
     store: InMemorySocialStore, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """POST /posts stores the post under the payer's wallet; GET /posts/{id} reads it back in both json and prose formats."""
-    monkeypatch.setattr(social_routes, "post_service", PostService(store))
+    monkeypatch.setattr(
+        social_routes, "post_service", PostService(store, is_registered=_always_registered)
+    )
     monkeypatch.setattr(
         social_routes,
         "require_paid_request",
@@ -1181,8 +1219,10 @@ def test_react_route_second_attempt_is_409_with_settlement_headers_and_no_refund
     store: InMemorySocialStore, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Route-level mirror of the reaction caller-fault contract: second reaction settles but is refused, payment kept, no refund attempted."""
-    monkeypatch.setattr(social_routes, "post_service", PostService(store))
-    post = PostService(store).create(
+    monkeypatch.setattr(
+        social_routes, "post_service", PostService(store, is_registered=_always_registered)
+    )
+    post = PostService(store, is_registered=_always_registered).create(
         author=_PAYER, body_md="react to me", tags=[], group_id="", settlement_tx_id="TX-RP1"
     )
 
@@ -1225,3 +1265,543 @@ def test_react_route_second_attempt_is_409_with_settlement_headers_and_no_refund
     assert second.headers.get("PAYMENT-RESPONSE") == "ok"
     assert fulfilled == [("TX-R-A", "x402-social-react")]
     assert refund_calls == []
+
+
+# =============================================================================
+# 2026-security-audit regression tests
+# =============================================================================
+
+
+# --------------------------------------------------------------------------- #
+# Finding 1 (HIGH): a deleted group post must stop serving its body via
+# EVERY read surface -- GET /posts/{id}, the author feed, the group feed,
+# and the home feed -- in BOTH output formats, not just the canonical row
+# and the author's own feed.
+# --------------------------------------------------------------------------- #
+@pytest.mark.usefixtures("fake_redis")
+def test_deleted_group_post_disappears_from_every_read_surface_both_formats(
+    store: InMemorySocialStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A deleted group post must vanish from GET /posts/{id}, the author feed, the group feed, and the home feed -- json and prose alike."""
+    group_service_ = GroupService(store, is_registered=_always_registered)
+    post_service_ = PostService(
+        store,
+        membership_lookup=lambda gid, w: group_service_.is_member(gid, w),
+        is_registered=_always_registered,
+    )
+    group_service_._post_service = post_service_
+    monkeypatch.setattr(social_routes, "post_service", post_service_)
+    monkeypatch.setattr(social_routes, "group_service", group_service_)
+    monkeypatch.setattr(
+        social_routes, "graph_service", GraphService(store, is_registered=_always_registered)
+    )
+
+    group = group_service_.create(
+        owner=_PAYER, name="deletion-test", description="", settlement_tx_id="TX-DG1"
+    )
+    post = post_service_.create(
+        author=_PAYER,
+        body_md="secret sauce",
+        tags=[],
+        group_id=group.group_id,
+        settlement_tx_id="TX-DP1",
+    )
+
+    # The root bug: before the fix, the x402_social_group_feed projection
+    # row was never flipped at all. Assert that directly at the store level.
+    deleted = post_service_.delete(post.post_id, wallet=_PAYER)
+    assert deleted.deleted is True
+    group_feed_row = store.list_group_feed(group.group_id, limit=10)[0]
+    assert group_feed_row.post_id == post.post_id
+    assert group_feed_row.deleted is True
+
+    # GET /posts/{id}: 404 in both formats, body never reaches the response.
+    for fmt in ("json", "prose"):
+        response = social_routes.x402_social_post_detail(
+            _request(
+                method="GET",
+                path_params={"post_id": post.post_id},
+                query={"format": fmt},
+                path=f"/api/v1/x402/social/posts/{post.post_id}",
+            )
+        )
+        assert response.status_code == 404
+        assert "secret sauce" not in response.description
+
+    # GET /agents/{wallet}/feed (author feed): excluded, both formats.
+    for fmt in ("json", "prose"):
+        response = social_routes.x402_social_author_feed(
+            _request(
+                method="GET",
+                path_params={"wallet": _PAYER},
+                query={"format": fmt},
+                path=f"/api/v1/x402/social/agents/{_PAYER}/feed",
+            )
+        )
+        if fmt == "json":
+            assert isinstance(response, dict)
+            assert response["posts"] == []
+        else:
+            assert "secret sauce" not in response.description
+
+    # GET /groups/{id}/feed: excluded, both formats.
+    for fmt in ("json", "prose"):
+        response = social_routes.x402_social_group_feed(
+            _request(
+                method="GET",
+                path_params={"group_id": group.group_id},
+                query={"format": fmt},
+                path=f"/api/v1/x402/social/groups/{group.group_id}/feed",
+            )
+        )
+        if fmt == "json":
+            assert isinstance(response, dict)
+            assert response["posts"] == []
+        else:
+            assert "secret sauce" not in response.description
+
+    # GET /feed (home feed, session-authenticated): excluded. The payer is
+    # already the group's owner/member, which is enough fan-out to reach
+    # this post via the group half of the merge if it were not filtered.
+    token, _expires = social_routes.issue_session_token(_PAYER)
+    home = social_routes.x402_social_home_feed(
+        _request(
+            method="GET",
+            path="/api/v1/x402/social/feed",
+            headers={"authorization": f"Bearer {token}"},
+        )
+    )
+    assert isinstance(home, dict)
+    assert home["posts"] == []
+
+
+# --------------------------------------------------------------------------- #
+# Finding 2 (MEDIUM-HIGH): session-issuance griefing lockout.
+# --------------------------------------------------------------------------- #
+@pytest.mark.usefixtures("fake_redis")
+def test_garbage_nonce_attempt_does_not_invalidate_the_real_pending_challenge() -> None:
+    """A garbage /auth/session attempt with a WRONG nonce for wallet A must not consume or clobber A's real pending challenge -- A can still complete a real login afterward."""
+    sk, addr = account.generate_account()
+    challenge = session_service.issue_challenge(addr)
+
+    attacker_attempt = session_service.verify_challenge_signature(
+        wallet=addr,
+        nonce="totally-wrong-nonce-the-attacker-guessed",
+        proof_method="signed_bytes",
+        signature_b64="AA==",
+    )
+    assert attacker_attempt is False
+
+    # The real pending challenge must still be there and redeemable.
+    sig = util.sign_bytes(challenge.signing_message.encode(), sk)
+    real_attempt = session_service.verify_challenge_signature(
+        wallet=addr, nonce=challenge.nonce, proof_method="signed_bytes", signature_b64=sig
+    )
+    assert real_attempt is True
+
+
+@pytest.mark.usefixtures("fake_redis")
+def test_attacker_garbage_session_floods_never_lock_the_victims_own_login_out() -> None:
+    """Flooding POST /auth/session with garbage naming the victim wallet (varying attacker IPs, so per-IP limiting is not what is under test) must never 429 the victim's own subsequent real login -- the per-wallet axis was removed from the shared issuance limiter and replaced by a failure-only counter that a SUCCESSFUL login never touches (finding 2, 2026-security-audit)."""
+    sk, addr = account.generate_account()
+
+    challenge_response = social_routes.x402_social_auth_challenge(
+        _request(
+            body=json.dumps({"wallet": addr}).encode(),
+            path="/api/v1/x402/social/auth/challenge",
+            headers={"x-real-ip": "198.51.100.1"},
+        )
+    )
+    assert isinstance(challenge_response, dict)
+
+    limit = settings.x402_social_session_rate_limit_per_hour
+    for i in range(limit + 5):
+        response = social_routes.x402_social_auth_session(
+            _request(
+                body=json.dumps(
+                    {
+                        "wallet": addr,
+                        "nonce": "garbage-nonce",
+                        "proof_method": "signed_bytes",
+                        "signature_b64": "AA==",
+                    }
+                ).encode(),
+                path="/api/v1/x402/social/auth/session",
+                # Vary the attacker's own IP so the per-IP limiter (a
+                # separate, legitimate guard) does not itself start
+                # refusing the attacker's requests before the per-wallet
+                # scenario this test targets is fully exercised.
+                headers={"x-real-ip": f"203.0.113.{i % 250 + 1}"},
+            )
+        )
+        assert response.status_code in (401, 429)
+
+    # The victim's OWN real login, from yet another IP, must still succeed.
+    sig = util.sign_bytes(challenge_response["signing_message"].encode(), sk)
+    login_response = social_routes.x402_social_auth_session(
+        _request(
+            body=json.dumps(
+                {
+                    "wallet": addr,
+                    "nonce": challenge_response["nonce"],
+                    "proof_method": "signed_bytes",
+                    "signature_b64": sig,
+                }
+            ).encode(),
+            path="/api/v1/x402/social/auth/session",
+            headers={"x-real-ip": "192.0.2.200"},
+        )
+    )
+    assert isinstance(login_response, dict)
+    assert login_response["token"]
+
+    # The victim's own /auth/challenge is unaffected too -- the per-wallet
+    # axis was removed from challenge issuance entirely.
+    second_challenge = social_routes.x402_social_auth_challenge(
+        _request(
+            body=json.dumps({"wallet": addr}).encode(),
+            path="/api/v1/x402/social/auth/challenge",
+            headers={"x-real-ip": "192.0.2.201"},
+        )
+    )
+    assert isinstance(second_challenge, dict)
+
+
+@pytest.mark.usefixtures("fake_redis")
+def test_session_verification_failed_only_counts_failures_not_successes() -> None:
+    """Unit-level check on the replacement rate-limit primitive itself: a failed verification increments the per-wallet counter; nothing about a successful login ever calls it (enforced by x402_social_auth_session's own control flow, exercised above)."""
+    addr = encode_address(bytes([9]) + bytes(31))
+    limit = settings.x402_social_session_rate_limit_per_hour
+    for _ in range(limit):
+        assert social_rate_limit.session_verification_failed(wallet=addr) is False
+    assert social_rate_limit.session_verification_failed(wallet=addr) is True
+
+
+# --------------------------------------------------------------------------- #
+# Finding 3 (MEDIUM): group-name LWT claim compensation on partial failure.
+# --------------------------------------------------------------------------- #
+class _FailingInsertGroupStore(InMemorySocialStore):
+    """Wins the name-claim LWT normally, then always fails the next write -- simulates insert_group blowing up after try_claim_group_name already won."""
+
+    def insert_group(self, item: StoredGroup) -> None:  # type: ignore[override]
+        del item
+        raise RuntimeError("simulated insert_group failure")
+
+
+def test_group_create_releases_the_name_claim_on_a_later_failure() -> None:
+    """If insert_group raises AFTER the name-claim LWT wins, the claimed name must be released, not permanently stuck (finding 3, 2026-security-audit)."""
+    store_ = _FailingInsertGroupStore()
+    service = GroupService(store_, is_registered=_always_registered)
+
+    with pytest.raises(RuntimeError):
+        service.create(
+            owner=_PAYER, name="claim-test", description="", settlement_tx_id="TX-G-FAIL"
+        )
+
+    # The name claim was released -- a fresh claim for the SAME normalized
+    # name now succeeds, proving the row is gone, not permanently stuck.
+    assert (
+        store_.try_claim_group_name(name_norm="claim-test", group_id="some-other-group-id") is True
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Finding 4 (MEDIUM): registration must actually be required for every paid
+# action -- post, react, comment, follow, group-create, group-join.
+# --------------------------------------------------------------------------- #
+def test_unregistered_wallet_is_refused_for_every_gated_action(store: InMemorySocialStore) -> None:
+    """Mirrors not_group_member's shape: caller-fault, 403, payment already settled (checked inside the service, the same POST-gate position as not_group_member)."""
+
+    def _never_registered(_wallet: str) -> bool:
+        return False
+
+    post_service_ = PostService(store, is_registered=_never_registered)
+    group_service_ = GroupService(store, is_registered=_never_registered)
+    graph_service_ = GraphService(store, is_registered=_never_registered)
+
+    with pytest.raises(SocialError) as exc_info:
+        post_service_.create(
+            author=_PAYER, body_md="hi", tags=[], group_id="", settlement_tx_id="TX-NR1"
+        )
+    assert exc_info.value.code == "not_registered"
+    assert exc_info.value.http_status == 403
+
+    # Seed a post/group via services that DO treat the actor as registered,
+    # so react/comment/join can be tested against something real.
+    registered_post_service = PostService(store, is_registered=_always_registered)
+    post = registered_post_service.create(
+        author=_OTHER_PAYER, body_md="seed", tags=[], group_id="", settlement_tx_id="TX-NR-SEED"
+    )
+
+    with pytest.raises(SocialError) as exc_info:
+        post_service_.react(
+            post_id=post.post_id, wallet=_PAYER, value=REACTION_UP, settlement_tx_id="TX-NR2"
+        )
+    assert exc_info.value.code == "not_registered"
+
+    with pytest.raises(SocialError) as exc_info:
+        post_service_.add_comment(
+            post_id=post.post_id, author=_PAYER, body_md="hey", settlement_tx_id="TX-NR3"
+        )
+    assert exc_info.value.code == "not_registered"
+
+    with pytest.raises(SocialError) as exc_info:
+        graph_service_.follow(follower=_PAYER, followee=_OTHER_PAYER)
+    assert exc_info.value.code == "not_registered"
+
+    with pytest.raises(SocialError) as exc_info:
+        group_service_.create(
+            owner=_PAYER, name="nr-group", description="", settlement_tx_id="TX-NR4"
+        )
+    assert exc_info.value.code == "not_registered"
+
+    registered_group_service = GroupService(store, is_registered=_always_registered)
+    group = registered_group_service.create(
+        owner=_OTHER_PAYER, name="nr-seed-group", description="", settlement_tx_id="TX-NR-SEEDG"
+    )
+    with pytest.raises(SocialError) as exc_info:
+        group_service_.join(group_id=group.group_id, wallet=_PAYER, settlement_tx_id="TX-NR5")
+    assert exc_info.value.code == "not_registered"
+
+
+@pytest.mark.usefixtures("fake_redis")
+def test_post_create_route_refuses_an_unregistered_payer_payment_kept_no_refund_attempted(
+    store: InMemorySocialStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Route-level mirror of the not_group_member route test's shape: settles but is refused, payment kept, no refund attempted."""
+    monkeypatch.setattr(
+        social_routes, "post_service", PostService(store, is_registered=lambda _w: False)
+    )
+    fulfilled: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        social_routes,
+        "mark_fulfilled",
+        lambda txid, *, resource: fulfilled.append((txid, resource)),
+    )
+    refund_calls: list[dict[str, object]] = []
+    monkeypatch.setattr(payment_service, "send_refund", lambda **kw: refund_calls.append(kw))
+    monkeypatch.setattr(
+        social_routes,
+        "require_paid_request",
+        lambda *_a, **_kw: _settled_result(payer=_PAYER, txid="TX-NR-ROUTE"),
+    )
+
+    response = social_routes.x402_social_post_create(
+        _request(body=json.dumps({"body_md": "hello"}).encode(), path="/api/v1/x402/social/posts")
+    )
+    assert response.status_code == 403
+    body = json.loads(response.description)
+    assert body["error"]["code"] == "not_registered"
+    assert response.headers.get("PAYMENT-RESPONSE") == "ok"
+    assert fulfilled == []
+    assert refund_calls == []
+
+
+# --------------------------------------------------------------------------- #
+# Finding 5 (MEDIUM-LOW): malformed post_id must not 500 in production, and
+# minted ids must not embed this host's real MAC address.
+# --------------------------------------------------------------------------- #
+def test_cassandra_store_treats_a_malformed_post_id_as_not_found_not_a_500(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """get_post/list_comments/get_reaction_totals on a non-UUID string resolve to "not found" WITHOUT ever touching Cassandra -- the production path this repro (`GET /posts/not-a-uuid`) would otherwise 500 on."""
+
+    def _must_not_reach_cassandra() -> None:
+        raise AssertionError("must not reach Cassandra for a malformed id")
+
+    monkeypatch.setattr(
+        social_cassandra_store, "get_cassandra_session", lambda: _must_not_reach_cassandra()
+    )
+    cassandra_store = CassandraSocialStore()
+
+    assert cassandra_store.get_post("not-a-uuid") is None
+    assert cassandra_store.list_comments("not-a-uuid", limit=10) == []
+    assert cassandra_store.get_reaction_totals("not-a-uuid") == ReactionTotals()
+
+
+def test_new_post_or_comment_id_does_not_embed_a_real_mac_address() -> None:
+    """A minted post/comment id must have the multicast bit set on its node field -- the standard RFC 4122 marker that the node is NOT a real IEEE 802 MAC address, unlike a bare uuid.uuid1()."""
+    generated = uuid_module.UUID(_new_post_or_comment_id())
+    assert generated.version == 1
+    assert generated.node & 0x010000000000 != 0
+
+
+# --------------------------------------------------------------------------- #
+# Finding 6 (LOW-MEDIUM): home feed must dedupe by post_id.
+# --------------------------------------------------------------------------- #
+def test_home_feed_dedupes_a_post_reachable_via_both_a_direct_follow_and_a_shared_group(
+    store: InMemorySocialStore,
+) -> None:
+    """A post whose author is BOTH directly followed AND a fellow group member must appear exactly once in the merged home feed, not twice."""
+    group_service_ = GroupService(store, is_registered=_always_registered)
+    post_service_ = PostService(
+        store,
+        membership_lookup=lambda gid, w: group_service_.is_member(gid, w),
+        is_registered=_always_registered,
+    )
+    group = group_service_.create(
+        owner=_OTHER_PAYER, name="dedup-test", description="", settlement_tx_id="TX-DD1"
+    )
+    group_service_.join(group_id=group.group_id, wallet=_PAYER, settlement_tx_id="TX-DD-J1")
+
+    post = post_service_.create(
+        author=_OTHER_PAYER,
+        body_md="one post, two paths",
+        tags=[],
+        group_id=group.group_id,
+        settlement_tx_id="TX-DD2",
+    )
+
+    feed = post_service_.home_feed(followees=[_OTHER_PAYER], groups=[group.group_id], limit=10)
+    assert [p.post_id for p in feed] == [post.post_id]
+
+
+# --------------------------------------------------------------------------- #
+# Finding 7 (LOW-MEDIUM): trending reads must be bounded per bucket, and
+# still exactly correct for the top-N result.
+# --------------------------------------------------------------------------- #
+@pytest.mark.usefixtures("fake_redis")
+def test_trending_read_is_bounded_per_bucket_and_still_produces_a_correct_top_n(
+    fake_redis: _FakeRedis,
+) -> None:
+    """A bucket with far more than _BUCKET_TOP_N members must be read with a bounded zrevrange, and the merged top-N must still be exactly correct."""
+    now = datetime.now(tz=UTC)
+    key = f"{trending_service._TOPICS_PREFIX}{now.strftime('%Y%m%d%H')}"
+    bucket_top_n = trending_service._BUCKET_TOP_N
+    zset = fake_redis.zsets.setdefault(key, {})
+    # Far more members than _BUCKET_TOP_N, distinct scores, all in the
+    # current (undecayed) hour.
+    for i in range(bucket_top_n + 50):
+        zset[f"tag-{i}"] = float(i)
+
+    calls: list[tuple[int, int]] = []
+    original_zrevrange = fake_redis.zrevrange
+
+    def _spy(key_: str, start: int, end: int, withscores: bool = False) -> object:
+        calls.append((start, end))
+        return original_zrevrange(key_, start, end, withscores=withscores)
+
+    fake_redis.zrevrange = _spy  # type: ignore[method-assign]
+
+    top = trending_service.top_topics(limit=5, now=now)
+
+    # Bounded: every call asked for at most _BUCKET_TOP_N members, never the
+    # full (bucket_top_n + 50)-member set.
+    assert calls
+    assert all((end - start + 1) == bucket_top_n for start, end in calls)
+
+    # Still exactly correct: the highest-scored tags are tag-(N+49) down to
+    # tag-(N+45), all comfortably within the top _BUCKET_TOP_N of the bucket.
+    top_n = bucket_top_n + 50 - 1
+    assert [tag for tag, _score in top] == [f"tag-{top_n - i}" for i in range(5)]
+
+
+# --------------------------------------------------------------------------- #
+# Finding 8 (LOW): a self-follow must not make a wallet its own friend.
+# --------------------------------------------------------------------------- #
+def test_self_follow_is_refused_and_cannot_make_a_wallet_its_own_friend(
+    store: InMemorySocialStore,
+) -> None:
+    """A self-follow is refused as caller-fault, never silently allowed to make a wallet its own mutual-follow "friend"."""
+    service = GraphService(store, is_registered=_always_registered)
+    with pytest.raises(SocialError) as exc_info:
+        service.follow(follower=_PAYER, followee=_PAYER)
+    assert exc_info.value.code == "cannot_follow_self"
+    assert exc_info.value.http_status == 400
+    assert service.friends(_PAYER, limit=10) == []
+    assert service.following(_PAYER, limit=10) == []
+
+
+# --------------------------------------------------------------------------- #
+# Finding 9 (LOW, defense in depth): profile and group text fields must
+# reject embedded HTML too, not just post/comment bodies.
+# --------------------------------------------------------------------------- #
+def test_validate_profile_fields_rejects_embedded_html_in_name() -> None:
+    """A profile name containing embedded HTML is rejected the same way a post body is."""
+    with pytest.raises(SocialError) as exc_info:
+        validate_profile_fields(
+            name="<img src=x onerror=alert(1)>",
+            bio="",
+            mission="",
+            location="",
+            interests=[],
+            emoji="",
+        )
+    assert exc_info.value.code == "embedded_html_rejected"
+
+
+def test_validate_profile_fields_rejects_embedded_html_in_bio() -> None:
+    """A profile bio containing embedded HTML is rejected."""
+    with pytest.raises(SocialError) as exc_info:
+        validate_profile_fields(
+            name="AgentX",
+            bio="hi <script>evil()</script>",
+            mission="",
+            location="",
+            interests=[],
+            emoji="",
+        )
+    assert exc_info.value.code == "embedded_html_rejected"
+
+
+def test_validate_profile_fields_rejects_embedded_html_in_mission_and_location() -> None:
+    """A profile mission or location field containing embedded HTML is rejected."""
+    with pytest.raises(SocialError) as exc_info:
+        validate_profile_fields(
+            name="AgentX",
+            bio="",
+            mission="<script>x</script>",
+            location="",
+            interests=[],
+            emoji="",
+        )
+    assert exc_info.value.code == "embedded_html_rejected"
+
+    with pytest.raises(SocialError) as exc_info:
+        validate_profile_fields(
+            name="AgentX",
+            bio="",
+            mission="",
+            location="<script>x</script>",
+            interests=[],
+            emoji="",
+        )
+    assert exc_info.value.code == "embedded_html_rejected"
+
+
+def test_validate_profile_fields_rejects_embedded_html_in_an_interest_entry() -> None:
+    """A single interests-list entry containing embedded HTML is rejected."""
+    with pytest.raises(SocialError) as exc_info:
+        validate_profile_fields(
+            name="AgentX",
+            bio="",
+            mission="",
+            location="",
+            interests=["<script>x</script>"],
+            emoji="",
+        )
+    assert exc_info.value.code == "embedded_html_rejected"
+
+
+def test_group_create_rejects_embedded_html_in_name_and_description(
+    store: InMemorySocialStore,
+) -> None:
+    """A group name or description containing embedded HTML is rejected."""
+    service = GroupService(store, is_registered=_always_registered)
+    with pytest.raises(SocialError) as exc_info:
+        service.create(
+            owner=_PAYER,
+            name="<script>evil()</script>",
+            description="",
+            settlement_tx_id="TX-HTML1",
+        )
+    assert exc_info.value.code == "embedded_html_rejected"
+
+    with pytest.raises(SocialError) as exc_info:
+        service.create(
+            owner=_PAYER,
+            name="safe-name",
+            description="<script>evil()</script>",
+            settlement_tx_id="TX-HTML2",
+        )
+    assert exc_info.value.code == "embedded_html_rejected"

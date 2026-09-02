@@ -71,14 +71,18 @@ class SocialStore(Protocol):
         ...
 
     def mark_post_deleted(self, item: StoredPost) -> None:
-        """Set `deleted=true` on the canonical row and the author's feed projection row for this post.
+        """Set `deleted=true` on the canonical row, the author's feed projection row, and (if `item.group_id` is set) the group feed projection row for this post.
 
-        `item` must be the post as already read (its author/created_at
-        identify the projection row's primary key) -- an UPDATE ... IF
-        EXISTS on each, never a full re-INSERT, so a post whose row somehow
-        no longer exists is never resurrected as a phantom (same "IF EXISTS
-        on a known key never upserts a phantom row" precedent as the promo
-        code deactivation, migration 100).
+        `item` must be the post as already read (its author/group_id/
+        created_at identify each projection row's primary key) -- an
+        UPDATE ... IF EXISTS on each, never a full re-INSERT, so a post
+        whose row somehow no longer exists is never resurrected as a
+        phantom (same "IF EXISTS on a known key never upserts a phantom
+        row" precedent as the promo code deactivation, migration 100). The
+        group feed row is included so a deleted group post stops serving
+        its body via GET /groups/{id}/feed and the group half of GET /feed
+        (finding 1, 2026-security-audit) -- the author's own feed row alone
+        is not enough for a group post.
         """
         ...
 
@@ -172,6 +176,18 @@ class SocialStore(Protocol):
 
         Called ONLY after try_claim_group_name has already won the name for
         this group_id -- this method itself does not re-check the claim.
+        """
+        ...
+
+    def release_group_name(self, *, name_norm: str, group_id: str) -> None:
+        """Best-effort compensating release of a name claim this SAME group_id won, used ONLY when group creation fails after the LWT claim but before the group is fully stored (finding 3, 2026-security-audit).
+
+        Deletes the x402_social_group_names row for `name_norm` iff it still
+        maps to `group_id` -- never a different group's legitimate claim on
+        the same normalized name. A no-op if the row was already released or
+        never matched. Callers treat this as best-effort: if the release
+        itself fails, they log a warning and re-raise the ORIGINAL failure,
+        never masking it.
         """
         ...
 

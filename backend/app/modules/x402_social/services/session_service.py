@@ -56,8 +56,20 @@ class SocialChallenge:
     expires_at: int
 
 
-def _challenge_key(wallet: str) -> str:
-    return f"{_CHALLENGE_KEY_PREFIX}{wallet}"
+def _challenge_key(wallet: str, nonce: str) -> str:
+    """Keyed by (wallet, nonce), not wallet alone (finding 2, 2026-security-audit).
+
+    A wallet-only key meant a `POST /auth/session` attempt carrying ANY
+    nonce for a given wallet -- garbage included, no proof of key
+    possession required -- would GETDEL whatever real challenge that
+    wallet's owner had just minted, so an attacker could grief a victim out
+    of their own in-flight login for free. Keying by the nonce too means an
+    attacker who does not know the real (secrets.token_urlsafe(24),
+    effectively unguessable) nonce can never address the real challenge's
+    key at all -- a wrong-nonce attempt simply misses, leaving the
+    legitimate pending challenge untouched.
+    """
+    return f"{_CHALLENGE_KEY_PREFIX}{wallet}:{nonce}"
 
 
 def _session_key(token: str) -> str:
@@ -95,7 +107,7 @@ def issue_challenge(wallet: str) -> SocialChallenge:
     )
     try:
         get_redis().setex(
-            _challenge_key(wallet),
+            _challenge_key(wallet, nonce),
             _CHALLENGE_TTL_SECONDS,
             serialization.dumps(
                 {
@@ -120,18 +132,23 @@ def verify_challenge_signature(
     signed_txn_b64: str | None = None,
     arc0060: Arc0060Proof | None = None,
 ) -> bool:
-    """Consume the pending challenge for `wallet` and verify the signature over it.
+    """Consume the pending challenge for `(wallet, nonce)` and verify the signature over it.
 
     GETDEL (single-use: two concurrent logins cannot both redeem it, same as
-    kya.consent_challenge.consume_consent_challenge). Mirrors
-    AuthService.verify_nonce_signature's exact proof_method dispatch -- same
-    four verifiers, same "any failure is a flat False", no new cryptography.
+    kya.consent_challenge.consume_consent_challenge) keyed by BOTH wallet
+    and nonce (finding 2, 2026-security-audit -- see _challenge_key's own
+    docstring): a request carrying a wrong/garbage nonce for `wallet` simply
+    misses the key and returns False here, WITHOUT touching that wallet's
+    real pending challenge -- a caller who does not know the real nonce can
+    never consume or clobber it. Mirrors AuthService.verify_nonce_signature's
+    exact proof_method dispatch -- same four verifiers, same "any failure is
+    a flat False", no new cryptography.
 
     Raises SessionStoreError on a Redis failure (fail closed: a session must
     not open on an unconfirmed store).
     """
     try:
-        raw = get_redis().getdel(_challenge_key(wallet))
+        raw = get_redis().getdel(_challenge_key(wallet, nonce))
     except Exception as exc:
         raise SessionStoreError("session challenge store unavailable") from exc
     if not raw:
@@ -140,6 +157,10 @@ def verify_challenge_signature(
         stored = serialization.loads(raw)
     except Exception:
         return False
+    # Belt-and-suspenders: the key already scopes this lookup to `nonce`, so
+    # this can only fail on stored-payload corruption, never a real
+    # nonce mismatch -- kept as a cheap defensive check, not the security
+    # boundary (the key itself is).
     if stored.get("nonce") != nonce:
         return False
     if int(stored.get("expires_at", 0)) < int(time.time()):

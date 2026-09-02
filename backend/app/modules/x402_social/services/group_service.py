@@ -10,6 +10,8 @@ concept that does not exist in this codebase yet.
 from __future__ import annotations
 
 import hashlib
+import logging
+from collections.abc import Callable
 from dataclasses import replace
 from datetime import UTC, datetime
 
@@ -25,25 +27,40 @@ from app.modules.x402_social.models.domain import (
     StoredGroup,
     StoredMembership,
     StoredPost,
+    not_registered_error,
 )
+from app.modules.x402_social.services.markdown_guard import reject_embedded_html
 from app.modules.x402_social.services.post_service import PostService
 from app.modules.x402_social.stores.base import SocialStore
 from app.modules.x402_social.stores.factory import get_social_store
 
+# wallet -> does this wallet have a registered profile. Bound in
+# api/routes.py to profile_service.ProfileService.get(...) is not None --
+# same decoupling precedent as post_service.IsRegisteredLookup (finding 4,
+# 2026-security-audit).
+IsRegisteredLookup = Callable[[str], bool]
+
 
 def normalize_group_name(raw: str) -> str:
-    """Trim, validate, and case-fold a group name for both display and the name-claim key.
+    """Trim, validate, HTML-reject, and case-fold a group name for both display and the name-claim key.
 
     Case-folded because two groups differing only by case would visually
     collide in every listing -- the LWT claim must consider "DeFi-Signals"
-    and "defi-signals" the same name.
+    and "defi-signals" the same name. The HTML-reject (finding 9,
+    2026-security-audit) extends the same defense-in-depth coverage
+    post/comment bodies and profile fields already have to a group name --
+    it flows into every JSON response and the prose template renderer too.
     """
     name = raw.strip()
     if not name or len(name) > MAX_GROUP_NAME_LEN:
         raise SocialError(
             "invalid_request", f"name must be 1-{MAX_GROUP_NAME_LEN} characters", http_status=400
         )
+    reject_embedded_html(name, field_name="name")
     return name
+
+
+logger = logging.getLogger(__name__)
 
 
 def group_id_for(name_norm: str) -> str:
@@ -59,11 +76,22 @@ class GroupService:
     """Creates, joins, leaves, and moderates groups."""
 
     def __init__(
-        self, store: SocialStore | None = None, *, post_service: PostService | None = None
+        self,
+        store: SocialStore | None = None,
+        *,
+        post_service: PostService | None = None,
+        is_registered: IsRegisteredLookup | None = None,
     ) -> None:
-        """Take explicit collaborators for tests; otherwise resolve the configured ones lazily."""
+        """Take explicit collaborators for tests; otherwise resolve the configured ones lazily.
+
+        `is_registered` has no lazy default: without one, `create`/`join`
+        always refuse as not_registered (fail closed) -- same contract as
+        PostService's own `is_registered` seam (finding 4,
+        2026-security-audit).
+        """
         self._store = store
         self._post_service = post_service
+        self._is_registered = is_registered
 
     @property
     def store(self) -> SocialStore:
@@ -92,10 +120,29 @@ class GroupService:
         Raises SocialError("group_name_taken", ..., 409) if the LWT name
         claim loses -- caller-fault, payment kept, no refund (design doc
         section 2.6: "a name collision after paying is caller-fault").
+
+        If the name claim WINS but a later step (insert_group,
+        upsert_membership) raises, this is OUR failure, not the caller's --
+        run_with_refund's generic-exception path will attempt a refund, same
+        as any other product-write failure. Without cleanup, the claimed
+        name would otherwise be permanently unusable by anyone: every future
+        attempt to claim it settles a real payment and gets refused as
+        group_name_taken even though nobody actually owns it (finding 3,
+        2026-security-audit). So on any exception past this point, this
+        method best-effort releases the name claim (never masking the
+        original exception -- a failed release is logged and the original
+        exception still propagates) before re-raising.
+
+        Raises SocialError("not_registered", ..., 403) if `owner` has no
+        registered profile (finding 4, 2026-security-audit) -- checked
+        first, before the name-claim LWT is ever attempted.
         """
+        if self._is_registered is None or not self._is_registered(owner):
+            raise not_registered_error()
         clean_name = normalize_group_name(name)
         name_norm = clean_name.lower()
         clean_description = description.strip()[:MAX_GROUP_DESCRIPTION_LEN]
+        reject_embedded_html(clean_description, field_name="description")
         group_id = group_id_for(name_norm)
         if not self.store.try_claim_group_name(name_norm=name_norm, group_id=group_id):
             raise SocialError(
@@ -114,16 +161,30 @@ class GroupService:
             created_at_epoch=epoch,
             settlement_tx_id=settlement_tx_id,
         )
-        self.store.insert_group(group)
-        self.store.upsert_membership(
-            StoredMembership(
-                group_id=group_id,
-                wallet=owner,
-                role=GROUP_ROLE_OWNER,
-                joined_at_epoch=epoch,
-                settlement_tx_id=settlement_tx_id,
+        try:
+            self.store.insert_group(group)
+            self.store.upsert_membership(
+                StoredMembership(
+                    group_id=group_id,
+                    wallet=owner,
+                    role=GROUP_ROLE_OWNER,
+                    joined_at_epoch=epoch,
+                    settlement_tx_id=settlement_tx_id,
+                )
             )
-        )
+        except Exception:
+            try:
+                self.store.release_group_name(name_norm=name_norm, group_id=group_id)
+            except Exception:
+                logger.warning(
+                    "x402 social group create: failed to release name claim %r for "
+                    "group_id=%s after a create failure -- this name may now be "
+                    "permanently stuck; manual cleanup may be required",
+                    name_norm,
+                    group_id,
+                    exc_info=True,
+                )
+            raise
         return group
 
     def get(self, group_id: str) -> StoredGroup | None:
@@ -166,7 +227,13 @@ class GroupService:
         Raises SocialError("not_found") if the group does not exist -- the
         caller checks this BEFORE the payment gate too (a free 404), this
         is the defense-in-depth re-check.
+
+        Raises SocialError("not_registered", ..., 403) if `wallet` has no
+        registered profile (finding 4, 2026-security-audit) -- checked
+        first.
         """
+        if self._is_registered is None or not self._is_registered(wallet):
+            raise not_registered_error()
         group = self.store.get_group(group_id)
         if group is None:
             raise SocialError("not_found", "No group with that id", http_status=404)

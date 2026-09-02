@@ -28,6 +28,22 @@ _GROUPS_PREFIX = "algorand:x402social:trend:groups:"
 _BUCKET_TTL_SECONDS = 48 * 3600
 _MERGE_HOURS = 24
 
+# Per-bucket cap on how many (member, score) pairs a single hourly ZSET read
+# pulls back (finding 7, 2026-security-audit). Tag/group cardinality is
+# attacker-growable -- every settled paid post creates a new potential tag
+# member -- so `zrange(key, 0, -1, ...)` (the FULL set) on each of 24 hourly
+# buckets, on every free trending read, was an unbounded-scale Redis scan: a
+# funded attacker could inflate a bucket's member count arbitrarily and turn
+# every subsequent free GET /trending/* into an amplified read against
+# Redis. 200 is comfortably more than enough members per bucket to produce a
+# correct top-20 final ranking (the largest `_DEFAULT_TRENDING_LIMIT`/
+# `x402_social_max_results`-bounded result this module ever returns): each
+# bucket is independently truncated to its own top 200 by score, and the
+# final merge takes the top N of the union across 24 buckets, so a topic
+# that is actually trending is, by construction, always within the top 200
+# of whichever bucket(s) it was active in.
+_BUCKET_TOP_N = 200
+
 # Weights per design doc section 2.9: a post is the strongest signal, a
 # reaction the weakest -- posting costs the most and happens the least
 # often, so weighting it highest keeps a single post from being drowned out
@@ -89,6 +105,12 @@ def _merge_decayed(
     bucket age"). Returns an empty list, with a warning log, on any Redis
     error -- fail open, cosmetic loss only (see this module's own
     docstring).
+
+    Each bucket is read with `zrevrange(key, 0, _BUCKET_TOP_N - 1, ...)` --
+    the top `_BUCKET_TOP_N` members by score, highest first -- rather than
+    the full set (finding 7, 2026-security-audit: see `_BUCKET_TOP_N`'s own
+    docstring for why that bound is still exact for the top-N result this
+    function ultimately returns).
     """
     moment = now or datetime.now(tz=UTC)
     try:
@@ -98,7 +120,7 @@ def _merge_decayed(
             bucket_time = moment.timestamp() - age * 3600
             key = f"{prefix}{datetime.fromtimestamp(bucket_time, tz=UTC).strftime('%Y%m%d%H')}"
             decay = (_MERGE_HOURS - age) / _MERGE_HOURS
-            for member, score in client.zrange(key, 0, -1, withscores=True):
+            for member, score in client.zrevrange(key, 0, _BUCKET_TOP_N - 1, withscores=True):
                 totals[member] = totals.get(member, 0.0) + float(score) * decay
     except Exception:
         logger.warning("x402 social trending: read failed, serving an empty result", exc_info=True)
