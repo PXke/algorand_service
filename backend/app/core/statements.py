@@ -1215,6 +1215,61 @@ class X402GradingStmts:
 
 
 # --------------------------------------------------------------------------- #
+# x402_social_agents / x402_social_agents_by_recency (migration 105)
+# --------------------------------------------------------------------------- #
+class X402SocialStmts:
+    """Prepared statements for the x402 agent social network, Phase S0 (identity/foundation layer only)."""
+
+    # Full INSERT, never a partial UPDATE (CLAUDE.md section 3: partial writes
+    # upsert a phantom-null row, the articles_feed class of bug) -- used for
+    # both a first-time registration (via INSERT_AGENT_IF_ABSENT below) and a
+    # PATCH /profile edit (ProfileService.edit reads-merges-writes the whole
+    # row).
+    UPSERT_AGENT = _Stmt(
+        "INSERT INTO algorand_platform.x402_social_agents ("
+        "wallet, name, bio, mission, location, interests, emoji, "
+        "created_at, updated_at, settlement_tx_id"
+        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+    )
+    # Registration path: a lightweight transaction, so two concurrent
+    # first-time registrations of the SAME wallet (two payments racing) cannot
+    # both create a profile -- exactly one INSERT is applied; the loser's
+    # payment still settled (see ProfileService.register / the route's
+    # run_with_refund wiring: this is caller-fault, payment kept, no refund).
+    INSERT_AGENT_IF_ABSENT = _Stmt(
+        "INSERT INTO algorand_platform.x402_social_agents ("
+        "wallet, name, bio, mission, location, interests, emoji, "
+        "created_at, updated_at, settlement_tx_id"
+        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) IF NOT EXISTS"
+    )
+    GET_AGENT = _Stmt(
+        "SELECT wallet, name, bio, mission, location, interests, emoji, "
+        "created_at, updated_at, settlement_tx_id "
+        "FROM algorand_platform.x402_social_agents WHERE wallet = ?"
+    )
+    # Newest-first browse-feed projection (105's own migration note): written
+    # on both registration and every profile edit, always with the profile's
+    # OWN created_at (never re-stamped by an edit -- see the migration), so
+    # this INSERT always overwrites the same row in place. Unlike the
+    # directory's tag/category projections (096/099), no delete-then-insert
+    # dance is ever needed here: the projection's key (bucket, created_at,
+    # wallet) never moves after registration.
+    INSERT_RECENCY = _Stmt(
+        "INSERT INTO algorand_platform.x402_social_agents_by_recency ("
+        "bucket, created_at, wallet, name, mission, emoji"
+        ") VALUES (?, ?, ?, ?, ?, ?)"
+    )
+    # Newest-first by clustering order; the LIMIT is bound, never
+    # interpolated, and the caller clamps it (no unbounded listings,
+    # CLAUDE.md section 4).
+    LIST_RECENT_AGENTS = _Stmt(
+        "SELECT wallet, name, mission, emoji, created_at "
+        "FROM algorand_platform.x402_social_agents_by_recency "
+        "WHERE bucket = ? LIMIT ?"
+    )
+
+
+# --------------------------------------------------------------------------- #
 # glossary_terms
 # --------------------------------------------------------------------------- #
 class GlossaryStmts:

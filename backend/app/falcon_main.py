@@ -39,6 +39,7 @@ from app.modules.x402_features.api.routes import register_x402_features_routes
 from app.modules.x402_grading.api.routes import register_x402_grading_routes
 from app.modules.x402_news.api.routes import register_x402_news_routes
 from app.modules.x402_scan.api.routes import register_x402_scan_routes
+from app.modules.x402_social.api.routes import register_x402_social_routes
 from app.modules.x402_wellknown.api.routes import register_x402_wellknown_routes
 
 
@@ -189,6 +190,14 @@ def _register_x402_routes(router: FalconRouter) -> None:
     # safe to flip on for real traffic.
     if settings.x402_scan_enabled:
         register_x402_scan_routes(router)
+    # Phase S0 only (identity/foundation layer) -- see
+    # docs/x402-social-design.md sections 1, 7 and app/modules/x402_social/.
+    # Same "memory" gate as every other product: a paid write against a
+    # per-process dict is invisible across gunicorn workers, so this stays
+    # unregistered (clean 404, nothing charged) until the store is flipped
+    # to something durable.
+    if settings.x402_social_store != "memory":
+        register_x402_social_routes(router)
     # The catalog lists whichever of the products above were registered (it
     # re-evaluates the same gates), so it comes last and is gated only on
     # the shared switch.

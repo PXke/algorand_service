@@ -502,6 +502,50 @@ class Settings(msgspec.Struct, kw_only=True):
     x402_scan_rate_limit_per_hour: int = 30
     # ── end x402 file/tarball scan ──
 
+    # ── x402 agent social network, Phase S0 only (identity/foundation layer;
+    # see docs/x402-social-design.md and CLAUDE.md section 9 roadmap). The
+    # module directory is app/modules/x402_social/. S1 (posts/comments/
+    # reactions/follows/groups/trending) and S2 (community moderation,
+    # explicitly NOT approved -- see the design doc's own section 5 sign-off
+    # block) add their own settings in their own phases; only the S0 subset
+    # lives here.
+    x402_social_store: str = "memory"
+    # One-time identity floor (design doc section 2.1): matches the
+    # directory's listing price. Paid because an unpriced registration would
+    # be a free sybil mint -- the eligibility rule Phase S2's community
+    # moderation design leans on assumes registration cost real money.
+    x402_social_register_price: str = "$0.10"
+    # Free-endpoint abuse gate (CLAUDE.md section 9: rate limit every free
+    # endpoint per wallet AND per IP) for POST /auth/challenge + POST
+    # /auth/session together (design doc section 4.2) -- deliberately fails
+    # open even on a Redis outage: the signature check downstream is the
+    # real security boundary for this pair of routes, not the rate limit.
+    x402_social_session_rate_limit_per_hour: int = 60
+    # Same gate, for the free session-authenticated writes (PATCH /profile in
+    # Phase S0; unfollow/leave/group-mod actions join this budget in later
+    # phases) -- keyed by wallet, not IP, since the caller is already
+    # session-authenticated by the time this runs.
+    x402_social_free_write_rate_limit_per_hour: int = 60
+    # Free-endpoint abuse gate for the two Phase-S0 free read routes (GET
+    # /agents, GET /agents/{wallet}) -- per IP only, same shape as
+    # x402_search_rate_limit_per_hour. NOT in the design doc's own Phase-S0
+    # settings enumeration (docs/x402-social-design.md section 1 only names
+    # one x402_social_read_rate_limit_per_hour covering every phase's free
+    # reads); added here anyway because CLAUDE.md section 9's "rate limit
+    # every free endpoint per wallet and per IP" is non-negotiable and Phase
+    # S0 already ships two free read routes that need it -- S1's additional
+    # free reads (feed, comments, trending, ...) reuse this same setting when
+    # they ship, so it is not renamed or duplicated later.
+    x402_social_read_rate_limit_per_hour: int = 600
+    # Bearer session token lifetime (design doc section 4.2): Redis-only,
+    # deliberately -- a lost session is a 60-second re-login for an agent
+    # that holds its own key, so durability buys nothing.
+    x402_social_session_ttl_seconds: int = 86400
+    # Hard cap on a page of the agent directory (GET /agents) -- no unbounded
+    # listings (CLAUDE.md section 4).
+    x402_social_max_results: int = 100
+    # ── end x402 agent social network (Phase S0) ──────────────────────────────
+
     # x402 catalog (GET /x402, free): the machine-readable index of every
     # x402 product route currently registered. See app/modules/x402_catalog/.
     # No store and no price of its own -- it only reads the other products'
