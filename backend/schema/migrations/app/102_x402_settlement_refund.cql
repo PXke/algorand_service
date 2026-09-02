@@ -7,7 +7,7 @@ USE algorand_platform;
 -- settled amount back to the payer when its product write raises after
 -- payment already settled (owner requirement 2026-09-02: "not a 500, not a
 -- 400 -- a 200 or your money back"). refund_status is written once a refund
--- is attempted ("sent" | "failed" | "skipped"); refund_tx_id is the ASA
+-- is attempted ("sent" | "failed" | "skipped"). refund_tx_id is the ASA
 -- transfer's own txid when a refund was actually sent, null otherwise. Both
 -- stay null on a row that never needed a refund attempt -- do not confuse
 -- "no refund needed" (fulfilled=true) with "refund not yet attempted"

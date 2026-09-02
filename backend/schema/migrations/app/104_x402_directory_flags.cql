@@ -4,13 +4,13 @@ USE algorand_platform;
 --
 -- reimburses: a listing owner's own claim that they refund a payer on a
 -- failed delivery. NOT verified by us for third-party listings -- exactly as
--- trustworthy as the endpoint owner is, no more. Nullable; a pre-104 row (or
+-- trustworthy as the endpoint owner is, no more. Nullable. A pre-104 row (or
 -- any listing that omits it) reads back as unset/false, never a false claim.
 --
 -- contact: a bounded free-text point of contact (email, URL, agent
 -- identifier -- not shape-validated beyond a length cap, see
 -- MAX_CONTACT_LENGTH in x402_directory/services/listing_service.py) so
--- someone with an issue has somewhere to go. Nullable; omitted reads back
+-- someone with an issue has somewhere to go. Nullable. Omitted reads back
 -- as empty.
 --
 -- Both are set only at listing/relist time (POST /api/v1/x402/list), same
