@@ -162,6 +162,15 @@ class Settings(msgspec.Struct, kw_only=True):
     redis_result_url: str = "redis://localhost:6379/2"
     ingest_api_key: str = ""
     admin_wallet_addresses: str = ""
+    # Owner-supplied article sources (2026-09-02, docs/newspaper-article-
+    # sources-design.md, Phase 1) -- bounds ONE pasted source's content on
+    # attach (POST /api/v1/admin/articles/:article_id/sources rejects
+    # oversize with a 400, never truncates silently). Same name/default as
+    # workers' own ADMIN_SOURCE_MAX_CHARS (app/core/config.py there) -- each
+    # service reads its own copy (CLAUDE.md section 3: config has one owner
+    # PER SERVICE), but they're kept at the same value since both bound the
+    # same underlying content.
+    admin_source_max_chars: int = 100_000
 
     # x402 paid-endpoint plumbing (Algorand Global x402 Challenge). Off by
     # default until a facilitator/pay_to address is actually configured.

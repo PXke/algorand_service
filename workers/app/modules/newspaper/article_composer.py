@@ -17,6 +17,7 @@ from app.modules.ai.llm_compose import (
 )
 from app.modules.ai.llm_provider import LLMError
 from app.modules.ai.llm_purpose_router import PeakHoursBlockedError
+from app.modules.newspaper.admin_source_store import AdminSource
 from app.modules.newspaper.peak_hours import is_off_peak_now, next_off_peak_at
 from app.modules.newspaper.publish_policy import PublishKind, PublishTopic, trim_text_to_chars
 from app.modules.newspaper.weekly_digest import WeeklyDigestContext
@@ -102,8 +103,21 @@ def compose_scrape_article(
     first_coverage: bool = False,
     prior_coverage_block: str = "",
     is_special_edition: bool = False,
+    admin_sources: list[AdminSource] | None = None,
 ) -> ArticleComposeResult:
-    """Compose by publish kind (discovery vs update) via the writer LLM."""
+    """Compose by publish kind (discovery vs update) via the writer LLM.
+
+    ``admin_sources`` (2026-09-02, owner-supplied article sources -- see
+    docs/newspaper-article-sources-design.md): forwarded to
+    ``llm_compose.compose_scrape_article`` ONLY on the generic writer-tools
+    path below (the same path ``recompose_review``/``recompose_published``
+    use). The EDITORIAL_ASSIGNMENT and COMMUNITY_RECAP-with-transcript
+    branches route through entirely different compose functions
+    (``compose_assignment_article``/``compose_recap_from_transcript``), which
+    don't take owner-attached article sources in Phase 1 -- passing
+    ``admin_sources`` on a call that resolves to one of those branches is a
+    silent no-op, not an error.
+    """
     del mistral_only  # see docstring above
     topic = publish_topic or PublishTopic.GENERIC
     _require_mistral()
@@ -177,6 +191,7 @@ def compose_scrape_article(
         publish_topic=topic.value,
         first_coverage=first_coverage,
         prior_coverage_block=prior_coverage_block,
+        admin_sources=admin_sources,
     )
     return ArticleComposeResult(
         title=fields.title,

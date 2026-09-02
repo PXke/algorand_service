@@ -23,6 +23,16 @@ from app.modules.newspaper.article_composer import ArticleComposeResult
 from app.modules.newspaper.publish_policy import PublishKind, PublishTier, PublishTopic
 from app.modules.newspaper.tasks import publish_tasks as pt
 
+
+@pytest.fixture(autouse=True)
+def _admin_sources_noop(monkeypatch: pytest.MonkeyPatch) -> None:
+    """This file predates owner-supplied article sources (docs/newspaper-article-sources-design.md, 2026-09-02): both recompose_review and recompose_published now load owner-attached sources before composing, fail-CLOSED on a real read error -- these tests' fake Cassandra sessions don't anticipate that extra call, and none of them are testing that feature. Default it to the normal no-sources-attached case everywhere in this file."""
+    monkeypatch.setattr(
+        "app.modules.newspaper.admin_source_store.load_active_sources",
+        lambda *_a, **_kw: [],
+    )
+
+
 _MALICIOUS_BODY = (
     '<p onclick="alert(1)">Hello</p>'
     "<script>alert(2)</script>"

@@ -15,6 +15,7 @@ from typing import Annotated, Literal
 import msgspec
 from msgspec import Meta, field
 
+from app.core.config import settings
 from app.modules.admin.classifier_constants import (
     QUALITY_LEVELS,
     normalize_content_category,
@@ -233,6 +234,41 @@ class ShareLinkItem(msgspec.Struct, kw_only=True):
     created_by: str
     revoked: bool
     revoked_at_epoch: int | None = None
+
+
+# ── Owner-supplied article sources (2026-09-02, docs/newspaper-article-sources-design.md, Phase 1) ──
+class AdminSourceCreateRequest(msgspec.Struct, kw_only=True):
+    """Admin request to attach owner-held evidence (an interview transcript, extra data) to a specific article. Bounds reject oversize with a 400 (msgspec.DecodeError) -- never silently truncated."""
+
+    label: Annotated[str, Meta(min_length=1, max_length=200)]
+    content: Annotated[str, Meta(min_length=1, max_length=settings.admin_source_max_chars)]
+    attribution_url: Annotated[str, Meta(max_length=512)] = ""
+
+
+class AdminSourceCreateResponse(msgspec.Struct, kw_only=True):
+    """Response to a successful attach -- just the new row's id (design doc section 5); attach is storage-only, no Celery dispatch."""
+
+    source_id: str
+
+
+class AdminSourceItem(msgspec.Struct, kw_only=True):
+    """One owner-attached source, admin-facing list view.
+
+    ``content`` is deliberately NOT included here -- elided to
+    ``content_preview`` (see admin_source_store.PREVIEW_CHARS) plus the true
+    ``content_length``, so listing every attached source never ships a full
+    interview transcript on a page load that only needs to show what's there.
+    """
+
+    source_id: str
+    article_id: str
+    added_by: str
+    label: str
+    kind: str
+    attribution_url: str
+    content_preview: str
+    content_length: int
+    added_at_epoch: int
 
 
 class CommentQuoteAnchor(msgspec.Struct, kw_only=True):

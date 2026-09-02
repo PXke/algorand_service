@@ -16,6 +16,15 @@ from app.modules.gatekeeper.live import DeterministicGate
 from app.modules.newspaper.article_grader import headline_violations
 
 
+@pytest.fixture(autouse=True)
+def _admin_sources_noop(monkeypatch: pytest.MonkeyPatch) -> None:
+    """This file predates owner-supplied article sources (docs/newspaper-article-sources-design.md, 2026-09-02): `_recompose_published_compose` now loads owner-attached sources before composing, fail-CLOSED on a real read error -- none of these tests' Cassandra fakes anticipate that extra call (most don't wire a `.prepare()`-capable session at all), and none of them are testing that feature. Default it to the normal no-sources-attached case everywhere in this file; a test that wants to exercise the admin-sources path itself lives in test_recompose_admin_sources.py."""
+    monkeypatch.setattr(
+        "app.modules.newspaper.admin_source_store.load_active_sources",
+        lambda *_a, **_kw: [],
+    )
+
+
 def _auto_apply_decision(
     *, enabled: bool, grade: float | None, floor: float, title: str, gate_ok: bool
 ) -> bool:

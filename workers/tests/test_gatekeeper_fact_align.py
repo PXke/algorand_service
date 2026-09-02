@@ -215,3 +215,43 @@ def test_percent_isolation_unchanged_by_widening() -> None:
     """Keeps percent-class isolation intact after the bits/bytes/multiplier unit widening."""
     r = fa.numeric_entailment_score("value 50 appears", "growth was 50%")
     assert r.grounded == 0
+
+
+# --- owner-supplied article sources (2026-09-02, docs/newspaper-article-sources-design.md) ---
+
+
+def test_admin_supplied_source_trace_entry_grounds_a_figure_present_nowhere_else() -> None:
+    """Section 0(b) of the design doc: numeric_entailment_score is the ONE gate signal owner-supplied sources genuinely help -- an interview quote otherwise has no trace anchor and would be flagged as fabricated. Builds the trace line exactly the way it reaches the gate in production: llm_compose._seed_admin_source_trace's synthetic `admin_supplied_source` entry, rendered the same way load_investigation_trace formats every stored row (`tool(arguments) -> result_json`). Proves a figure present ONLY in the owner's interview -- never in any real tool result -- still grounds the drafted article's claim."""
+    import json as _json
+
+    from app.modules.ai.llm_compose import _seed_admin_source_trace
+    from app.modules.newspaper.admin_source_store import AdminSource
+
+    source = AdminSource(
+        source_id="s1",
+        added_by="0xADMIN",
+        label="Exclusive interview with the Sprout creator, 2026-09-02",
+        kind="text",
+        attribution_url="",
+        content=(
+            "In the interview, the creator confirmed the Builder Challenge "
+            "prize pool is 25,000 ALGO, split across 3 core contributors."
+        ),
+        added_at=None,
+    )
+    trace: list = []
+    _seed_admin_source_trace(trace, [source])
+    assert len(trace) == 1
+    entry = trace[0]
+    assert entry["tool"] == "admin_supplied_source"
+    # Same rendering load_investigation_trace applies to every stored row.
+    trace_text = f"{entry['tool']}({entry['arguments']}) -> {_json.dumps(entry['result'])}"
+
+    article = (
+        "Sprout's creator told PXke Algorand in an interview that the "
+        "Builder Challenge prize pool is 25,000 ALGO, split across 3 core "
+        "contributors."
+    )
+    r = fa.numeric_entailment_score(trace_text, article)
+    assert r.ungrounded == ()
+    assert r.score == 1.0

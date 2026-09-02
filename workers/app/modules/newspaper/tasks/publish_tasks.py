@@ -1989,11 +1989,60 @@ def _recompose_via_writer(
     kind: str | None,
     old_article_id: str,
 ) -> tuple[ArticleComposeResult | None, dict[str, str] | None]:
-    """Compose a fresh proposal for a recompose. Returns (composed, None) on success, or (None, error_response) on a busy-lock, writer-spike, or LLM failure — restoring/re-enqueuing the review on failure so it isn't lost."""
+    """Compose a fresh proposal for a recompose. Returns (composed, None) on success, or (None, error_response) on a busy-lock, writer-spike, LLM failure, or admin-sources read error — restoring/re-enqueuing the review on failure so it isn't lost."""
     from app.modules.ai.llm_provider import LLMCreditError, LLMError
     from app.modules.ai.llm_purpose_router import PeakHoursBlockedError
     from app.modules.ai.story_spike import StorySpikedError
     from app.modules.crawler.classifier_review_store import enqueue_classifier_review
+    from app.modules.newspaper.admin_source_store import load_active_sources
+
+    # Load owner-attached sources BEFORE any LLM spend (design doc section 3
+    # / CLAUDE.md invariant #8): a Cassandra read error here fails CLOSED --
+    # the owner clicked Recompose *because of* the attachment, so composing
+    # without it would burn a paid compose producing the same inadequate
+    # article. Re-enqueue exactly like the LLM-failure branch below (the
+    # review slot was already freed by recompose_review before this call),
+    # so the held article and its review row survive the same way.
+    try:
+        admin_sources = load_active_sources(old_article_id)
+    except Exception as exc:
+        logger.error(
+            "failed to load admin sources for recompose of review %s (article %s): %s",
+            review_id,
+            old_article_id,
+            exc,
+            exc_info=True,
+        )
+        enqueue_classifier_review(
+            url=url,
+            page_text=page_text,
+            page_title=page_title,
+            category=category,
+            storage_score=storage_score,
+            metadata={
+                "article_id": old_article_id,
+                "source": kind or "web",
+                "recompose_failed": f"admin_sources_unavailable: {exc}"[:200],
+            },
+        )
+        return None, {"status": "admin_sources_unavailable", "detail": str(exc)[:200]}
+
+    # Reinject this article's own prior search_x findings (2026-09-02): a
+    # recompose otherwise reruns the whole research loop from scratch and
+    # re-pays X for a question an earlier compose of the same URL already
+    # answered. Keyed on `url` -- the same value passed as `source_url`
+    # below, which is what `store_investigation_findings` used as its
+    # service_id key on every prior compose of this article. Best-effort and
+    # fails OPEN (see load_prior_search_x_findings' own docstring): unlike
+    # admin_sources above, this is a bonus/optimization, not the reason the
+    # owner triggered the recompose, so a read failure here just means "no
+    # prior findings to reuse" -- the recompose still proceeds.
+    from app.modules.newspaper.investigation_store import (
+        format_prior_search_x_block,
+        load_prior_search_x_findings,
+    )
+
+    prior_search_x_block = format_prior_search_x_block(load_prior_search_x_findings(url))
 
     try:
         composed = compose_scrape_article(
@@ -2007,6 +2056,8 @@ def _recompose_via_writer(
             is_first_snapshot=True,
             publish_kind=PublishKind.SERVICE_DISCOVERY,
             publish_topic=PublishTopic.GENERIC,
+            admin_sources=admin_sources,
+            enrichment_block=prior_search_x_block,
         )
         return composed, None
     except ComposeBusyError:
@@ -2745,10 +2796,47 @@ def _recompose_published_compose(
     page_title: str,
     brief_for_recompose: EditorialBrief | None,
 ) -> tuple[ArticleComposeResult | None, dict[str, str] | None]:
-    """Compose the archive-refresh draft. Recomposes from the ORIGINAL INPUT (the brief body, when this article came from an editorial brief) rather than the prior article's own OUTPUT — handing the writer its own previous body as "source material" just re-launders whatever was in it, including a wrong premise (Pera Wallet incident 2026-07-20: two recomposes kept declaring Pera defunct because the prior draft said so, never re-checking). Returns (composed, None) on success, or (None, error_response) on a writer spike or LLM failure; raises via self.retry on a busy compose lock."""
+    """Compose the archive-refresh draft. Recomposes from the ORIGINAL INPUT (the brief body, when this article came from an editorial brief) rather than the prior article's own OUTPUT — handing the writer its own previous body as "source material" just re-launders whatever was in it, including a wrong premise (Pera Wallet incident 2026-07-20: two recomposes kept declaring Pera defunct because the prior draft said so, never re-checking). Returns (composed, None) on success, or (None, error_response) on a writer spike, LLM failure, or admin-sources read error; raises via self.retry on a busy compose lock."""
     from app.modules.ai.llm_provider import LLMCreditError, LLMError
     from app.modules.ai.llm_purpose_router import PeakHoursBlockedError
     from app.modules.ai.story_spike import StorySpikedError
+    from app.modules.newspaper.admin_source_store import load_active_sources
+
+    # Load owner-attached sources BEFORE any LLM spend (design doc section 3
+    # / CLAUDE.md invariant #8), keyed on the LIVE article_id (design doc
+    # section 2.2 -- sources stay attached to the live id across recomposes).
+    # A read error fails CLOSED: nothing has been mutated yet at this point
+    # (the live article is untouched until apply_recomposed_article succeeds
+    # -- see recompose_published's own docstring), so returning here loses
+    # nothing but the wasted compose the owner attached evidence to avoid.
+    try:
+        admin_sources = load_active_sources(article_id)
+    except Exception as exc:
+        logger.error(
+            "failed to load admin sources for recompose_published of %s: %s",
+            article_id,
+            exc,
+            exc_info=True,
+        )
+        return None, {"status": "admin_sources_unavailable", "detail": str(exc)[:200]}
+
+    # Reinject this article's own prior search_x findings (2026-09-02, same
+    # reasoning as _recompose_via_writer above) -- keyed on the same
+    # `source_url` value passed to compose_scrape_article below, which is
+    # what store_investigation_findings used as its service_id key on every
+    # prior compose of this article. Only used on the non-brief branch below
+    # (EDITORIAL_ASSIGNMENT routes through compose_assignment_article, which
+    # has no enrichment_block slot -- same scope as admin_sources just
+    # above). Best-effort / fails OPEN: a read failure here just means
+    # nothing to reinject, it never blocks this recompose.
+    from app.modules.newspaper.investigation_store import (
+        format_prior_search_x_block,
+        load_prior_search_x_findings,
+    )
+
+    prior_search_x_block = format_prior_search_x_block(
+        load_prior_search_x_findings(source_url or f"article:{article_id}")
+    )
 
     try:
         if brief_for_recompose is not None:
@@ -2779,6 +2867,8 @@ def _recompose_published_compose(
                 is_first_snapshot=True,
                 publish_kind=PublishKind.SERVICE_DISCOVERY,
                 publish_topic=PublishTopic.GENERIC,
+                admin_sources=admin_sources,
+                enrichment_block=prior_search_x_block,
                 # Root-caused live 2026-08-17: with neither first_coverage nor a
                 # real diff, an archive-refresh recompose gets NEITHER
                 # FIRST_COVERAGE_GUIDANCE's "give a comprehensive picture" nor

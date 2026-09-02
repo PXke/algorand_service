@@ -599,6 +599,24 @@ LLM_MAX_SOURCE_CHARS = env_int("MISTRAL_MAX_SOURCE_CHARS", 48_000)
 # per article for no research benefit. Stage-2 generation (a single call)
 # always gets the full LLM_MAX_SOURCE_CHARS clip.
 LLM_RESEARCH_SOURCE_CHARS = env_int("MISTRAL_RESEARCH_SOURCE_CHARS", 16_000)
+# Owner-supplied article sources (2026-09-02, docs/newspaper-article-sources-
+# design.md, Phase 1) -- ADMIN_SOURCE_MAX_CHARS bounds ONE pasted source's
+# stored content; the backend admin endpoint rejects oversize with a 400 and
+# never silently truncates (see backend/app/modules/admin/api/routes.py).
+# ~100k chars is roughly a 90-minute interview transcript (design doc
+# section 1). ADMIN_SOURCE_PROMPT_MAX_CHARS is the separate, smaller clip
+# applied to the WHOLE "OWNER-SUPPLIED SOURCE MATERIAL" prompt block
+# compose_scrape_article appends (llm_compose.py's admin_sources param) --
+# deliberately well under LLM_MAX_SOURCE_CHARS (48k) so owner material never
+# competes with the scrape's own source budget for space, sized at ~1.5x
+# LLM_RESEARCH_SOURCE_CHARS: generous enough to carry a real interview
+# transcript's substance in the prompt without letting one large paste crowd
+# out the scraped page entirely. The full, UNCLIPPED content still reaches
+# the gatekeeper via the trace seed (chunked at INVESTIGATION_RESULT_MAX_CHARS
+# below, not this constant) -- this setting only bounds what the WRITER sees
+# inline in the prompt, not what gets grounded.
+ADMIN_SOURCE_MAX_CHARS = env_int("ADMIN_SOURCE_MAX_CHARS", 100_000)
+ADMIN_SOURCE_PROMPT_MAX_CHARS = env_int("ADMIN_SOURCE_PROMPT_MAX_CHARS", 24_000)
 # Stage-2's single write call has NO context-budget trimming the way the
 # multi-round research loop does (fit_messages_to_budget only runs inside
 # chat_with_tools) -- and unlike the raw-source clip above, the digest +
@@ -1410,6 +1428,18 @@ BLUESKY_SEARCH_ENABLED = env_bool("BLUESKY_SEARCH_ENABLED", True)
 X_BEARER_TOKEN = env_str("X_BEARER_TOKEN", "")
 X_SEARCH_ENABLED = env_bool("X_SEARCH_ENABLED", False)
 X_SEARCH_DAILY_CAP = env_int("X_SEARCH_DAILY_CAP", 20)
+# Per-query result cache (2026-09-02) sitting in front of the live call and
+# checked BEFORE the daily-cap reserve above, so a cache hit costs zero
+# budget -- fixes a recompose (research_tools.py's search_x docstring;
+# publish_tasks.py's _recompose_via_writer reruns the writer's whole research
+# loop from scratch) re-paying X for a question it already asked. Keyed on
+# the normalized query text, not the article/service, so it also serves a
+# different article asking an equivalent question. 24h default: long enough
+# that same-day and next-day recomposes (the actual reported case) hit, short
+# enough that "recent posts" results don't go stale across many days -- the
+# same order of magnitude as the daily budget counter's own ~90000s (25h)
+# Redis TTL just above.
+X_SEARCH_CACHE_TTL_SECONDS = env_int("X_SEARCH_CACHE_TTL_SECONDS", 86400)
 # The 2026-08-25..08-28 weekly-sweep design's own ceiling -- unused while
 # search_x reads live again, but left defined since x_search_sweep.py (left
 # in place, just unscheduled -- see celery_app.py) still reads it if ever

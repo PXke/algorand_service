@@ -11,6 +11,8 @@ from app.core.http_errors import json_error_response
 from app.core.query_params import query_param
 from app.modules.admin.auth import require_admin_wallet, verified_admin_wallet
 from app.modules.admin.schemas import (
+    AdminSourceCreateRequest,
+    AdminSourceCreateResponse,
     ArticleDraftRequest,
     ArticlePatchRequest,
     ClassifierFeedbackCreate,
@@ -573,6 +575,74 @@ def admin_revoke_share_link(request: Request) -> Response:
     if link is None or link.article_id != article_id:
         return json_error_response(404, "not_found", "Share link not found")
     return serialization.to_builtins(link)
+
+
+# ── Owner-supplied article sources (2026-09-02, docs/newspaper-article-sources-design.md, Phase 1) ──
+def admin_create_admin_source(request: Request) -> Response:
+    """Attach owner-held evidence (an interview transcript, extra data) to a specific article.
+
+    Storage only -- no Celery dispatch (design doc section 4/5): the next
+    time the owner clicks Recompose (on this held review, or on the live
+    article), the recompose task loads this article's active sources and
+    hands them to the writer. `added_by` is stamped from the VERIFIED admin
+    wallet (never the raw X-Admin-Wallet header), same as every other admin
+    write in this file.
+    """
+    denied = require_admin_wallet(request)
+    if denied is not None:
+        return denied
+    article_id = request.path_params.get("article_id", "")
+    if not _valid_uuid(article_id):
+        return json_error_response(400, "invalid_request", "article_id required")
+    if store.get_article(article_id) is None:
+        return json_error_response(404, "not_found", "Article not found")
+    try:
+        payload = serialization.decode(request.body or b"{}", AdminSourceCreateRequest)
+    except serialization.DecodeError as exc:
+        # Covers oversize label/content/attribution_url too -- msgspec.Meta's
+        # max_length rejects at decode time, so an oversize field 400s here,
+        # never silently truncated (backend rule, CLAUDE.md section 4).
+        return json_error_response(400, "invalid_request", str(exc))
+    wallet = verified_admin_wallet(request)
+
+    from app.modules.admin.admin_source_store import create_source
+
+    source_id = create_source(
+        article_id,
+        added_by=wallet or "",
+        label=payload.label.strip(),
+        content=payload.content,
+        attribution_url=payload.attribution_url.strip(),
+    )
+    return serialization.to_builtins(AdminSourceCreateResponse(source_id=source_id))
+
+
+def admin_list_admin_sources(request: Request) -> Response:
+    """List the active owner-supplied sources attached to an article, newest first (LIMIT 50) -- content elided to a preview, never the full pasted material (design doc section 5)."""
+    denied = require_admin_wallet(request)
+    if denied is not None:
+        return denied
+    article_id = request.path_params.get("article_id", "")
+    if not _valid_uuid(article_id):
+        return json_error_response(400, "invalid_request", "article_id required")
+    from app.modules.admin.admin_source_store import list_sources
+
+    return {"items": serialization.to_builtins(list_sources(article_id))}
+
+
+def admin_delete_admin_source(request: Request) -> Response:
+    """Soft-remove an owner-supplied source (status='removed' -- never a real DELETE, so a recomposed live article's provenance survives the owner later retiring a source; see migration 107)."""
+    denied = require_admin_wallet(request)
+    if denied is not None:
+        return denied
+    article_id = request.path_params.get("article_id", "")
+    source_id = request.path_params.get("source_id", "")
+    if not _valid_uuid(article_id) or not _valid_uuid(source_id):
+        return json_error_response(400, "invalid_request", "article_id and source_id required")
+    from app.modules.admin.admin_source_store import soft_delete_source
+
+    soft_delete_source(article_id, source_id)
+    return {"removed": True, "article_id": article_id, "source_id": source_id}
 
 
 def admin_list_article_comments(request: Request) -> Response:
@@ -1964,6 +2034,11 @@ def register_admin_routes(app: Router) -> None:
     app.post("/api/v1/admin/articles/:article_id/share-links")(admin_create_share_link)
     app.get("/api/v1/admin/articles/:article_id/share-links")(admin_list_share_links)
     app.delete("/api/v1/admin/articles/:article_id/share-links/:token")(admin_revoke_share_link)
+    # Owner-supplied article sources (2026-09-02, Phase 1 -- see
+    # docs/newspaper-article-sources-design.md section 5).
+    app.post("/api/v1/admin/articles/:article_id/sources")(admin_create_admin_source)
+    app.get("/api/v1/admin/articles/:article_id/sources")(admin_list_admin_sources)
+    app.delete("/api/v1/admin/articles/:article_id/sources/:source_id")(admin_delete_admin_source)
     app.get("/api/v1/admin/articles/:article_id/comments")(admin_list_article_comments)
     app.delete("/api/v1/admin/articles/:article_id/comments/:comment_id")(
         admin_delete_article_comment

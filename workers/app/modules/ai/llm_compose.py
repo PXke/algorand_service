@@ -2653,11 +2653,28 @@ def compose_scrape_article(
     publish_topic: str = "",
     first_coverage: bool = False,
     prior_coverage_block: str = "",
+    admin_sources: list[AdminSource] | None = None,
     client: LLMProvider | None = None,
     research_client: LLMProvider | None = None,
     session_register: SessionRegister | None = None,
 ) -> LLMArticleFields:
     """Generate newspaper article fields from scrape context via the writer's research -> compose -> grade/revise loop.
+
+    ``admin_sources`` (2026-09-02, owner-supplied article sources -- see
+    docs/newspaper-article-sources-design.md): owner-attached evidence for
+    THIS article (an exclusive interview transcript, extra data the public
+    web can't provide). When present, two things happen TOGETHER, always
+    (design doc section 3's own invariant): a labeled "OWNER-SUPPLIED SOURCE
+    MATERIAL" block is appended to the user prompt after the scraped source
+    material (clipped as a whole to ``ADMIN_SOURCE_PROMPT_MAX_CHARS``, kept
+    separate from ``LLM_MAX_SOURCE_CHARS`` so owner material never competes
+    with the scrape for space), AND the session trace is seeded with one
+    ``admin_supplied_source`` entry per source (chunked at
+    ``INVESTIGATION_RESULT_MAX_CHARS``) before the research loop starts, so a
+    figure the writer quotes from the interview has a real trace anchor for
+    the gatekeeper's ``numeric_entailment_score`` instead of being flagged as
+    fabricated. Defaults to ``None``, so every existing call site (fresh
+    publishes, briefs, benchmarks) is unaffected.
 
     ``research_client``/``session_register`` (2026-08-14): override the
     stage-1 research client and/or the compose-session transcript sink used
@@ -2685,6 +2702,7 @@ def compose_scrape_article(
     today = _today_utc()
     source_domain = (urlparse(source_url).netloc or "").lower()
     links_block = _source_links_block(source_links)
+    admin_block = _admin_source_prompt_block(admin_sources)
     from app.core.config import DIFF_PROMPT_MAX_CHARS
 
     diff_block = ""
@@ -2737,7 +2755,7 @@ Full service aggregate (BACKGROUND ONLY — explain the change, don't re-report 
 ```
 {_clip(page_text, source_limit)}
 ```
-{_clip(enrichment_block, 5000) if enrichment_block else ""}"""
+{_clip(enrichment_block, 5000) if enrichment_block else ""}{admin_block}"""
         return f"""Write the article now from the material below.
 
 Today (UTC): {today}
@@ -2754,7 +2772,7 @@ Source material (may be days or years old — judge figures against today's date
 ```
 {links_block}
 {diff_block}
-{_clip(enrichment_block, 5000) if enrichment_block else ""}"""
+{_clip(enrichment_block, 5000) if enrichment_block else ""}{admin_block}"""
 
     from app.core.config import LLM_RESEARCH_SOURCE_CHARS
 
@@ -2777,6 +2795,7 @@ Source material (may be days or years old — judge figures against today's date
         topic=publish_topic,
         research_client=research_client,
         session_register=session_register,
+        admin_sources=admin_sources,
     )
 
 
@@ -2804,6 +2823,7 @@ def _compose_via_writer_tools(
     is_special_edition: bool = False,
     research_client: LLMProvider | None = None,
     session_register: SessionRegister | None = None,
+    admin_sources: list[AdminSource] | None = None,
 ) -> LLMArticleFields:
     """Shared research -> write -> grade/revise loop behind every writer-tools compose path. Only depends on the system/user prompt pair and a label (``source_url``) used for tool scoping and session/investigation bookkeeping — it doesn't assume the source material was a real scraped page, so callers can feed it a from-scratch topic assignment just as well as a scrape diff.
 
@@ -2816,7 +2836,7 @@ def _compose_via_writer_tools(
     (LLM_MAX_TOOL_ROUNDS) for a genuinely deeper investigation, on top
     of the prompt's own depth instructions.
 
-    ``research_client``/``session_register``: see compose_scrape_article's docstring.
+    ``research_client``/``session_register``/``admin_sources``: see compose_scrape_article's docstring.
     """
     from app.modules.newspaper.compose_lock import compose_lock
 
@@ -2830,6 +2850,7 @@ def _compose_via_writer_tools(
             is_special_edition=is_special_edition,
             research_client=research_client,
             session_register=session_register,
+            admin_sources=admin_sources,
         )
 
 
@@ -3566,6 +3587,7 @@ def _compose_via_writer_tools_locked(
     is_special_edition: bool = False,
     research_client: LLMProvider | None = None,
     session_register: SessionRegister | None = None,
+    admin_sources: list[AdminSource] | None = None,
 ) -> LLMArticleFields:
     from app.core.config import WRITER_TOOLS_ENABLED
 
@@ -3623,6 +3645,10 @@ def _compose_via_writer_tools_locked(
             }
             tool_schemas, tool_handlers = all_tools(context=tool_context)
             trace: list = []
+            # Seed BEFORE the research loop starts (design doc section 3) so
+            # owner-supplied figures are grounded anchors from round 1, not
+            # just at final telemetry time.
+            _seed_admin_source_trace(trace, admin_sources)
             from app.modules.ai.chart_tools import chart_data_session_trace
 
             _chart_trace_scope.enter_context(chart_data_session_trace(trace))

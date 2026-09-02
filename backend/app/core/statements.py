@@ -20,6 +20,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from algorand_shared.admin_source_statements import AdminSourceStmts as AdminSourceStmts
 from algorand_shared.article_statements import (
     ARTICLE_VERSION_INSERT,
     ARTICLE_VERSION_LATEST,
@@ -1487,3 +1488,15 @@ class GlossaryStmts:
     )
     DELETE = _Stmt("DELETE FROM algorand_platform.glossary_terms WHERE slug = ?")
     UPDATE_TRANSLATIONS = GLOSSARY_UPDATE_TRANSLATIONS
+
+
+# --------------------------------------------------------------------------- #
+# article_admin_sources (2026-09-02, owner-supplied article sources, Phase 1
+# -- see docs/newspaper-article-sources-design.md and migration 107).
+# AdminSourceStmts lives in algorand_shared.admin_source_statements (imported
+# above, re-exported here) since both services need it: backend's admin API
+# (app/modules/admin/admin_source_store.py) writes it (attach/soft-remove);
+# workers' own admin_source_store reads it, projected into a recompose's
+# prompt + trace. See that module's own docstring for why
+# LIST_ACTIVE_BY_ARTICLE doesn't filter `status` in CQL.
+# --------------------------------------------------------------------------- #
