@@ -395,7 +395,12 @@ def _compose_domain_for_row(row: QueuedPublishRow) -> str:
 
 
 def _gate_enforces_review(
-    *, clf_decision: object, title: str, body: str, page_text: str, source_url: str
+    *,
+    clf_decision: object,
+    title: str,
+    body: str,
+    page_text: str,  # noqa: ARG001 -- vestigial: gate_draft dropped source_text 2026-09-02 (completeness now reads article_text only, see gatekeeper/live.py). Kept on this signature rather than threading the removal through this function's own caller too; a real follow-up, not urgent.
+    source_url: str,
 ) -> bool:
     """Quality veto on the auto-publish path. True when a draft Classifier A would send STRAIGHT to the feed (``clf_decision is True``) should instead be diverted to human review because the deterministic gatekeeper fails.
 
@@ -410,7 +415,6 @@ def _gate_enforces_review(
     from app.modules.gatekeeper.live import gate_draft
 
     gate = gate_draft(
-        source_text=page_text,
         article_text=f"{title}\n{body}",
         source_url=source_url,
     )
@@ -466,7 +470,7 @@ def _fresh_auto_approve_passes(
     *,
     title: str,
     body: str,
-    page_text: str,
+    page_text: str,  # noqa: ARG001 -- vestigial: gate_draft dropped source_text 2026-09-02, see _gate_enforces_review's identical note above.
     source_url: str,
     heuristic_grade: dict | None = None,
     defunct_domains: tuple[str, ...] = (),
@@ -547,7 +551,6 @@ def _fresh_auto_approve_passes(
         from app.modules.gatekeeper.live import gate_draft
 
         gate = gate_draft(
-            source_text=page_text,
             article_text=f"{title}\n{body}",
             source_url=source_url,
         )
@@ -1116,7 +1119,7 @@ def _grade_and_gate(
     *,
     title: str,
     source_url: str,
-    page_text: str,
+    page_text: str,  # noqa: ARG001 -- vestigial: gate_draft dropped source_text 2026-09-02, see _gate_enforces_review's identical note above.
     service_id: str,
     label: str = "",
 ) -> tuple[dict[str, str], float | None, bool]:
@@ -1209,7 +1212,6 @@ def _grade_and_gate(
         from app.modules.gatekeeper.live import gate_draft
 
         gate = gate_draft(
-            source_text=page_text,
             article_text=f"{title}\n{composed.body}",
             source_url=source_url,
         )

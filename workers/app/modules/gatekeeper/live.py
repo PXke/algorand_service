@@ -50,14 +50,26 @@ class GateConfig:
 
 
 def run_deterministic_gate(
-    source_text: str,
     tool_trace: str,
     article_text: str,
     cfg: GateConfig | None = None,
 ) -> DeterministicGate:
-    """Compute completeness + numeric entailment for a draft. Pure (no I/O)."""
+    """Compute completeness + numeric entailment for a draft. Pure (no I/O).
+
+    Completeness trigger-matching reads article_text, never the raw fetched
+    source pages (found 2026-09-02 auditing a held sproutalgo.com draft):
+    company_backing fired off a stray "Inc."/"LLC" on dappradar.com's own
+    boilerplate, nothing to do with what the article itself claims about
+    Sprout. Same failure mode as domain_provenance (removed 2026-08-21,
+    see below) -- a completeness rule should ask whether the ARTICLE makes a
+    claim needing verification, not whether any fetched source page contains
+    a substring. `run_deterministic_gate` used to also take a `source_text`
+    parameter for this; it was dropped once nothing inside this function used
+    it any more, rather than left as a footgun for a future caller to feed
+    back in.
+    """
     cfg = cfg or GateConfig()
-    comp = check_completeness(source_text, tool_trace)
+    comp = check_completeness(article_text, tool_trace)
     fact = numeric_entailment_score(tool_trace, article_text)
 
     reasons: list[str] = []
@@ -73,7 +85,7 @@ def run_deterministic_gate(
         # with (found 2026-08-07 auditing a held Polkagold review row).
         who = ""
         if "human_identity" in comp.failed_rules:
-            unscreened = named_persons_unscreened(source_text, tool_trace)
+            unscreened = named_persons_unscreened(article_text, tool_trace)
             who = f" ({', '.join(unscreened)})" if unscreened else ""
         reasons.append(f"missing mandatory checks: {', '.join(comp.failed_rules)}{who}")
     if fact.score < cfg.fact_min:
@@ -163,8 +175,13 @@ def _dead_domains_referenced(article_text: str, *, source_domain: str = "") -> l
     return dead
 
 
-def gate_draft(*, source_text: str, article_text: str, source_url: str) -> DeterministicGate | None:
+def gate_draft(*, article_text: str, source_url: str) -> DeterministicGate | None:
     """Convenience wrapper for the publish task: loads the trace by source_url, reads config, runs the gate, then folds in the dead-domain check (needs I/O -- domain_tracking lookups and, for never-seen domains, a live DNS resolution -- so it lives here rather than in the pure ``run_deterministic_gate`` core). Returns None when disabled or on any error (shadow-safe). The caller enforces only when ``GATEKEEPER_ENFORCE`` and ``not result.passed``.
+
+    No longer takes ``source_text`` (found 2026-09-02: completeness
+    trigger-matching moved to article_text only, see run_deterministic_gate's
+    docstring -- the raw fetched source pages are never read by this gate at
+    all any more).
 
     ``source_url`` is used for both lookups: it's the compose-time source_url
     that ``load_investigation_trace`` keys the stored trace by (see that
@@ -191,7 +208,6 @@ def gate_draft(*, source_text: str, article_text: str, source_url: str) -> Deter
 
         trace = load_investigation_trace(source_url)
         gate = run_deterministic_gate(
-            source_text,
             trace,
             article_text,
             GateConfig(fact_min=GATEKEEPER_FACT_MIN, enforce=GATEKEEPER_ENFORCE),

@@ -13,7 +13,6 @@ from app.modules.gatekeeper.live import (
 def test_clean_draft_passes() -> None:
     """A draft whose figures are grounded in the tool trace passes with no failure reasons."""
     g = run_deterministic_gate(
-        source_text="Algorand shipped a parameter update.",
         tool_trace='{"tps": 50000}',
         article_text="The network sustained 50,000 TPS after the update.",
     )
@@ -24,7 +23,6 @@ def test_clean_draft_passes() -> None:
 def test_ungrounded_figure_fails_factuality() -> None:
     """A numeric figure absent from the tool trace fails factuality and is listed as ungrounded."""
     g = run_deterministic_gate(
-        source_text="A routine update.",
         tool_trace='{"tps": 50000}',
         article_text="It hit 50,000 TPS serving 999,000 daily users.",
         cfg=GateConfig(fact_min=0.8),
@@ -35,11 +33,10 @@ def test_ungrounded_figure_fails_factuality() -> None:
 
 
 def test_missing_screen_fails_completeness() -> None:
-    """A named human identity introduced in the source but never screened fails completeness, naming the person."""
+    """A named human identity introduced in the ARTICLE but never screened fails completeness, naming the person."""
     g = run_deterministic_gate(
-        source_text="Founder Jane Doe unveiled the protocol.",
         tool_trace='{"search_web": "..."}',
-        article_text="A neutral writeup of the launch.",
+        article_text="Founder Jane Doe unveiled the protocol.",
     )
     assert not g.passed
     assert not g.completeness_passed
@@ -48,12 +45,21 @@ def test_missing_screen_fails_completeness() -> None:
     assert any("Jane Doe" in r for r in g.reasons)
 
 
+def test_source_only_trigger_does_not_leak_into_completeness() -> None:
+    """Found-in-audit 2026-09-02 (a held sproutalgo.com draft): trigger words must be read from the ARTICLE, not from every fetched source page. company_backing fired off a stray "Inc." on a third-party aggregator page (dappradar.com) that the article itself never referenced -- same over-matching failure mode as domain_provenance (removed 2026-08-21). Fixed by removing run_deterministic_gate's source_text parameter entirely, so a fetched page's boilerplate is now structurally unreachable from completeness -- an article with no trigger words of its own can never fail regardless of what its sources said."""
+    g = run_deterministic_gate(
+        tool_trace="{}",
+        article_text="Sprout relaunches its Algorand Python contracts and opens a builder challenge.",
+    )
+    assert g.completeness_passed
+    assert g.failed_rules == ()
+
+
 def test_url_mention_alone_no_longer_fails_completeness() -> None:
     """A source merely containing a URL (its own boilerplate, nearly every scraped page) must not fail completeness -- domain_provenance's old trigger-word rule was removed 2026-08-21 because it matched almost everything; the real dead-domain check now lives in gate_draft, not run_deterministic_gate's pure core."""
     g = run_deterministic_gate(
-        source_text="The team announced it at https://example.io today.",
         tool_trace="{}",
-        article_text="A neutral writeup.",
+        article_text="The team announced it at https://example.io today.",
     )
     assert g.completeness_passed
     assert "domain_provenance" not in g.failed_rules
@@ -62,9 +68,8 @@ def test_url_mention_alone_no_longer_fails_completeness() -> None:
 def test_company_backing_failure_does_not_list_unscreened_names() -> None:
     """company_backing failing alone must not surface named_persons_unscreened's list -- that detail belongs to human_identity, and attaching it to an unrelated rule misleads the reviewer (found 2026-08-07 on a held Polkagold review row, whose reasons named marketing bullet phrases as if they were unscreened people)."""
     g = run_deterministic_gate(
-        source_text="The team runs it as a registered company ltd.",
         tool_trace="{}",
-        article_text="A neutral writeup.",
+        article_text="The team runs it as a registered company ltd.",
     )
     assert not g.completeness_passed
     assert "company_backing" in g.failed_rules
@@ -74,7 +79,7 @@ def test_company_backing_failure_does_not_list_unscreened_names() -> None:
 
 def test_as_metadata_shape() -> None:
     """as_metadata() returns exactly the expected gk_* string-keyed fields."""
-    g = run_deterministic_gate("s", "{}", "no numbers here")
+    g = run_deterministic_gate("{}", "no numbers here")
     md = g.as_metadata()
     assert md["gk_passed"] == "1"
     assert set(md) == {
@@ -189,7 +194,6 @@ def test_gate_draft_hard_fails_on_dead_domain_reference(monkeypatch: pytest.Monk
     _patch_resolves(monkeypatch, alive=set())
 
     gate = gate_draft(
-        source_text="A routine update.",
         article_text="Unlike deadwallet.io, this new wallet is thriving.",
         source_url="https://newwallet.app",
     )
@@ -209,7 +213,6 @@ def test_gate_draft_passes_when_no_domains_dead(monkeypatch: pytest.MonkeyPatch)
     _patch_resolves(monkeypatch, alive={"perawallet.app"})
 
     gate = gate_draft(
-        source_text="A routine update.",
         article_text="See https://perawallet.app for details.",
         source_url="https://newwallet.app",
     )
