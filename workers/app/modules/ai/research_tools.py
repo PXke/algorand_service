@@ -19,6 +19,12 @@
   machinery (x_search_sweep.py, the x_search_weekly table) is left in place
   but unscheduled -- _x_search_live below still serves it if it's ever
   manually re-enabled, but nothing calls it automatically any more.
+  A separate, per-query Redis result cache (2026-09-02, config.
+  X_SEARCH_CACHE_TTL_SECONDS) sits in front of _x_search_live and is checked
+  BEFORE the daily-cap reserve, so a recompose (or any other article) asking
+  the same normalized question within the TTL costs zero budget -- this is
+  NOT the reverted weekly-sweep design: it's keyed on the query text itself,
+  not a tracked service, so it never confines the writer to a fixed list.
 
 Every handler is failure-tolerant: an error returns {"error": ...} and never
 aborts the article.
@@ -27,6 +33,7 @@ aborts the article.
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import logging
 import re
@@ -248,6 +255,68 @@ def _x_daily_cap_reserve() -> tuple[bool, int, int]:
     return True, count, X_SEARCH_DAILY_CAP
 
 
+def _x_search_cache_key(query: str) -> str:
+    """Stable Redis key for a search_x query: lowercased and whitespace-collapsed so a recompose asking "Algorand  Quantum" and a fresh compose asking "algorand quantum" hit the same cache entry, then hashed -- X queries can carry operators/unicode of unbounded length, so the key itself stays short and Redis-safe."""
+    normalized = re.sub(r"\s+", " ", query.strip().lower())
+    digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+    return f"news:x_search_cache:{digest}"
+
+
+def _x_search_cache_get(query: str) -> dict[str, Any] | None:
+    """Cached search_x result for the normalized `query`, or None on a miss. Checked BEFORE `_x_daily_cap_reserve` so a hit costs zero budget.
+
+    Fails OPEN on any Redis error or corrupt cached payload (2026-09-02,
+    CLAUDE.md invariant 2.9, same pattern as `_x_daily_cap_reserve` above): a
+    cache-read blip must degrade to a plain cache miss and let the caller
+    fall through to the live call, never block or crash a legitimate search.
+    """
+    from app.core.redis_client import get_redis
+
+    key = _x_search_cache_key(query)
+    try:
+        client = get_redis()
+        raw = client.get(key)
+    except Exception:
+        logger.warning(
+            "_x_search_cache_get: Redis unavailable, treating as cache miss", exc_info=True
+        )
+        return None
+    if not raw:
+        return None
+    try:
+        cached = json.loads(raw)
+    except (TypeError, ValueError):
+        logger.warning(
+            "_x_search_cache_get: cached value for %s was not valid JSON, treating as cache miss",
+            key,
+        )
+        return None
+    if not isinstance(cached, dict):
+        logger.warning(
+            "_x_search_cache_get: cached value for %s was not a dict, treating as cache miss", key
+        )
+        return None
+    return cached
+
+
+def _x_search_cache_set(query: str, result: dict[str, Any]) -> None:
+    """Cache a successful search_x `result` for config.X_SEARCH_CACHE_TTL_SECONDS. Caller must only pass a result that already succeeded (no "error" key) -- CLAUDE.md invariant 2.8, an error is not a cacheable "answer" to replay for the rest of the TTL.
+
+    Fails OPEN on any Redis error: a write failure here must not fail the
+    tool call that already succeeded and is about to be returned to the
+    writer, it just means the next call won't get a cache hit.
+    """
+    from app.core.config import X_SEARCH_CACHE_TTL_SECONDS
+    from app.core.redis_client import get_redis
+
+    key = _x_search_cache_key(query)
+    try:
+        client = get_redis()
+        client.set(key, json.dumps(result), ex=X_SEARCH_CACHE_TTL_SECONDS)
+    except Exception:
+        logger.warning("_x_search_cache_set: Redis unavailable, result not cached", exc_info=True)
+
+
 def _x_search_live(query: str) -> dict[str, Any]:
     """Live X (Twitter) recent-search call. Shared by the compose-time search_x tool below and, if x_search_sweep.py's dormant weekly sweep is ever manually re-enabled, that task too -- this function itself doesn't care which caller reserved budget for it."""
     from app.core.config import X_BEARER_TOKEN, X_SEARCH_ENABLED
@@ -307,6 +376,9 @@ def _tool_search_x(query: str) -> dict[str, Any]:
         return {"query": query, "posts": []}
     if not X_SEARCH_ENABLED or not X_BEARER_TOKEN:
         return {"query": query, "error": "X search not configured", "posts": []}
+    cached = _x_search_cache_get(q)
+    if cached is not None:
+        return cached
     allowed, count, cap = _x_daily_cap_reserve()
     if not allowed:
         return {
@@ -333,6 +405,8 @@ def _tool_search_x(query: str) -> dict[str, Any]:
             "one, attribute it to that one account, not to 'the community' or "
             "'users' -- near-zero engagement is not evidence of a broader reaction."
         )
+    if "error" not in result:
+        _x_search_cache_set(q, result)
     return result
 
 

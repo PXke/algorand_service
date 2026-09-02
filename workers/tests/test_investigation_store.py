@@ -8,7 +8,9 @@ import pytest
 
 from app.modules.newspaper.investigation_store import (
     _stringify_percent_fields,
+    format_prior_search_x_block,
     load_investigation_trace,
+    load_prior_search_x_findings,
     store_investigation_findings,
 )
 
@@ -166,3 +168,125 @@ def test_load_investigation_trace_reads_past_the_old_25_row_limit(
     trace = load_investigation_trace("svc")
     assert captured_limit == [200]
     assert trace.count("fetch_url(") == 200
+
+
+class _Row:
+    """A fake investigation_findings row with settable tool/arguments/result_json."""
+
+    def __init__(self, tool: str, arguments: dict, result: dict) -> None:
+        self.tool = tool
+        self.arguments = json.dumps(arguments)
+        self.result_json = json.dumps(result)
+
+
+class _FakeSession:
+    def __init__(self, rows: list[_Row]) -> None:
+        self._rows = rows
+
+    def prepare(self, cql: str) -> str:
+        return cql
+
+    def execute(self, _stmt: object, _params: tuple) -> list[_Row]:
+        return self._rows
+
+
+def _patch_session(monkeypatch: pytest.MonkeyPatch, rows: list[_Row]) -> None:
+    import app.core.cassandra as c
+
+    monkeypatch.setattr(c, "get_cassandra_session", lambda: _FakeSession(rows))
+    c.prepare_cached.cache_clear()
+
+
+def test_load_prior_search_x_findings_filters_to_search_x_tool_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only tool == "search_x" rows are surfaced -- every other tool call in the shared investigation_findings evidence trail is ignored."""
+    rows = [
+        _Row("fetch_url", {"url": "https://x.io"}, {"text": "page"}),
+        _Row(
+            "search_x",
+            {"query": "algorand quantum"},
+            {"query": "algorand quantum", "posts": [{"text": "hit", "likes": 1}]},
+        ),
+    ]
+    _patch_session(monkeypatch, rows)
+
+    findings = load_prior_search_x_findings("svc")
+    assert len(findings) == 1
+    assert findings[0]["query"] == "algorand quantum"
+
+
+def test_load_prior_search_x_findings_dedupes_by_normalized_query_keeping_newest(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Rows arrive newest-first (created_at DESC clustering); a later (older) row for the same normalized query is dropped, keeping only the most recent result."""
+    rows = [
+        _Row(  # newest
+            "search_x",
+            {"query": "Algorand  Quantum"},
+            {"posts": [{"text": "newest result"}]},
+        ),
+        _Row(  # older, same query modulo case/whitespace
+            "search_x",
+            {"query": "algorand quantum"},
+            {"posts": [{"text": "stale result"}]},
+        ),
+    ]
+    _patch_session(monkeypatch, rows)
+
+    findings = load_prior_search_x_findings("svc")
+    assert len(findings) == 1
+    assert findings[0]["result"]["posts"][0]["text"] == "newest result"
+
+
+def test_load_prior_search_x_findings_skips_error_results(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An error result is not a reusable finding (CLAUDE.md invariant 2.8) -- a row whose stored result carries an "error" key is skipped, not surfaced as if it were a real answer."""
+    rows = [_Row("search_x", {"query": "algorand quantum"}, {"error": "X search not configured"})]
+    _patch_session(monkeypatch, rows)
+
+    assert load_prior_search_x_findings("svc") == []
+
+
+def test_load_prior_search_x_findings_fails_open_on_cassandra_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A Cassandra read failure degrades to "nothing to reinject", never raises into the recompose it's meant to help."""
+
+    def _raise() -> None:
+        raise ConnectionError("cassandra down")
+
+    monkeypatch.setattr("app.core.cassandra.get_cassandra_session", _raise)
+
+    assert load_prior_search_x_findings("svc") == []
+
+
+def test_load_prior_search_x_findings_empty_service_id_short_circuits() -> None:
+    """An empty service_id is a usage no-op, not a query -- matches load_investigation_trace's own guard."""
+    assert load_prior_search_x_findings("") == []
+
+
+def test_format_prior_search_x_block_renders_query_and_posts() -> None:
+    """The rendered block names the query, includes post text/engagement, and carries a clear "this may be stale" label so the writer treats it appropriately."""
+    findings = [
+        {
+            "query": "algorand quantum",
+            "result": {
+                "posts": [
+                    {"text": "Algorand ships v5.0.0", "likes": 42, "reposts": 7, "replies": 3}
+                ]
+            },
+        }
+    ]
+    block = format_prior_search_x_block(findings)
+    assert "algorand quantum" in block
+    assert "Algorand ships v5.0.0" in block
+    assert "42" in block
+    assert "PRIOR X (TWITTER) RESEARCH" in block
+    assert "may be DAYS OR WEEKS OLD" in block
+
+
+def test_format_prior_search_x_block_empty_findings_returns_empty_string() -> None:
+    """No prior findings -> empty block, so callers can pass it straight through as enrichment_block with no conditional."""
+    assert format_prior_search_x_block([]) == ""

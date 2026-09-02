@@ -231,6 +231,133 @@ def test_transient_502_is_retried_not_fatal(
     assert result["count"] == 2
 
 
+def test_cache_hit_serves_repeat_query_without_second_live_call(
+    monkeypatch: pytest.MonkeyPatch,
+    patch_redis_from_url: FakeRedis,
+) -> None:
+    """A second call with the same query (normalized: different case/whitespace) within the TTL is served from the Redis cache and never re-invokes the live X call -- the actual bug being fixed here: a recompose re-running the writer's research loop from scratch shouldn't re-pay for a question it already asked."""
+    monkeypatch.setattr("app.core.config.X_SEARCH_ENABLED", True)
+    monkeypatch.setattr("app.core.config.X_BEARER_TOKEN", "test-token")
+    monkeypatch.setattr("app.core.config.X_SEARCH_DAILY_CAP", 20)
+
+    calls = {"n": 0}
+
+    def fake_live(q: str) -> dict:
+        calls["n"] += 1
+        return {
+            "query": q,
+            "count": 1,
+            "posts": [{"text": "hit", "likes": 5, "reposts": 0, "replies": 0, "url": "x"}],
+        }
+
+    monkeypatch.setattr("app.modules.ai.research_tools._x_search_live", fake_live)
+
+    first = _tool_search_x("Algorand  Quantum")
+    second = _tool_search_x("algorand quantum")  # different case/whitespace, same normalized key
+
+    assert calls["n"] == 1
+    assert "error" not in first
+    assert "error" not in second
+    assert first["posts"] == second["posts"]
+    # The cached dict is replayed verbatim, including the counters recorded
+    # at the time of the original live call.
+    assert second["daily_calls_used"] == first["daily_calls_used"] == 1
+    assert patch_redis_from_url.store.get(f"news:x_search_count:{_today()}") == "1"
+
+
+def test_cache_hit_does_not_consume_daily_budget(
+    monkeypatch: pytest.MonkeyPatch,
+    patch_redis_from_url: FakeRedis,
+) -> None:
+    """A cache hit costs zero budget against the shared daily cap -- checked BEFORE `_x_daily_cap_reserve`, not after."""
+    monkeypatch.setattr("app.core.config.X_SEARCH_ENABLED", True)
+    monkeypatch.setattr("app.core.config.X_BEARER_TOKEN", "test-token")
+    monkeypatch.setattr(
+        "app.core.net_guard.guarded_get",
+        lambda url, **_kw: _json_response(url, 200, _SEARCH_PAYLOAD),
+    )
+
+    _tool_search_x("algorand")
+    _tool_search_x("algorand")
+    _tool_search_x("algorand")
+
+    assert patch_redis_from_url.store.get(f"news:x_search_count:{_today()}") == "1"
+
+
+def test_different_queries_each_call_live_and_consume_budget(
+    monkeypatch: pytest.MonkeyPatch,
+    patch_redis_from_url: FakeRedis,
+) -> None:
+    """A cache miss (a genuinely different query) still calls the live API and consumes budget normally -- the cache doesn't accidentally swallow unrelated queries."""
+    monkeypatch.setattr("app.core.config.X_SEARCH_ENABLED", True)
+    monkeypatch.setattr("app.core.config.X_BEARER_TOKEN", "test-token")
+
+    calls = {"n": 0}
+
+    def fake_live(q: str) -> dict:
+        calls["n"] += 1
+        return {"query": q, "count": 0, "posts": []}
+
+    monkeypatch.setattr("app.modules.ai.research_tools._x_search_live", fake_live)
+
+    _tool_search_x("algorand")
+    _tool_search_x("solana")
+
+    assert calls["n"] == 2
+    assert patch_redis_from_url.store.get(f"news:x_search_count:{_today()}") == "2"
+
+
+def test_cache_read_failure_fails_open_to_live_call(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Redis being unavailable for the cache check must not block a legitimate live search (CLAUDE.md invariant 2.9) -- it degrades to a cache miss and falls through to the live call, same fail-open contract as `_x_daily_cap_reserve`."""
+    import redis
+
+    class _CacheReadFailsRedis(FakeRedis):
+        def get(self, key: str) -> str | None:  # noqa: ARG002 -- must match FakeRedis.get's signature
+            raise ConnectionError("redis get failed")
+
+    broken = _CacheReadFailsRedis()
+    monkeypatch.setattr(redis, "from_url", lambda *_a, **_kw: broken)
+    monkeypatch.setattr("app.core.config.X_SEARCH_ENABLED", True)
+    monkeypatch.setattr("app.core.config.X_BEARER_TOKEN", "test-token")
+    monkeypatch.setattr(
+        "app.core.net_guard.guarded_get",
+        lambda url, **_kw: _json_response(url, 200, _SEARCH_PAYLOAD),
+    )
+
+    result = _tool_search_x("algorand")
+
+    assert "error" not in result
+    assert result["count"] == 2
+
+
+def test_error_result_is_not_cached(
+    monkeypatch: pytest.MonkeyPatch,
+    patch_redis_from_url: FakeRedis,  # noqa: ARG001
+) -> None:
+    """An error result from the live call is never cached (CLAUDE.md invariant 2.8: empty/error is not a cacheable "answer") -- a subsequent call with the same query still attempts a fresh live call, not a replayed error."""
+    monkeypatch.setattr("app.core.config.X_SEARCH_ENABLED", True)
+    monkeypatch.setattr("app.core.config.X_BEARER_TOKEN", "test-token")
+
+    calls = {"n": 0}
+
+    def fake_live(q: str) -> dict:
+        calls["n"] += 1
+        return {"query": q, "error": "boom", "posts": []}
+
+    monkeypatch.setattr("app.modules.ai.research_tools._x_search_live", fake_live)
+
+    first = _tool_search_x("algorand")
+    second = _tool_search_x("algorand")
+
+    assert "error" in first
+    assert "error" in second
+    assert calls["n"] == 2
+
+
+def _today() -> str:
+    return datetime.datetime.now(tz=datetime.UTC).strftime("%Y-%m-%d")
+
+
 def test_tool_registered_only_when_configured(monkeypatch: pytest.MonkeyPatch) -> None:
     """search_x registers in both schemas and handlers only when X_SEARCH_ENABLED and X_BEARER_TOKEN are both set -- opt-in, matching every other paid/credentialed tool."""
     monkeypatch.setattr("app.core.config.X_SEARCH_ENABLED", False)
@@ -246,3 +373,149 @@ def test_tool_registered_only_when_configured(monkeypatch: pytest.MonkeyPatch) -
     names = {s["function"]["name"] for s in schemas}
     assert "search_x" in names
     assert "search_x" in handlers
+
+
+# --------------------------------------------------------------------------- #
+# Durable cross-recompose reinjection (2026-09-02): a recompose can happen
+# days or weeks after the original compose, well past the Redis cache's TTL.
+# investigation_findings already durably stores every search_x call a compose
+# makes (unmodified by this change); _recompose_via_writer /
+# _recompose_published_compose now read it back via
+# investigation_store.load_prior_search_x_findings /
+# format_prior_search_x_block and hand it to the writer as real usable
+# research (enrichment_block), not just a dedup signal. See
+# tests/test_investigation_store.py for the pure read/format function tests
+# -- these cover the wiring into the two recompose call sites.
+# --------------------------------------------------------------------------- #
+
+
+def test_recompose_via_writer_reinjects_prior_search_x_into_enrichment_block(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A recompose actually gets its own prior search_x findings reinjected as real writer context (enrichment_block), not just a cache-hit-skips-the-call -- the actual owner ask behind this feature."""
+    from app.modules.newspaper.tasks import publish_tasks as pt
+
+    monkeypatch.setattr(
+        "app.modules.newspaper.admin_source_store.load_active_sources",
+        lambda _article_id: [],
+    )
+    monkeypatch.setattr(
+        "app.modules.newspaper.investigation_store.load_prior_search_x_findings",
+        lambda _service_id: [
+            {
+                "query": "algorand quantum",
+                "result": {
+                    "posts": [
+                        {"text": "Algorand ships v5.0.0", "likes": 42, "reposts": 7, "replies": 3}
+                    ]
+                },
+            }
+        ],
+    )
+    captured: dict = {}
+
+    def _fake_compose(**kwargs: object) -> object:
+        captured.update(kwargs)
+        return object()
+
+    monkeypatch.setattr(pt, "compose_scrape_article", _fake_compose)
+
+    pt._recompose_via_writer(
+        review_id="rev1",
+        url="https://example.com/x",
+        page_text="text",
+        page_title="title",
+        category="cat",
+        storage_score=0.5,
+        kind="web",
+        old_article_id="art1",
+    )
+
+    assert "algorand quantum" in captured["enrichment_block"]
+    assert "Algorand ships v5.0.0" in captured["enrichment_block"]
+
+
+def test_recompose_via_writer_no_prior_findings_passes_empty_enrichment_block(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The normal case (no prior search_x findings for this URL) passes an empty enrichment_block, not an error or a placeholder -- silent no-op, matching admin_sources' own "empty when no sources" contract."""
+    from app.modules.newspaper.tasks import publish_tasks as pt
+
+    monkeypatch.setattr(
+        "app.modules.newspaper.admin_source_store.load_active_sources",
+        lambda _article_id: [],
+    )
+    monkeypatch.setattr(
+        "app.modules.newspaper.investigation_store.load_prior_search_x_findings",
+        lambda _service_id: [],
+    )
+    captured: dict = {}
+
+    def _fake_compose(**kwargs: object) -> object:
+        captured.update(kwargs)
+        return object()
+
+    monkeypatch.setattr(pt, "compose_scrape_article", _fake_compose)
+
+    pt._recompose_via_writer(
+        review_id="rev1",
+        url="https://example.com/x",
+        page_text="text",
+        page_title="title",
+        category="cat",
+        storage_score=0.5,
+        kind="web",
+        old_article_id="art1",
+    )
+
+    assert captured["enrichment_block"] == ""
+
+
+def test_recompose_published_compose_reinjects_prior_search_x(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The archive-refresh recompose path (_recompose_published_compose, the non-brief branch) also reinjects prior search_x findings, keyed on source_url -- the same value it passes to compose_scrape_article, matching what store_investigation_findings used as its service_id key on the article's prior composes."""
+    from app.modules.newspaper.tasks import publish_tasks as pt
+
+    monkeypatch.setattr(
+        "app.modules.newspaper.admin_source_store.load_active_sources",
+        lambda _article_id: [],
+    )
+    seen_service_ids: list[str] = []
+
+    def _fake_load(service_id: str) -> list[dict]:
+        seen_service_ids.append(service_id)
+        return [
+            {
+                "query": "algorand quantum",
+                "result": {"posts": [{"text": "hit", "likes": 1, "reposts": 0, "replies": 0}]},
+            }
+        ]
+
+    monkeypatch.setattr(
+        "app.modules.newspaper.investigation_store.load_prior_search_x_findings", _fake_load
+    )
+    captured: dict = {}
+
+    def _fake_compose(**kwargs: object) -> object:
+        captured.update(kwargs)
+        return object()
+
+    monkeypatch.setattr(pt, "compose_scrape_article", _fake_compose)
+
+    class _FakeTask:
+        def retry(self, *_a: object, **_kw: object) -> None:
+            raise AssertionError("should not retry")
+
+    pt._recompose_published_compose(
+        _FakeTask(),
+        article_id="art1",
+        service_id="svc",
+        source_url="https://example.com/x",
+        page_text="text",
+        page_title="title",
+        brief_for_recompose=None,
+    )
+
+    assert seen_service_ids == ["https://example.com/x"]
+    assert "algorand quantum" in captured["enrichment_block"]
