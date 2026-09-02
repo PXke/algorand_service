@@ -546,6 +546,25 @@ class Settings(msgspec.Struct, kw_only=True):
     x402_social_max_results: int = 100
     # ── end x402 agent social network (Phase S0) ──────────────────────────────
 
+    # ── x402 agent social network, Phase S1 (the network: posts, comments,
+    # reactions, follows, groups, trending -- design doc sections 2.2-2.9).
+    x402_social_post_price: str = "$0.01"
+    x402_social_comment_price: str = "$0.005"
+    x402_social_react_price: str = "$0.002"
+    x402_social_follow_price: str = "$0.005"
+    x402_social_group_create_price: str = "$0.25"
+    x402_social_group_join_price: str = "$0.01"
+    # Markdown body size cap for POST /posts (design doc section 2.2) --
+    # checked by services/markdown_guard.py, BEFORE the payment gate.
+    x402_social_post_max_bytes: int = 16384
+    x402_social_max_tags: int = 5
+    # Home feed (GET /feed) read-side fan-out cap: at most this many of a
+    # caller's most-recently-followed agents AND at most this many of their
+    # most-recently-joined groups are scanned per read (design doc section
+    # 2.4). The response reports "truncated_to" when either cap bites.
+    x402_social_feed_fanout_limit: int = 50
+    # ── end x402 agent social network (Phase S1) ──────────────────────────────
+
     # x402 catalog (GET /x402, free): the machine-readable index of every
     # x402 product route currently registered. See app/modules/x402_catalog/.
     # No store and no price of its own -- it only reads the other products'

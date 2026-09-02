@@ -1268,6 +1268,171 @@ class X402SocialStmts:
         "WHERE bucket = ? LIMIT ?"
     )
 
+    # ------------------------------------------------------------- #
+    # Phase S1 (migration 106): posts, comments, reactions, follows, groups
+    # ------------------------------------------------------------- #
+    INSERT_POST = _Stmt(
+        "INSERT INTO algorand_platform.x402_social_posts ("
+        "post_id, author, group_id, body_md, tags, created_at, settlement_tx_id, "
+        "deleted, hidden_group"
+        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+    )
+    INSERT_POST_BY_AUTHOR = _Stmt(
+        "INSERT INTO algorand_platform.x402_social_posts_by_author ("
+        "author, created_at, post_id, group_id, body_md, tags, deleted"
+        ") VALUES (?, ?, ?, ?, ?, ?, ?)"
+    )
+    INSERT_GROUP_FEED_POST = _Stmt(
+        "INSERT INTO algorand_platform.x402_social_group_feed ("
+        "group_id, created_at, post_id, author, body_md, tags, deleted, hidden_group"
+        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+    )
+    GET_POST = _Stmt(
+        "SELECT post_id, author, group_id, body_md, tags, created_at, settlement_tx_id, "
+        "deleted, hidden_group FROM algorand_platform.x402_social_posts WHERE post_id = ?"
+    )
+    LIST_POSTS_BY_AUTHOR = _Stmt(
+        "SELECT author, created_at, post_id, group_id, body_md, tags, deleted "
+        "FROM algorand_platform.x402_social_posts_by_author WHERE author = ? LIMIT ?"
+    )
+    LIST_GROUP_FEED = _Stmt(
+        "SELECT group_id, created_at, post_id, author, body_md, tags, deleted, hidden_group "
+        "FROM algorand_platform.x402_social_group_feed WHERE group_id = ? LIMIT ?"
+    )
+    # IF EXISTS, same precedent as the promo code deactivation (100): a
+    # tombstone flip on a known primary key never upserts a phantom row for a
+    # post that was never actually stored.
+    MARK_POST_DELETED = _Stmt(
+        "UPDATE algorand_platform.x402_social_posts SET deleted = true WHERE post_id = ? IF EXISTS"
+    )
+    MARK_POST_BY_AUTHOR_DELETED = _Stmt(
+        "UPDATE algorand_platform.x402_social_posts_by_author SET deleted = true "
+        "WHERE author = ? AND created_at = ? AND post_id = ? IF EXISTS"
+    )
+    MARK_POST_HIDDEN_GROUP = _Stmt(
+        "UPDATE algorand_platform.x402_social_posts SET hidden_group = true "
+        "WHERE post_id = ? IF EXISTS"
+    )
+    MARK_GROUP_FEED_POST_HIDDEN = _Stmt(
+        "UPDATE algorand_platform.x402_social_group_feed SET hidden_group = true "
+        "WHERE group_id = ? AND created_at = ? AND post_id = ? IF EXISTS"
+    )
+    INSERT_COMMENT = _Stmt(
+        "INSERT INTO algorand_platform.x402_social_comments ("
+        "post_id, created_at, comment_id, author, body_md, settlement_tx_id, deleted"
+        ") VALUES (?, ?, ?, ?, ?, ?, ?)"
+    )
+    LIST_COMMENTS = _Stmt(
+        "SELECT post_id, created_at, comment_id, author, body_md, settlement_tx_id, deleted "
+        "FROM algorand_platform.x402_social_comments WHERE post_id = ? LIMIT ?"
+    )
+    # The whole "one reaction per wallet per post, forever" rule: an LWT on
+    # the full primary key, applied BEFORE the counter increment below (see
+    # post_service.py's react()). Never retried on failure.
+    INSERT_REACTION_IF_ABSENT = _Stmt(
+        "INSERT INTO algorand_platform.x402_social_reaction_log ("
+        "post_id, wallet, value, settlement_tx_id, created_at"
+        ") VALUES (?, ?, ?, ?, ?) IF NOT EXISTS"
+    )
+    INCREMENT_REACTION_UP = _Stmt(
+        "UPDATE algorand_platform.x402_social_reaction_totals SET up = up + 1 WHERE post_id = ?"
+    )
+    INCREMENT_REACTION_DOWN = _Stmt(
+        "UPDATE algorand_platform.x402_social_reaction_totals SET down = down + 1 WHERE post_id = ?"
+    )
+    GET_REACTION_TOTALS = _Stmt(
+        "SELECT up, down FROM algorand_platform.x402_social_reaction_totals WHERE post_id = ?"
+    )
+    # Plain, idempotent INSERTs -- re-following the same wallet just
+    # re-stamps created_at (design doc section 2.4; unlike a reaction, a
+    # duplicate follow is not caller-fault).
+    INSERT_FOLLOW = _Stmt(
+        "INSERT INTO algorand_platform.x402_social_follows (follower, followee, created_at) "
+        "VALUES (?, ?, ?)"
+    )
+    INSERT_FOLLOWER = _Stmt(
+        "INSERT INTO algorand_platform.x402_social_followers (followee, follower, created_at) "
+        "VALUES (?, ?, ?)"
+    )
+    DELETE_FOLLOW = _Stmt(
+        "DELETE FROM algorand_platform.x402_social_follows WHERE follower = ? AND followee = ?"
+    )
+    DELETE_FOLLOWER = _Stmt(
+        "DELETE FROM algorand_platform.x402_social_followers WHERE followee = ? AND follower = ?"
+    )
+    # Not clustered by recency (see the migration's own comment) -- a bounded
+    # partition scan, sorted by created_at in Python. LIMIT is
+    # domain.GRAPH_SCAN_LIMIT, a module constant, not the caller's requested
+    # page size.
+    LIST_FOLLOWING = _Stmt(
+        "SELECT follower, followee, created_at FROM algorand_platform.x402_social_follows "
+        "WHERE follower = ? LIMIT ?"
+    )
+    LIST_FOLLOWERS = _Stmt(
+        "SELECT followee, follower, created_at FROM algorand_platform.x402_social_followers "
+        "WHERE followee = ? LIMIT ?"
+    )
+    # The whole "one name, one group, forever" rule (design doc section 2.6):
+    # an LWT on the normalized name, applied BEFORE the group is ever stored.
+    INSERT_GROUP_NAME_IF_ABSENT = _Stmt(
+        "INSERT INTO algorand_platform.x402_social_group_names (name_norm, group_id) "
+        "VALUES (?, ?) IF NOT EXISTS"
+    )
+    INSERT_GROUP = _Stmt(
+        "INSERT INTO algorand_platform.x402_social_groups ("
+        "group_id, name, description, owner, created_at, settlement_tx_id"
+        ") VALUES (?, ?, ?, ?, ?, ?)"
+    )
+    INSERT_GROUP_RECENCY = _Stmt(
+        "INSERT INTO algorand_platform.x402_social_groups_by_recency ("
+        "bucket, created_at, group_id, name, description, owner"
+        ") VALUES (?, ?, ?, ?, ?, ?)"
+    )
+    GET_GROUP = _Stmt(
+        "SELECT group_id, name, description, owner, created_at, settlement_tx_id "
+        "FROM algorand_platform.x402_social_groups WHERE group_id = ?"
+    )
+    LIST_GROUPS_RECENT = _Stmt(
+        "SELECT bucket, created_at, group_id, name, description, owner "
+        "FROM algorand_platform.x402_social_groups_by_recency WHERE bucket = ? LIMIT ?"
+    )
+    UPSERT_GROUP_MEMBER = _Stmt(
+        "INSERT INTO algorand_platform.x402_social_group_members ("
+        "group_id, wallet, role, joined_at, settlement_tx_id"
+        ") VALUES (?, ?, ?, ?, ?)"
+    )
+    UPSERT_MEMBERSHIP = _Stmt(
+        "INSERT INTO algorand_platform.x402_social_memberships ("
+        "wallet, group_id, role, joined_at, settlement_tx_id"
+        ") VALUES (?, ?, ?, ?, ?)"
+    )
+    GET_GROUP_MEMBER = _Stmt(
+        "SELECT group_id, wallet, role, joined_at, settlement_tx_id "
+        "FROM algorand_platform.x402_social_group_members WHERE group_id = ? AND wallet = ?"
+    )
+    # Not clustered by recency (see the migration's own comment) -- a bounded
+    # partition scan, sorted by joined_at in Python (domain.GRAPH_SCAN_LIMIT).
+    LIST_MEMBERSHIPS = _Stmt(
+        "SELECT wallet, group_id, role, joined_at, settlement_tx_id "
+        "FROM algorand_platform.x402_social_memberships WHERE wallet = ? LIMIT ?"
+    )
+    DELETE_GROUP_MEMBER = _Stmt(
+        "DELETE FROM algorand_platform.x402_social_group_members WHERE group_id = ? AND wallet = ?"
+    )
+    DELETE_MEMBERSHIP = _Stmt(
+        "DELETE FROM algorand_platform.x402_social_memberships WHERE wallet = ? AND group_id = ?"
+    )
+    # IF EXISTS: a role change on a membership that no longer exists must
+    # never upsert a phantom row missing every other column.
+    UPDATE_GROUP_MEMBER_ROLE = _Stmt(
+        "UPDATE algorand_platform.x402_social_group_members SET role = ? "
+        "WHERE group_id = ? AND wallet = ? IF EXISTS"
+    )
+    UPDATE_MEMBERSHIP_ROLE = _Stmt(
+        "UPDATE algorand_platform.x402_social_memberships SET role = ? "
+        "WHERE wallet = ? AND group_id = ? IF EXISTS"
+    )
+
 
 # --------------------------------------------------------------------------- #
 # glossary_terms

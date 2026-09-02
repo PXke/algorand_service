@@ -32,6 +32,7 @@ What is covered (see CLAUDE.md section 6's required regression list):
 from __future__ import annotations
 
 import json
+import threading
 from types import SimpleNamespace
 from typing import Any, Never
 
@@ -44,14 +45,25 @@ from algosdk.encoding import encode_address
 from x402.mechanisms.avm.constants import ALGORAND_TESTNET_CAIP2
 
 from app.core import rate_limit as rate_limit_core
+from app.core.config import settings
 from app.core.http import QueryParams, Request
 from app.modules.x402 import circuit_breaker as circuit_breaker_module
 from app.modules.x402 import guard as x402_guard
 from app.modules.x402 import paid_request as payment_service
 from app.modules.x402.refund import RefundResult
 from app.modules.x402_social.api import routes as social_routes
-from app.modules.x402_social.models.domain import MAX_BIO_LEN, MAX_INTERESTS, SocialError
-from app.modules.x402_social.services import session_service
+from app.modules.x402_social.models.domain import (
+    GROUP_ROLE_MEMBER,
+    MAX_BIO_LEN,
+    MAX_INTERESTS,
+    REACTION_UP,
+    SocialError,
+)
+from app.modules.x402_social.services import prose, session_service, trending_service
+from app.modules.x402_social.services.graph_service import GraphService
+from app.modules.x402_social.services.group_service import GroupService
+from app.modules.x402_social.services.markdown_guard import validate_markdown_body
+from app.modules.x402_social.services.post_service import PostService
 from app.modules.x402_social.services.profile_service import ProfileService, validate_profile_fields
 from app.modules.x402_social.stores.memory import InMemorySocialStore
 
@@ -63,11 +75,12 @@ _OTHER_PAYER = encode_address(bytes([3]) + bytes(31))
 # Fakes
 # --------------------------------------------------------------------------- #
 class _FakeRedis:
-    """Enough of the Redis API for challenges, sessions, and rate-limit counters."""
+    """Enough of the Redis API for challenges, sessions, rate-limit counters, and (S1) trending's sorted sets."""
 
     def __init__(self) -> None:
         self.store: dict[str, str] = {}
         self.expires: dict[str, int] = {}
+        self.zsets: dict[str, dict[str, float]] = {}
 
     def setex(self, key: str, time: int, value: str) -> bool:
         self.store[key] = value
@@ -88,6 +101,47 @@ class _FakeRedis:
     def expire(self, key: str, seconds: int) -> bool:
         self.expires[key] = seconds
         return True
+
+    def zincrby(self, key: str, amount: float, member: str) -> float:
+        zset = self.zsets.setdefault(key, {})
+        zset[member] = zset.get(member, 0.0) + amount
+        return zset[member]
+
+    def zrange(
+        self, key: str, start: int, end: int, withscores: bool = False
+    ) -> list[tuple[str, float]] | list[str]:
+        items = sorted(self.zsets.get(key, {}).items(), key=lambda kv: kv[1])
+        sliced = items[start:] if end == -1 else items[start : end + 1]
+        return sliced if withscores else [member for member, _score in sliced]
+
+    def pipeline(self) -> _FakePipeline:
+        return _FakePipeline(self)
+
+
+class _FakePipeline:
+    """Enough of a Redis pipeline for trending_service's zincrby+expire+execute batches -- queues ops, applies them on execute()."""
+
+    def __init__(self, client: _FakeRedis) -> None:
+        self._client = client
+        self._ops: list[tuple] = []
+
+    def zincrby(self, key: str, amount: float, member: str) -> _FakePipeline:
+        self._ops.append(("zincrby", key, amount, member))
+        return self
+
+    def expire(self, key: str, seconds: int) -> _FakePipeline:
+        self._ops.append(("expire", key, seconds))
+        return self
+
+    def execute(self) -> list[object]:
+        results: list[object] = []
+        for op in self._ops:
+            if op[0] == "zincrby":
+                results.append(self._client.zincrby(op[1], op[2], op[3]))
+            elif op[0] == "expire":
+                results.append(self._client.expire(op[1], op[2]))
+        self._ops = []
+        return results
 
 
 class _BrokenRedis:
@@ -123,6 +177,7 @@ def fake_redis(monkeypatch: pytest.MonkeyPatch) -> _FakeRedis:
     monkeypatch.setattr(session_service, "get_redis", lambda: client)
     monkeypatch.setattr(rate_limit_core, "get_redis", lambda: client)
     monkeypatch.setattr(circuit_breaker_module, "get_redis", lambda: client)
+    monkeypatch.setattr(trending_service, "get_redis", lambda: client)
     return client
 
 
@@ -474,3 +529,699 @@ def test_validate_profile_fields_rejects_too_many_interests() -> None:
             interests=[f"topic{i}" for i in range(MAX_INTERESTS + 1)],
             emoji="",
         )
+
+
+# =========================================================================== #
+# Phase S1: the network (posts, comments, reactions, follows, groups,
+# trending, dual output format). See CLAUDE.md section 6's required
+# regression list -- this section covers all five named there.
+# =========================================================================== #
+
+
+# --------------------------------------------------------------------------- #
+# markdown_guard: HTML is rejected, not stripped
+# --------------------------------------------------------------------------- #
+def test_markdown_guard_rejects_embedded_html_rather_than_stripping_it() -> None:
+    """A <script> tag is refused outright (SocialError), never silently removed -- the design doc's own reasoning: stripping would change what the author paid to say without telling them."""
+    with pytest.raises(SocialError) as exc_info:
+        validate_markdown_body("hello <script>alert(1)</script> world", max_bytes=1000)
+    assert exc_info.value.code == "embedded_html_rejected"
+    assert exc_info.value.http_status == 400
+
+
+def test_markdown_guard_rejects_a_raw_img_tag() -> None:
+    """A raw <img src=...> is rejected the same way a <script> is."""
+    with pytest.raises(SocialError):
+        validate_markdown_body('<img src="x" onerror="evil()">', max_bytes=1000)
+
+
+def test_markdown_guard_allows_a_commonmark_autolink() -> None:
+    """<https://example.com> is legitimate markdown, not embedded HTML, and must NOT be rejected."""
+    body = validate_markdown_body("see <https://example.com> for details", max_bytes=1000)
+    assert body == "see <https://example.com> for details"
+
+
+def test_markdown_guard_rejects_oversized_body() -> None:
+    """A body over max_bytes is refused, never silently truncated."""
+    with pytest.raises(SocialError) as exc_info:
+        validate_markdown_body("x" * 100, max_bytes=10)
+    assert exc_info.value.http_status == 400
+
+
+def test_markdown_guard_rejects_empty_body() -> None:
+    """An empty (or whitespace-only) body is refused."""
+    with pytest.raises(SocialError):
+        validate_markdown_body("   ", max_bytes=1000)
+
+
+# --------------------------------------------------------------------------- #
+# post_service: create / read / delete / comments
+# --------------------------------------------------------------------------- #
+def test_post_create_get_and_delete_round_trip(store: InMemorySocialStore) -> None:
+    """A post is stored, readable by id, listed on the author's feed, and deletable by its author (tombstone, not a row delete)."""
+    service = PostService(store)
+    post = service.create(
+        author=_PAYER,
+        body_md="hello world",
+        tags=["Defi", "defi", " liquidity "],
+        group_id="",
+        settlement_tx_id="TX-P1",
+    )
+    # normalize_tags: trimmed, lowercased, de-duplicated, order preserved.
+    assert post.tags == ["defi", "liquidity"]
+
+    fetched = service.get(post.post_id)
+    assert fetched is not None
+    assert fetched.body_md == "hello world"
+
+    author_feed = service.list_by_author(_PAYER, limit=10)
+    assert [p.post_id for p in author_feed] == [post.post_id]
+
+    deleted = service.delete(post.post_id, wallet=_PAYER)
+    assert deleted.deleted is True
+    # Still resolvable by id -- never a row delete.
+    assert service.get(post.post_id).deleted is True
+
+    # Idempotent: deleting again is a no-op success, not an error.
+    again = service.delete(post.post_id, wallet=_PAYER)
+    assert again.deleted is True
+
+
+def test_post_delete_refuses_a_non_author(store: InMemorySocialStore) -> None:
+    """Only the author of a post may delete it."""
+    service = PostService(store)
+    post = service.create(
+        author=_PAYER, body_md="mine", tags=[], group_id="", settlement_tx_id="TX-P2"
+    )
+    with pytest.raises(SocialError) as exc_info:
+        service.delete(post.post_id, wallet=_OTHER_PAYER)
+    assert exc_info.value.http_status == 403
+
+
+def test_post_create_in_a_group_requires_membership(store: InMemorySocialStore) -> None:
+    """A post into a group the author has not joined is refused -- caller-fault (design doc section 2.2/4.1: this can only be checked AFTER the payment gate, since the author is the settled payer)."""
+    service = PostService(store, membership_lookup=lambda _group_id, _wallet: False)
+    with pytest.raises(SocialError) as exc_info:
+        service.create(
+            author=_PAYER, body_md="hi", tags=[], group_id="some-group", settlement_tx_id="TX-P3"
+        )
+    assert exc_info.value.code == "not_group_member"
+    assert exc_info.value.http_status == 403
+
+
+def test_comment_create_and_list(store: InMemorySocialStore) -> None:
+    """A comment is appended to a post's thread, oldest-first, and counted."""
+    service = PostService(store)
+    post = service.create(
+        author=_PAYER, body_md="topic", tags=[], group_id="", settlement_tx_id="TX-P4"
+    )
+    service.add_comment(
+        post_id=post.post_id, author=_OTHER_PAYER, body_md="first", settlement_tx_id="TX-C1"
+    )
+    service.add_comment(
+        post_id=post.post_id, author=_PAYER, body_md="second", settlement_tx_id="TX-C2"
+    )
+    comments = service.list_comments(post.post_id, limit=10)
+    assert [c.body_md for c in comments] == ["first", "second"]
+    count, truncated = service.comment_count(post.post_id)
+    assert count == 2
+    assert truncated is False
+
+
+# --------------------------------------------------------------------------- #
+# S1-A: reactions -- LWT-then-counter race safety (CLAUDE.md section 6)
+# --------------------------------------------------------------------------- #
+def test_second_reaction_from_same_wallet_is_refused_caller_fault(
+    store: InMemorySocialStore,
+) -> None:
+    """A second reaction from the same wallet on the same post is refused (409), never a second counter increment."""
+    service = PostService(store)
+    post = service.create(
+        author=_PAYER, body_md="hi", tags=[], group_id="", settlement_tx_id="TX-P5"
+    )
+    totals = service.react(
+        post_id=post.post_id, wallet=_OTHER_PAYER, value=REACTION_UP, settlement_tx_id="TX-R1"
+    )
+    assert totals.up == 1
+
+    with pytest.raises(SocialError) as exc_info:
+        service.react(
+            post_id=post.post_id, wallet=_OTHER_PAYER, value=REACTION_UP, settlement_tx_id="TX-R2"
+        )
+    assert exc_info.value.code == "already_reacted"
+    assert exc_info.value.http_status == 409
+
+    # The counter was NOT bumped a second time.
+    assert service.reaction_totals(post.post_id).up == 1
+
+
+def test_concurrent_reactions_from_the_same_wallet_produce_exactly_one_counter_increment(
+    store: InMemorySocialStore,
+) -> None:
+    """Two threads racing POST /react for the SAME wallet on the SAME post: the LWT wins exactly once, so the counter is incremented exactly once and every other attempt is refused, never silently dropped or double-counted."""
+    service = PostService(store)
+    post = service.create(
+        author=_PAYER, body_md="race me", tags=[], group_id="", settlement_tx_id="TX-P6"
+    )
+
+    outcomes: list[str] = []
+    lock = threading.Lock()
+
+    def attempt(i: int) -> None:
+        try:
+            service.react(
+                post_id=post.post_id,
+                wallet=_OTHER_PAYER,
+                value=REACTION_UP,
+                settlement_tx_id=f"TX-RACE-{i}",
+            )
+            with lock:
+                outcomes.append("won")
+        except SocialError:
+            with lock:
+                outcomes.append("refused")
+
+    threads = [threading.Thread(target=attempt, args=(i,)) for i in range(12)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert outcomes.count("won") == 1
+    assert outcomes.count("refused") == 11
+    totals = service.reaction_totals(post.post_id)
+    assert totals.up == 1
+    assert totals.down == 0
+
+
+# --------------------------------------------------------------------------- #
+# graph_service: follow / unfollow / friends
+# --------------------------------------------------------------------------- #
+def test_follow_unfollow_and_mutual_friends(store: InMemorySocialStore) -> None:
+    """A -> follow -> B is one-directional until B follows A back; friends() is exactly the mutual intersection."""
+    service = GraphService(store)
+    service.follow(follower=_PAYER, followee=_OTHER_PAYER)
+
+    assert [e.wallet for e in service.following(_PAYER, limit=10)] == [_OTHER_PAYER]
+    assert [e.wallet for e in service.followers(_OTHER_PAYER, limit=10)] == [_PAYER]
+    assert service.friends(_PAYER, limit=10) == []
+    assert service.friends(_OTHER_PAYER, limit=10) == []
+
+    service.follow(follower=_OTHER_PAYER, followee=_PAYER)
+    assert [e.wallet for e in service.friends(_PAYER, limit=10)] == [_OTHER_PAYER]
+    assert [e.wallet for e in service.friends(_OTHER_PAYER, limit=10)] == [_PAYER]
+
+    service.unfollow(follower=_PAYER, followee=_OTHER_PAYER)
+    assert service.following(_PAYER, limit=10) == []
+    # No longer mutual, so no longer friends either.
+    assert service.friends(_OTHER_PAYER, limit=10) == []
+
+
+def test_unfollow_a_non_existent_edge_is_a_no_op(store: InMemorySocialStore) -> None:
+    """DELETE follow on an edge that was never created just succeeds quietly (free route, nothing to refuse)."""
+    service = GraphService(store)
+    service.unfollow(follower=_PAYER, followee=_OTHER_PAYER)  # must not raise
+
+
+def test_refollow_is_idempotent_not_caller_fault(store: InMemorySocialStore) -> None:
+    """Unlike a reaction, following an already-followed wallet a second time is NOT refused (design doc section 2.4)."""
+    service = GraphService(store)
+    service.follow(follower=_PAYER, followee=_OTHER_PAYER)
+    service.follow(follower=_PAYER, followee=_OTHER_PAYER)  # must not raise
+    assert [e.wallet for e in service.following(_PAYER, limit=10)] == [_OTHER_PAYER]
+
+
+# --------------------------------------------------------------------------- #
+# S1-B: group-name collision is caller-fault, payment kept, no refund
+# (mirrors S0-3's re-registration test shape exactly)
+# --------------------------------------------------------------------------- #
+def test_group_service_name_collision_is_caller_fault(store: InMemorySocialStore) -> None:
+    """The SECOND wallet to claim an already-taken group name is refused (409, group_name_taken); the first group is untouched."""
+    service = GroupService(store)
+    first = service.create(
+        owner=_PAYER, name="defi-signals", description="first", settlement_tx_id="TX-G1"
+    )
+
+    with pytest.raises(SocialError) as exc_info:
+        service.create(
+            owner=_OTHER_PAYER, name="DeFi-Signals", description="second", settlement_tx_id="TX-G2"
+        )
+    assert exc_info.value.code == "group_name_taken"
+    assert exc_info.value.http_status == 409
+
+    # The original group survives untouched.
+    assert store.get_group(first.group_id).owner == _PAYER
+    assert store.get_group(first.group_id).description == "first"
+
+
+@pytest.mark.usefixtures("fake_redis")
+def test_group_create_route_name_collision_settles_but_is_refused_payment_kept_no_refund_attempted(
+    store: InMemorySocialStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Route-level mirror of S0-3: two settled group-create payments for the same name -- the second is refused (409), mark_fulfilled runs only for the first, and NO refund is attempted (SocialError is a PlatformError, exempted from run_with_refund's refund path)."""
+    monkeypatch.setattr(social_routes, "group_service", GroupService(store))
+    fulfilled: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        social_routes,
+        "mark_fulfilled",
+        lambda txid, *, resource: fulfilled.append((txid, resource)),
+    )
+    refund_calls: list[dict[str, object]] = []
+    monkeypatch.setattr(payment_service, "send_refund", lambda **kw: refund_calls.append(kw))
+
+    body = json.dumps({"name": "defi-signals", "description": "signals"}).encode()
+
+    monkeypatch.setattr(
+        social_routes,
+        "require_paid_request",
+        lambda *_a, **_kw: _settled_result(payer=_PAYER, txid="TX-G-A"),
+    )
+    first = social_routes.x402_social_group_create(
+        _request(body=body, path="/api/v1/x402/social/groups")
+    )
+    assert first.status_code == 200
+    first_group_id = json.loads(first.description)["group"]["group_id"]
+
+    monkeypatch.setattr(
+        social_routes,
+        "require_paid_request",
+        lambda *_a, **_kw: _settled_result(payer=_OTHER_PAYER, txid="TX-G-B"),
+    )
+    second = social_routes.x402_social_group_create(
+        _request(body=body, path="/api/v1/x402/social/groups")
+    )
+
+    assert second.status_code == 409
+    body_json = json.loads(second.description)
+    assert body_json["error"]["code"] == "group_name_taken"
+    # Settlement headers (the receipt) are still attached -- the second
+    # payment WAS settled on-chain, only the product write was refused.
+    assert second.headers.get("PAYMENT-RESPONSE") == "ok"
+    assert fulfilled == [("TX-G-A", "x402-social-group-create")]
+    assert refund_calls == []
+    # The original group's owner is untouched by the refused second create.
+    assert store.get_group(first_group_id).owner == _PAYER
+
+
+# --------------------------------------------------------------------------- #
+# group_service: join / leave / moderators / hide-post / remove-member
+# --------------------------------------------------------------------------- #
+def test_group_join_leave_and_owner_cannot_leave(store: InMemorySocialStore) -> None:
+    """Joining is idempotent, leaving removes membership, and the owner is refused (owner_cannot_leave)."""
+    service = GroupService(store)
+    group = service.create(owner=_PAYER, name="ai-agents", description="", settlement_tx_id="TX-G3")
+
+    membership = service.join(
+        group_id=group.group_id, wallet=_OTHER_PAYER, settlement_tx_id="TX-J1"
+    )
+    assert membership.role == GROUP_ROLE_MEMBER
+
+    # Idempotent: joining again does not change the role.
+    again = service.join(group_id=group.group_id, wallet=_OTHER_PAYER, settlement_tx_id="TX-J2")
+    assert again.role == GROUP_ROLE_MEMBER
+
+    service.leave(group_id=group.group_id, wallet=_OTHER_PAYER)
+    assert service.get_membership(group.group_id, _OTHER_PAYER) is None
+
+    with pytest.raises(SocialError) as exc_info:
+        service.leave(group_id=group.group_id, wallet=_PAYER)
+    assert exc_info.value.code == "owner_cannot_leave"
+
+
+def test_group_moderator_promote_and_demote(store: InMemorySocialStore) -> None:
+    """The owner can promote a member to moderator and back; a non-owner cannot."""
+    service = GroupService(store)
+    group = service.create(
+        owner=_PAYER, name="promo-group", description="", settlement_tx_id="TX-G4"
+    )
+    service.join(group_id=group.group_id, wallet=_OTHER_PAYER, settlement_tx_id="TX-J3")
+
+    promoted = service.set_moderator(
+        group_id=group.group_id, actor_wallet=_PAYER, target_wallet=_OTHER_PAYER
+    )
+    assert promoted.role == "moderator"
+
+    demoted = service.unset_moderator(
+        group_id=group.group_id, actor_wallet=_PAYER, target_wallet=_OTHER_PAYER
+    )
+    assert demoted.role == GROUP_ROLE_MEMBER
+
+    # Only the owner may promote/demote.
+    with pytest.raises(SocialError) as exc_info:
+        service.set_moderator(
+            group_id=group.group_id, actor_wallet=_OTHER_PAYER, target_wallet=_OTHER_PAYER
+        )
+    assert exc_info.value.http_status == 403
+
+
+def test_group_hide_post_is_scoped_to_the_group_feed_only(store: InMemorySocialStore) -> None:
+    """An owner hiding a post from their group's feed does NOT delete it or hide it on the author's own feed (design doc section 2.7)."""
+    group_service_ = GroupService(store)
+    post_service_ = PostService(
+        store, membership_lookup=lambda gid, w: group_service_.is_member(gid, w)
+    )
+    group_service_._post_service = post_service_
+
+    group = group_service_.create(
+        owner=_PAYER, name="hide-test", description="", settlement_tx_id="TX-G5"
+    )
+    group_service_.join(group_id=group.group_id, wallet=_OTHER_PAYER, settlement_tx_id="TX-J4")
+    post = post_service_.create(
+        author=_OTHER_PAYER,
+        body_md="spam?",
+        tags=[],
+        group_id=group.group_id,
+        settlement_tx_id="TX-P7",
+    )
+
+    hidden = group_service_.hide_post(
+        group_id=group.group_id, actor_wallet=_PAYER, post_id=post.post_id
+    )
+    assert hidden.hidden_group is True
+
+    # Survives on the author's own feed, untouched.
+    author_feed = post_service_.list_by_author(_OTHER_PAYER, limit=10)
+    assert author_feed[0].hidden_group is False
+    assert author_feed[0].deleted is False
+
+    # Excluded from the group's own feed once hidden (route-level filtering
+    # mirrors this: see x402_social_group_feed).
+    group_feed = post_service_.list_group_feed(group.group_id, limit=10)
+    assert group_feed[0].hidden_group is True
+
+
+def test_group_remove_member_cannot_remove_the_owner(store: InMemorySocialStore) -> None:
+    """An owner/moderator can remove a plain member but never the owner."""
+    service = GroupService(store)
+    group = service.create(
+        owner=_PAYER, name="remove-test", description="", settlement_tx_id="TX-G6"
+    )
+    service.join(group_id=group.group_id, wallet=_OTHER_PAYER, settlement_tx_id="TX-J5")
+
+    service.remove_member(group_id=group.group_id, actor_wallet=_PAYER, target_wallet=_OTHER_PAYER)
+    assert service.get_membership(group.group_id, _OTHER_PAYER) is None
+
+    with pytest.raises(SocialError) as exc_info:
+        service.remove_member(group_id=group.group_id, actor_wallet=_PAYER, target_wallet=_PAYER)
+    assert exc_info.value.code == "cannot_remove_owner"
+
+
+# --------------------------------------------------------------------------- #
+# S1-C: home-feed fan-out cap actually truncates and reports truncated_to
+# --------------------------------------------------------------------------- #
+@pytest.mark.usefixtures("fake_redis")
+def test_home_feed_route_truncates_and_reports_truncated_to(
+    store: InMemorySocialStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With feed_fanout_limit set below the caller's actual follow count, GET /feed only scans that many followees and reports truncated_to -- it does not silently pretend the feed is exhaustive."""
+    monkeypatch.setattr(social_routes, "post_service", PostService(store))
+    graph = GraphService(store)
+    monkeypatch.setattr(social_routes, "graph_service", graph)
+    monkeypatch.setattr(social_routes, "group_service", GroupService(store))
+    monkeypatch.setattr(settings, "x402_social_feed_fanout_limit", 2)
+
+    caller = _PAYER
+    followees = [encode_address(bytes([10 + i]) + bytes(31)) for i in range(4)]
+    post_service_ = PostService(store)
+    for i, followee in enumerate(followees):
+        graph.follow(follower=caller, followee=followee)
+        post_service_.create(
+            author=followee,
+            body_md=f"post {i}",
+            tags=[],
+            group_id="",
+            settlement_tx_id=f"TX-HF-{i}",
+        )
+
+    token, _expires = social_routes.issue_session_token(caller)
+    response = social_routes.x402_social_home_feed(
+        _request(
+            method="GET",
+            path="/api/v1/x402/social/feed",
+            headers={"authorization": f"Bearer {token}"},
+        )
+    )
+    assert isinstance(response, dict)
+    assert response["truncated_to"] == 2
+    # Only feed_fanout_limit (2) of the 4 followees' posts were ever scanned.
+    assert len(response["posts"]) <= 2
+
+
+@pytest.mark.usefixtures("fake_redis")
+def test_home_feed_route_reports_no_truncation_when_the_cap_does_not_bite(
+    store: InMemorySocialStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With feed_fanout_limit comfortably above the caller's actual follow count, truncated_to is None."""
+    monkeypatch.setattr(social_routes, "post_service", PostService(store))
+    graph = GraphService(store)
+    monkeypatch.setattr(social_routes, "graph_service", graph)
+    monkeypatch.setattr(social_routes, "group_service", GroupService(store))
+    monkeypatch.setattr(settings, "x402_social_feed_fanout_limit", 50)
+
+    caller = _PAYER
+    followee = _OTHER_PAYER
+    graph.follow(follower=caller, followee=followee)
+    PostService(store).create(
+        author=followee, body_md="only post", tags=[], group_id="", settlement_tx_id="TX-HF-X"
+    )
+
+    token, _expires = social_routes.issue_session_token(caller)
+    response = social_routes.x402_social_home_feed(
+        _request(
+            method="GET",
+            path="/api/v1/x402/social/feed",
+            headers={"authorization": f"Bearer {token}"},
+        )
+    )
+    assert isinstance(response, dict)
+    assert response["truncated_to"] is None
+    assert len(response["posts"]) == 1
+
+
+# --------------------------------------------------------------------------- #
+# S1-D: both output formats derive from one struct (design doc section 3)
+# --------------------------------------------------------------------------- #
+def test_post_prose_and_json_derive_from_the_same_dict() -> None:
+    """post_prose renders straight from the fields of the SAME dict the JSON branch would serialize -- changing a field in the dict changes the prose output identically, because there is no second, independently-computed description."""
+    payload = {
+        "post_id": "abc-123",
+        "author": "WALLETXYZ",
+        "group_id": "defi-signals",
+        "body_md": "Liquidity doubled overnight.",
+        "tags": ["defi", "liquidity"],
+        "created_at_epoch": 1757000000,
+        "deleted": False,
+        "hidden_group": False,
+        "reactions": {"up": 12, "down": 1},
+        "comment_count": 4,
+    }
+    text = prose.post_prose(payload)
+    assert payload["post_id"] in text
+    assert payload["author"] in text
+    assert payload["group_id"] in text
+    assert "defi, liquidity" in text
+    assert "12 up, 1 down" in text
+    assert "4 comment" in text
+    assert payload["body_md"] in text
+
+    # Mutate the SAME dict fields the JSON response would carry; the prose
+    # output must move in lockstep, proving there is no separately hardcoded
+    # copy of these values anywhere in prose.py.
+    payload["reactions"] = {"up": 99, "down": 7}
+    payload["comment_count"] = 1
+    moved = prose.post_prose(payload)
+    assert "99 up, 7 down" in moved
+    assert "1 comment" in moved
+    assert "12 up, 1 down" not in moved
+
+
+def test_group_prose_derives_from_the_same_dict() -> None:
+    """group_prose renders straight from the same dict fields as the JSON branch, same structural guarantee as post_prose above."""
+    payload = {
+        "group_id": "g1",
+        "name": "defi-signals",
+        "description": "Liquidity and volume signals.",
+        "owner": "WALLETOWNER",
+        "created_at_epoch": 1757000000,
+    }
+    text = prose.group_prose(payload)
+    assert payload["name"] in text
+    assert payload["owner"] in text
+    assert payload["description"] in text
+
+    payload["owner"] = "WALLETNEWOWNER"
+    moved = prose.group_prose(payload)
+    assert "WALLETNEWOWNER" in moved
+    assert "WALLETOWNER" not in moved or moved.count("WALLETOWNER") < text.count("WALLETOWNER")
+
+
+def test_trending_prose_derives_from_the_same_list() -> None:
+    """trending_prose renders straight from the same list the JSON branch would serialize."""
+    items = [{"tag": "defi", "score": 12.5}, {"tag": "nft", "score": 3.0}]
+    text = prose.trending_prose(items, heading="Trending topics", key="tag")
+    assert "defi" in text
+    assert "12.50" in text
+    assert "nft" in text
+
+
+# --------------------------------------------------------------------------- #
+# trending_service: weighted ZINCRBY buckets, fail-open on Redis loss
+# --------------------------------------------------------------------------- #
+@pytest.mark.usefixtures("fake_redis")
+def test_trending_topics_ranks_by_accumulated_weight() -> None:
+    """A tag with more accumulated weight (post + reaction) outranks one with a single reaction."""
+    trending_service.record_topic_activity(["defi"], weight=trending_service.POST_WEIGHT)
+    trending_service.record_topic_activity(["defi"], weight=trending_service.REACTION_WEIGHT)
+    trending_service.record_topic_activity(["nft"], weight=trending_service.REACTION_WEIGHT)
+
+    ranked = trending_service.top_topics(limit=10)
+    tags = [tag for tag, _score in ranked]
+    assert tags[0] == "defi"
+    assert "nft" in tags
+
+
+@pytest.mark.usefixtures("fake_redis")
+def test_trending_groups_records_and_reads_back() -> None:
+    """A group's recorded activity is readable back via top_groups with a positive decayed score."""
+    trending_service.record_group_activity("group-a", weight=trending_service.POST_WEIGHT)
+    ranked = trending_service.top_groups(limit=10)
+    assert ranked[0][0] == "group-a"
+    assert ranked[0][1] > 0
+
+
+def test_trending_fails_open_to_empty_on_redis_loss(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A Redis outage on the read side returns an empty list, not an exception -- CLAUDE.md section 2 invariant 9."""
+    monkeypatch.setattr(trending_service, "get_redis", lambda: _BrokenRedis())
+    assert trending_service.top_topics(limit=10) == []
+    assert trending_service.top_groups(limit=10) == []
+    # The write side is equally fail-open: recording must not raise.
+    trending_service.record_topic_activity(["defi"], weight=1)
+    trending_service.record_group_activity("group-a", weight=1)
+
+
+# --------------------------------------------------------------------------- #
+# Route-level smoke tests: POST /posts, GET /posts/{id} (both formats), react
+# --------------------------------------------------------------------------- #
+@pytest.mark.usefixtures("fake_redis")
+def test_post_create_route_end_to_end(
+    store: InMemorySocialStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """POST /posts stores the post under the payer's wallet; GET /posts/{id} reads it back in both json and prose formats."""
+    monkeypatch.setattr(social_routes, "post_service", PostService(store))
+    monkeypatch.setattr(
+        social_routes,
+        "require_paid_request",
+        lambda *_a, **_kw: _settled_result(payer=_PAYER, txid="TX-POST-1"),
+    )
+    fulfilled: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        social_routes,
+        "mark_fulfilled",
+        lambda txid, *, resource: fulfilled.append((txid, resource)),
+    )
+
+    response = social_routes.x402_social_post_create(
+        _request(
+            body=json.dumps({"body_md": "hello agents", "tags": ["defi"]}).encode(),
+            path="/api/v1/x402/social/posts",
+        )
+    )
+    assert response.status_code == 200
+    body = json.loads(response.description)
+    assert body["post"]["author"] == _PAYER
+    assert body["post"]["body_md"] == "hello agents"
+    assert fulfilled == [("TX-POST-1", "x402-social-post")]
+
+    post_id = body["post"]["post_id"]
+    detail = social_routes.x402_social_post_detail(
+        _request(
+            method="GET",
+            path_params={"post_id": post_id},
+            path=f"/api/v1/x402/social/posts/{post_id}",
+        )
+    )
+    assert isinstance(detail, dict)
+    assert detail["post"]["post_id"] == post_id
+    assert detail["post"]["reactions"] == {"up": 0, "down": 0}
+    assert detail["post"]["comment_count"] == 0
+
+    prose_response = social_routes.x402_social_post_detail(
+        _request(
+            method="GET",
+            path_params={"post_id": post_id},
+            query={"format": "prose"},
+            path=f"/api/v1/x402/social/posts/{post_id}",
+        )
+    )
+    assert prose_response.headers["Content-Type"].startswith("text/plain")
+    assert "hello agents" in prose_response.description
+    assert post_id in prose_response.description
+
+
+@pytest.mark.usefixtures("fake_redis")
+def test_post_create_route_rejects_embedded_html_before_the_gate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A post body with embedded HTML is a free 400 -- require_paid_request must never even be called."""
+    called = []
+    monkeypatch.setattr(social_routes, "require_paid_request", lambda *_a, **_kw: called.append(1))
+
+    response = social_routes.x402_social_post_create(
+        _request(
+            body=json.dumps({"body_md": "hi <script>evil()</script>"}).encode(),
+            path="/api/v1/x402/social/posts",
+        )
+    )
+    assert response.status_code == 400
+    assert called == []
+
+
+@pytest.mark.usefixtures("fake_redis")
+def test_react_route_second_attempt_is_409_with_settlement_headers_and_no_refund(
+    store: InMemorySocialStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Route-level mirror of the reaction caller-fault contract: second reaction settles but is refused, payment kept, no refund attempted."""
+    monkeypatch.setattr(social_routes, "post_service", PostService(store))
+    post = PostService(store).create(
+        author=_PAYER, body_md="react to me", tags=[], group_id="", settlement_tx_id="TX-RP1"
+    )
+
+    refund_calls: list[dict[str, object]] = []
+    monkeypatch.setattr(payment_service, "send_refund", lambda **kw: refund_calls.append(kw))
+    fulfilled: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        social_routes,
+        "mark_fulfilled",
+        lambda txid, *, resource: fulfilled.append((txid, resource)),
+    )
+
+    monkeypatch.setattr(
+        social_routes,
+        "require_paid_request",
+        lambda *_a, **_kw: _settled_result(payer=_OTHER_PAYER, txid="TX-R-A"),
+    )
+    first = social_routes.x402_social_react(
+        _request(
+            body=json.dumps({"value": "up"}).encode(),
+            path_params={"post_id": post.post_id},
+            path=f"/api/v1/x402/social/posts/{post.post_id}/react",
+        )
+    )
+    assert first.status_code == 200
+
+    monkeypatch.setattr(
+        social_routes,
+        "require_paid_request",
+        lambda *_a, **_kw: _settled_result(payer=_OTHER_PAYER, txid="TX-R-B"),
+    )
+    second = social_routes.x402_social_react(
+        _request(
+            body=json.dumps({"value": "up"}).encode(),
+            path_params={"post_id": post.post_id},
+            path=f"/api/v1/x402/social/posts/{post.post_id}/react",
+        )
+    )
+    assert second.status_code == 409
+    assert second.headers.get("PAYMENT-RESPONSE") == "ok"
+    assert fulfilled == [("TX-R-A", "x402-social-react")]
+    assert refund_calls == []
