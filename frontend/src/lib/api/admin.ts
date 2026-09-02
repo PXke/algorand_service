@@ -127,6 +127,18 @@ export function createAdminApi(wallet: string, token: string | null) {
       api.getJson(`/api/v1/admin/articles/${articleId}/comments`, h()),
     deleteComment: (articleId: string, commentId: string) =>
       api.deleteJson(`/api/v1/admin/articles/${articleId}/comments/${commentId}`, h()),
+    // Owner-supplied article sources (docs/newspaper-article-sources-design.md,
+    // Phase 1) -- attach is storage-only, no Celery dispatch; the next
+    // Recompose click loads whatever's active here.
+    listArticleSources: (articleId: string, signal?: AbortSignal) =>
+      api.getJson(`/api/v1/admin/articles/${articleId}/sources`, { headers: h(), signal }),
+    createArticleSource: (articleId: string, body: Record<string, unknown>) =>
+      api.postJson(`/api/v1/admin/articles/${articleId}/sources`, body, h()),
+    deleteArticleSource: (articleId: string, sourceId: string) =>
+      api.deleteJson(
+        `/api/v1/admin/articles/${articleId}/sources/${encodeURIComponent(sourceId)}`,
+        h(),
+      ),
     // Editorial-room artifact system — backs the Queue tab's ranked
     // pending-artifact list, the real-selection lookup, and the
     // pin-for-tomorrow action.
