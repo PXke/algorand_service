@@ -95,6 +95,7 @@ main() {
     _any_match "backend/*" "${files[@]}" && ch_back=1
     _any_match "workers/*" "${files[@]}" && ch_workers=1
     _any_match "schema/*" "${files[@]}" && ch_schema=1
+    _any_match "backend/schema/*" "${files[@]}" && ch_schema=1
     _any_match "conduit/schema/*" "${files[@]}" && ch_schema=1
     _any_match "backend/pyproject.toml" "${files[@]}" && ch_pyproj=1
     _any_match "workers/pyproject.toml" "${files[@]}" && ch_pyproj=1
