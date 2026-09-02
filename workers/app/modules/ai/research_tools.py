@@ -19,11 +19,11 @@
   machinery (x_search_sweep.py, the x_search_weekly table) is left in place
   but unscheduled -- _x_search_live below still serves it if it's ever
   manually re-enabled, but nothing calls it automatically any more.
-  A separate, per-query Redis result cache (2026-09-02, config.
-  X_SEARCH_CACHE_TTL_SECONDS) sits in front of _x_search_live and is checked
-  BEFORE the daily-cap reserve, so a recompose (or any other article) asking
-  the same normalized question within the TTL costs zero budget -- this is
-  NOT the reverted weekly-sweep design: it's keyed on the query text itself,
+  A separate, per-query Redis result cache (2026-09-02, no expiry -- owner
+  call: "let's cache it forever") sits in front of _x_search_live and is
+  checked BEFORE the daily-cap reserve, so a recompose (or any other
+  article) asking the same normalized question, ever, costs zero budget --
+  this is NOT the reverted weekly-sweep design: it's keyed on the query text itself,
   not a tracked service, so it never confines the writer to a fixed list.
 
 Every handler is failure-tolerant: an error returns {"error": ...} and never
@@ -300,19 +300,23 @@ def _x_search_cache_get(query: str) -> dict[str, Any] | None:
 
 
 def _x_search_cache_set(query: str, result: dict[str, Any]) -> None:
-    """Cache a successful search_x `result` for config.X_SEARCH_CACHE_TTL_SECONDS. Caller must only pass a result that already succeeded (no "error" key) -- CLAUDE.md invariant 2.8, an error is not a cacheable "answer" to replay for the rest of the TTL.
+    """Cache a successful search_x `result` with NO expiry (owner call, 2026-09-02: "let's cache it forever" -- a recompose should always get the same answer this session already paid for, no matter how much later it happens). Caller must only pass a result that already succeeded (no "error" key) -- CLAUDE.md invariant 2.8, an error is not a cacheable "answer" to replay indefinitely.
 
     Fails OPEN on any Redis error: a write failure here must not fail the
     tool call that already succeeded and is about to be returned to the
-    writer, it just means the next call won't get a cache hit.
+    writer, it just means the next call won't get a cache hit. Redis
+    eviction under memory pressure is a separate, operational concern (not
+    a TTL this code sets) -- the durable layer this session also added
+    (investigation_store.load_prior_search_x_findings, backed by
+    investigation_findings, itself never TTL'd) is the real forever-cache;
+    this Redis layer is the cheap same/near-session fast path on top of it.
     """
-    from app.core.config import X_SEARCH_CACHE_TTL_SECONDS
     from app.core.redis_client import get_redis
 
     key = _x_search_cache_key(query)
     try:
         client = get_redis()
-        client.set(key, json.dumps(result), ex=X_SEARCH_CACHE_TTL_SECONDS)
+        client.set(key, json.dumps(result))
     except Exception:
         logger.warning("_x_search_cache_set: Redis unavailable, result not cached", exc_info=True)
 

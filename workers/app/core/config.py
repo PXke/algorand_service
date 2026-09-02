@@ -1434,12 +1434,9 @@ X_SEARCH_DAILY_CAP = env_int("X_SEARCH_DAILY_CAP", 20)
 # publish_tasks.py's _recompose_via_writer reruns the writer's whole research
 # loop from scratch) re-paying X for a question it already asked. Keyed on
 # the normalized query text, not the article/service, so it also serves a
-# different article asking an equivalent question. 24h default: long enough
-# that same-day and next-day recomposes (the actual reported case) hit, short
-# enough that "recent posts" results don't go stale across many days -- the
-# same order of magnitude as the daily budget counter's own ~90000s (25h)
-# Redis TTL just above.
-X_SEARCH_CACHE_TTL_SECONDS = env_int("X_SEARCH_CACHE_TTL_SECONDS", 86400)
+# different article asking an equivalent question. No expiry (owner call,
+# 2026-09-02: "let's cache it forever") -- no setting to own here, the cache
+# write is a plain Redis SET with no TTL.
 # The 2026-08-25..08-28 weekly-sweep design's own ceiling -- unused while
 # search_x reads live again, but left defined since x_search_sweep.py (left
 # in place, just unscheduled -- see celery_app.py) still reads it if ever
