@@ -36,8 +36,10 @@ from x402.server import x402ResourceServerSync
 from app.core import rate_limit as rate_limit_core
 from app.core.config import settings
 from app.core.http import QueryParams, Request, Response
+from app.modules.x402 import circuit_breaker
 from app.modules.x402 import client as x402_client
 from app.modules.x402 import guard as x402_guard
+from app.modules.x402 import paid_request as paid_request_module
 from app.modules.x402 import replay as replay_module
 from app.modules.x402_features.api import routes as feature_routes
 from app.modules.x402_features.services.feature_service import FeatureService, request_id_for
@@ -46,6 +48,12 @@ from app.modules.x402_features.stores.memory import InMemoryFeatureStore
 _PAY_TO = "A" * 58
 _PAYER = "P" * 58
 _OTHER_PAYER = "Q" * 58
+
+# Captured before any test/fixture monkeypatches circuit_breaker.is_tripped,
+# so the dedicated breaker test below can restore real breaker behaviour
+# (this file's autouse _breaker_closed_by_default fixture stubs it for
+# every other test).
+_real_is_tripped = circuit_breaker.is_tripped
 
 
 # --------------------------------------------------------------------------- #
@@ -77,6 +85,9 @@ class _FakeRedis:
     def expire(self, key: str, seconds: int) -> bool:
         self.expires[key] = seconds
         return True
+
+    def get(self, key: str) -> str | None:
+        return self.store.get(key)
 
 
 class _BrokenRedis:
@@ -179,12 +190,29 @@ def testnet_settings(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(x402_guard, "get_resource_server", _stub_resource_server)
 
 
+@pytest.fixture(autouse=True)
+def _breaker_closed_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every test in this file gets a not-tripped circuit breaker unless it says otherwise.
+
+    Most tests here predate the refund circuit breaker and monkeypatch
+    require_paid_request directly rather than pulling in fake_redis -- the
+    breaker's own is_tripped check now runs BEFORE require_paid_request on
+    every paid route, so without this it fails CLOSED (unreachable Redis) and
+    every one of those tests gets a 503 instead of what they actually test.
+    Tests that specifically exercise the breaker (tripped, or a real Redis
+    seam) override this via their own fake_redis usage or an explicit
+    monkeypatch of circuit_breaker.is_tripped.
+    """
+    monkeypatch.setattr(circuit_breaker, "is_tripped", lambda _resource: False)
+
+
 @pytest.fixture
 def fake_redis(monkeypatch: pytest.MonkeyPatch) -> _FakeRedis:
-    """Swap both Redis seams for one in-process fake shared by replay and rate limiting."""
+    """Swap all Redis seams for one in-process fake shared by replay, rate limiting and the refund circuit breaker."""
     client = _FakeRedis()
     monkeypatch.setattr(replay_module, "get_redis", lambda **_kw: client)
     monkeypatch.setattr(rate_limit_core, "get_redis", lambda **_kw: client)
+    monkeypatch.setattr(circuit_breaker, "get_redis", lambda **_kw: client)
     return client
 
 
@@ -437,6 +465,67 @@ def test_a_settled_vote_increments_the_total_and_records_the_voter(
     assert audit[0].settlement_tx_id == "TXV1"
 
 
+@pytest.mark.usefixtures("testnet_settings", "fake_redis")
+def test_a_vote_write_failure_after_settlement_gets_refunded_not_500(
+    wired: InMemoryFeatureStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A product-write exception after payment settles triggers a refund response, never a bare 500."""
+    request_id = _file_request(FeatureService(wired))
+    monkeypatch.setattr(
+        feature_routes, "require_paid_request", lambda *_a, **_kw: _settled_result(txid="TXV-FAIL")
+    )
+
+    def _boom(*_a: object, **_kw: object) -> Never:
+        raise RuntimeError("simulated feature-store failure")
+
+    monkeypatch.setattr(feature_routes.feature_service, "vote", _boom)
+    monkeypatch.setattr(
+        paid_request_module,
+        "send_refund",
+        lambda **_kw: SimpleNamespace(status="sent", txid="REFUND1", error=None),
+    )
+
+    response = feature_routes.x402_features_vote(_request(path_params={"request_id": request_id}))
+
+    assert response.status_code == 503
+    body = json.loads(response.description)
+    assert body["error"]["code"] in ("product_failed_refunded", "product_failed_refund_pending")
+
+
+def test_the_vote_circuit_breaker_blocks_before_the_payment_gate_once_tripped(
+    wired: InMemoryFeatureStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Once tripped, the resource is refused before require_paid_request ever runs -- no further money at risk."""
+    request_id = _file_request(FeatureService(wired))
+
+    def _must_not_charge(*_a: object, **_kw: object) -> Never:
+        raise AssertionError("the payment gate must not run while the breaker is tripped")
+
+    monkeypatch.setattr(circuit_breaker, "is_tripped", lambda _resource: True)
+    monkeypatch.setattr(feature_routes, "require_paid_request", _must_not_charge)
+
+    response = feature_routes.x402_features_vote(_request(path_params={"request_id": request_id}))
+
+    assert response.status_code == 503
+    assert "temporarily_disabled" in response.description
+
+
+@pytest.mark.usefixtures("testnet_settings", "fake_redis")
+def test_the_real_breaker_trips_after_enough_recorded_failures(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """End-to-end against the real (fake-Redis-backed) breaker, not a stub -- record_refund_failure enough times and is_tripped flips."""
+    monkeypatch.setattr(circuit_breaker, "is_tripped", _real_is_tripped)
+    monkeypatch.setattr(settings, "x402_refund_breaker_max_failures", 2)
+
+    resource = feature_routes._VOTE_RESOURCE
+    assert circuit_breaker.is_tripped(resource) is False
+    circuit_breaker.record_refund_failure(resource)
+    assert circuit_breaker.is_tripped(resource) is False
+    circuit_breaker.record_refund_failure(resource)
+    assert circuit_breaker.is_tripped(resource) is True
+
+
 def test_the_same_wallet_may_vote_repeatedly_by_paying_repeatedly(
     service: FeatureService, store: InMemoryFeatureStore
 ) -> None:
@@ -678,6 +767,42 @@ def test_a_bad_demand_limit_is_rejected_before_the_payment_gate() -> None:
 
     assert response.status_code == 400
     assert "invalid_request" in response.description
+
+
+@pytest.mark.usefixtures("testnet_settings", "fake_redis", "wired")
+def test_demand_preview_serves_a_redacted_response_never_ranking_the_real_requests(
+    wired: InMemoryFeatureStore,
+) -> None:
+    """?preview=true gets one redacted exemplar row, never the real vote-ranked order or totals."""
+    service = FeatureService(wired)
+    base = datetime.now(tz=UTC) - timedelta(hours=5)
+    ids = {}
+    for index, title in enumerate(["low", "high"]):
+        ids[title] = _file_request(service, title=title, txid=f"TX{index}", now=base)
+    for title, votes in (("low", 1), ("high", 9)):
+        for vote_index in range(votes):
+            service.vote(
+                request_id=ids[title], voter=_PAYER, settlement_tx_id=f"TXV-{title}-{vote_index}"
+            )
+
+    response = feature_routes.x402_features_demand(
+        _request(method="GET", query={"preview": "true"})
+    )
+
+    assert response.status_code == 200
+    body = json.loads(response.description)
+    assert body["items"] == [
+        {
+            **feature_routes._REQUEST_EXAMPLE,
+            "request_id": "<preview>",
+            "submitter": None,
+            "created_at_epoch": 0,
+            "vote_total": -1,
+            "claims_count": 0,
+            "latest_claimer": None,
+        }
+    ]
+    assert body["settlement_tx_id"] == "<preview>"
 
 
 def test_the_paid_demand_read_ranks_by_vote_total_and_shows_the_counts(

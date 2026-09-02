@@ -203,13 +203,15 @@ def test_referrer_host_hides_server_ip() -> None:
 
 
 def test_is_internal_client_filters_self_and_private() -> None:
-    """Flags the server's own IP, loopback, private ranges and their XFF leftmost entry."""
+    """Flags the server's own IP, loopback, private ranges; leftover XFF chains use the last hop."""
     assert a.is_internal_client("5.135.131.229")  # the server's own public IP
     assert a.is_internal_client("127.0.0.1")  # loopback
     assert a.is_internal_client("10.0.0.5")
     assert a.is_internal_client("192.168.1.4")
-    # X-Forwarded-For chain: the left-most entry is the real client
-    assert a.is_internal_client("127.0.0.1, 5.135.131.229")
+    # Leftover X-Forwarded-For chain: last hop is the proxy-appended client,
+    # not the attacker-controlled first element.
+    assert a.is_internal_client("8.8.8.8, 127.0.0.1")
+    assert not a.is_internal_client("127.0.0.1, 8.8.8.8")
     assert not a.is_internal_client("8.8.8.8")  # a real external visitor
     assert not a.is_internal_client(None)
     assert not a.is_internal_client("")
@@ -1149,6 +1151,15 @@ def test_article_document_recently_served(monkeypatch: pytest.MonkeyPatch) -> No
     monkeypatch.setattr(a, "_uv_redis", _boom)
     a.mark_article_document_served("", "8.8.8.8", "Mozilla/5.0")
     a.mark_article_document_served("article-1", None, "Mozilla/5.0")
+
+
+def test_article_document_seen_uses_last_xff_hop(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A leftover XFF chain keys uniqueness on the last hop, not a spoofed prefix."""
+    fake = _FakeDocSeenRedis()
+    monkeypatch.setattr(a, "_uv_redis", lambda: fake)
+    a.mark_article_document_served("article-1", "1.2.3.4, 9.9.9.9", "Mozilla/5.0")
+    assert a.article_document_recently_served("article-1", "9.9.9.9", "Mozilla/5.0") is True
+    assert a.article_document_recently_served("article-1", "1.2.3.4", "Mozilla/5.0") is False
 
 
 class _FakeStageRedis:

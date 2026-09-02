@@ -5,7 +5,12 @@ from __future__ import annotations
 import pytest
 
 from app.core import cors
-from app.core.cors import cors_permissive, origin_allowed
+from app.core.cors import (
+    DEFAULT_CORS_EXPOSE_HEADERS,
+    DEFAULT_CORS_HEADERS,
+    cors_permissive,
+    origin_allowed,
+)
 
 
 def test_origin_allowed_only_for_configured_origins(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -38,3 +43,9 @@ def test_explicit_permissive_flag_overrides_env(monkeypatch: pytest.MonkeyPatch)
     monkeypatch.setattr(cors.settings, "cors_permissive", False)
     monkeypatch.setattr(cors.settings, "app_env", "dev")
     assert not cors_permissive()
+
+
+def test_payment_headers_are_on_the_cors_allow_and_expose_lists() -> None:
+    """Browser x402 clients send PAYMENT-SIGNATURE and must read PAYMENT-REQUIRED."""
+    assert "PAYMENT-SIGNATURE" in DEFAULT_CORS_HEADERS
+    assert "PAYMENT-REQUIRED" in DEFAULT_CORS_EXPOSE_HEADERS

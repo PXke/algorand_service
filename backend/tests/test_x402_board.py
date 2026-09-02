@@ -32,8 +32,10 @@ from x402.server import x402ResourceServerSync
 from app.core import rate_limit as rate_limit_core
 from app.core.config import settings
 from app.core.http import QueryParams, Request, Response
+from app.modules.x402 import circuit_breaker
 from app.modules.x402 import client as x402_client
 from app.modules.x402 import guard as x402_guard
+from app.modules.x402 import paid_request as paid_request_module
 from app.modules.x402 import replay as replay_module
 from app.modules.x402_board.api import routes as board_routes
 from app.modules.x402_board.models.domain import StoredPlacement
@@ -66,6 +68,10 @@ class _FakeRedis:
         if ex is not None:
             self.expires[key] = ex
         return True
+
+    def get(self, key: str) -> str | None:
+        # circuit_breaker.is_tripped's plain read of the failure-count key.
+        return self.store.get(key)
 
     def delete(self, key: str) -> int:
         return 1 if self.store.pop(key, None) is not None else 0
@@ -169,10 +175,16 @@ def testnet_settings(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.fixture
 def fake_redis(monkeypatch: pytest.MonkeyPatch) -> _FakeRedis:
-    """Swap both Redis seams for one in-process fake shared by replay and rate limiting."""
+    """Swap all three Redis seams for one in-process fake shared by replay, rate limiting, and the refund circuit breaker."""
     client = _FakeRedis()
     monkeypatch.setattr(replay_module, "get_redis", lambda **_kw: client)
     monkeypatch.setattr(rate_limit_core, "get_redis", lambda **_kw: client)
+    # circuit_breaker.is_tripped reads app.core.redis_client's get_redis
+    # directly (imported at module scope in circuit_breaker.py), not
+    # rate_limit_core's -- patch it separately or it fails CLOSED (503) on
+    # every board_place/board_renew test, same seam every other module's
+    # tests needed this same fix for after migration 102's retrofit.
+    monkeypatch.setattr(circuit_breaker, "get_redis", lambda **_kw: client)
     return client
 
 
@@ -294,6 +306,7 @@ def test_a_settled_payment_stores_the_placement_and_returns_its_txid(
     store: InMemoryPlacementStore, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Once payment settles, the placement is stored and returned with the settlement txid and headers."""
+    monkeypatch.setattr(circuit_breaker, "is_tripped", lambda _resource: False)
     monkeypatch.setattr(board_routes, "board_service", BoardService(store))
     monkeypatch.setattr(board_routes, "require_paid_request", lambda *_a, **_kw: _settled_result())
 
@@ -332,6 +345,7 @@ def test_the_payer_in_the_body_cannot_override_the_settled_payer(
     store: InMemoryPlacementStore, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A caller cannot claim someone else's wallet by putting a payer in the body."""
+    monkeypatch.setattr(circuit_breaker, "is_tripped", lambda _resource: False)
     monkeypatch.setattr(board_routes, "board_service", BoardService(store))
     monkeypatch.setattr(board_routes, "require_paid_request", lambda *_a, **_kw: _settled_result())
 
@@ -638,6 +652,7 @@ def test_a_settled_renewal_extends_the_term_from_its_current_end_and_marks_fulfi
     store: InMemoryPlacementStore, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Renewing early adds a full term on top of what is left, keeps created_at, records the new txid, and marks the settlement fulfilled after the store write."""
+    monkeypatch.setattr(circuit_breaker, "is_tripped", lambda _resource: False)
     monkeypatch.setattr(settings, "x402_board_term_days", 14)
     monkeypatch.setattr(board_routes, "board_service", BoardService(store))
     monkeypatch.setattr(
@@ -687,6 +702,7 @@ def test_a_different_wallet_cannot_renew_someone_elses_tile(
     store: InMemoryPlacementStore, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Ownership is only knowable post-settlement: the other wallet's payment settles, gets a 403 with its receipt headers, the tile is untouched, and nothing is marked fulfilled."""
+    monkeypatch.setattr(circuit_breaker, "is_tripped", lambda _resource: False)
     monkeypatch.setattr(board_routes, "board_service", BoardService(store))
     monkeypatch.setattr(
         board_routes,
@@ -922,3 +938,153 @@ def test_admin_board_delete_removes_the_tile_from_get_and_feed(
         == 404
     )
     assert board_routes.x402_admin_delete_placement(_delete_request("")).status_code == 400
+
+
+# --------------------------------------------------------------------------- #
+# Auto-refund + circuit breaker (migration 102 retrofit)
+# --------------------------------------------------------------------------- #
+@pytest.mark.usefixtures("testnet_settings", "fake_redis")
+def test_a_place_write_failure_after_settlement_gets_refunded_not_500(
+    store: InMemoryPlacementStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A product-write exception after payment settles triggers a refund response, never a bare 500."""
+    monkeypatch.setattr(board_routes, "board_service", BoardService(store))
+    monkeypatch.setattr(
+        board_routes, "require_paid_request", lambda *_a, **_kw: _settled_result(txid="TXP-FAIL")
+    )
+
+    def _boom(*_a: object, **_kw: object) -> Never:
+        raise RuntimeError("simulated board-store failure")
+
+    monkeypatch.setattr(board_routes.board_service, "create", _boom)
+    monkeypatch.setattr(
+        paid_request_module,
+        "send_refund",
+        lambda **_kw: SimpleNamespace(status="sent", txid="REFUND1", error=None),
+    )
+
+    response = board_routes.x402_board_place(
+        _request(
+            body=json.dumps(
+                {"link": "https://agent.example.com", "name": "A", "pitch": "p"}
+            ).encode()
+        )
+    )
+
+    assert response.status_code == 503
+    body = json.loads(response.description)
+    assert body["error"]["code"] in ("product_failed_refunded", "product_failed_refund_pending")
+
+
+def test_the_place_circuit_breaker_blocks_before_the_payment_gate_once_tripped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Once tripped, x402-board-place is refused before require_paid_request ever runs -- no further money at risk."""
+
+    def _must_not_charge(*_a: object, **_kw: object) -> Never:
+        raise AssertionError("the payment gate must not run while the breaker is tripped")
+
+    monkeypatch.setattr(circuit_breaker, "is_tripped", lambda _resource: True)
+    monkeypatch.setattr(board_routes, "require_paid_request", _must_not_charge)
+
+    response = board_routes.x402_board_place(_request(body=b"{}"))
+
+    assert response.status_code == 503
+    assert "temporarily_disabled" in response.description
+
+
+def test_the_renew_circuit_breaker_blocks_before_the_payment_gate_once_tripped(
+    store: InMemoryPlacementStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Same guarantee on renew: tripped means refused before the gate, before the existence/ownership checks even run."""
+    monkeypatch.setattr(board_routes, "board_service", BoardService(store))
+    monkeypatch.setattr(circuit_breaker, "is_tripped", lambda _resource: True)
+
+    def _must_not_charge(*_a: object, **_kw: object) -> Never:
+        raise AssertionError("the payment gate must not run while the breaker is tripped")
+
+    monkeypatch.setattr(board_routes, "require_paid_request", _must_not_charge)
+
+    response = board_routes.x402_board_renew(_request(path_params={"entry_id": "whatever"}))
+
+    assert response.status_code == 503
+    assert "temporarily_disabled" in response.description
+
+
+@pytest.mark.usefixtures("testnet_settings", "fake_redis")
+def test_a_renew_ownership_rejection_is_never_refunded(
+    store: InMemoryPlacementStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The deliberate, payment-keeping 403 must never trigger send_refund or count against the circuit breaker -- refunding it would silently undo the intended disincentive against renewing someone else's tile."""
+    monkeypatch.setattr(board_routes, "board_service", BoardService(store))
+    monkeypatch.setattr(
+        board_routes,
+        "require_paid_request",
+        lambda *_a, **_kw: _settled_result(payer=_OTHER_PAYER, txid="TXX"),
+    )
+    monkeypatch.setattr(
+        paid_request_module,
+        "send_refund",
+        lambda **_kw: (_ for _ in ()).throw(
+            AssertionError("an ownership rejection must never attempt a refund")
+        ),
+    )
+    monkeypatch.setattr(
+        circuit_breaker,
+        "record_refund_failure",
+        lambda *_a, **_kw: (_ for _ in ()).throw(
+            AssertionError("an ownership rejection must never count as a refund-triggering failure")
+        ),
+    )
+    placement = _placed(store)
+
+    response = board_routes.x402_board_renew(_request(path_params={"entry_id": placement.entry_id}))
+
+    assert response.status_code == 403
+    assert "placement_owned_by_another_payer" in response.description
+    assert store.get(placement.entry_id) == placement
+
+
+@pytest.mark.usefixtures("testnet_settings", "fake_redis")
+def test_a_renew_write_failure_after_ownership_confirmed_gets_refunded_not_500(
+    store: InMemoryPlacementStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Unlike the ownership rejection, a genuinely unexpected failure (e.g. the store write) AFTER ownership is confirmed valid IS refunded."""
+    monkeypatch.setattr(board_routes, "board_service", BoardService(store))
+    placement = _placed(store)
+    monkeypatch.setattr(
+        board_routes,
+        "require_paid_request",
+        lambda *_a, **_kw: _settled_result(payer=_PAYER, txid="TXR-FAIL"),
+    )
+
+    def _boom(*_a: object, **_kw: object) -> Never:
+        raise RuntimeError("simulated board-store failure during renew")
+
+    monkeypatch.setattr(board_routes.board_service, "renew", _boom)
+    monkeypatch.setattr(
+        paid_request_module,
+        "send_refund",
+        lambda **_kw: SimpleNamespace(status="sent", txid="REFUND2", error=None),
+    )
+
+    response = board_routes.x402_board_renew(_request(path_params={"entry_id": placement.entry_id}))
+
+    assert response.status_code == 503
+    body = json.loads(response.description)
+    assert body["error"]["code"] in ("product_failed_refunded", "product_failed_refund_pending")
+
+
+@pytest.mark.usefixtures("testnet_settings", "fake_redis")
+def test_the_real_board_breaker_trips_after_enough_recorded_failures(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """End-to-end against the real (fake-Redis-backed) breaker, not a stub."""
+    monkeypatch.setattr(settings, "x402_refund_breaker_max_failures", 2)
+
+    resource = board_routes._RESOURCE_PLACE
+    assert circuit_breaker.is_tripped(resource) is False
+    circuit_breaker.record_refund_failure(resource)
+    assert circuit_breaker.is_tripped(resource) is False
+    circuit_breaker.record_refund_failure(resource)
+    assert circuit_breaker.is_tripped(resource) is True

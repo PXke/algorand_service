@@ -275,10 +275,12 @@ def test_cassandra_record_writes_ledger_row_then_by_tx_row_with_fulfilled_false(
     ledger_params = session.calls[0][1]
     assert ledger_params[0] == "2026-08-30"
     assert ledger_params[2] == "TX1"
-    assert ledger_params[-2:] == (0.092, False)
+    # eur_value, fulfilled, refund_tx_id, refund_status -- the latter two
+    # always None at insert time, a refund is only ever attempted later.
+    assert ledger_params[-4:] == (0.092, False, None, None)
     by_tx_params = session.calls[1][1]
     assert by_tx_params[:2] == ("TX1", "2026-08-30")
-    assert by_tx_params[-2:] == (0.092, False)
+    assert by_tx_params[-4:] == (0.092, False, None, None)
 
 
 def test_cassandra_mark_fulfilled_reads_the_key_first_and_never_upserts_a_phantom(
@@ -373,6 +375,8 @@ def test_cassandra_list_for_day_reverses_the_ascending_page(
             network=ALGORAND_MAINNET_CAIP2,
             eur_value=0.09,
             fulfilled=True,
+            refund_tx_id=None,
+            refund_status=None,
         )
         for i in range(3)
     ]

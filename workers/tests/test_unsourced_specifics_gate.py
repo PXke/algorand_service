@@ -242,6 +242,37 @@ def test_revision_issues_noop_when_disabled(monkeypatch: pytest.MonkeyPatch) -> 
     assert gate.unsourced_specifics_revision_issues(body, _trace("")) == []
 
 
+# --------------------------------------------------------------------------- #
+# proximity-window false positives: a number must ground against the noun it
+# ACTUALLY modifies, not just any traction word floating nearby
+# --------------------------------------------------------------------------- #
+def test_number_not_misattributed_to_unrelated_farther_noun() -> None:
+    """Root-caused production false positive: '42' modifies 'regions' (not a tracked traction noun), not the unrelated 'users' three words later in the same sentence. The old proximity window treated ±3 tokens as one flat bag and grabbed 'users' anyway, walking straight past 'regions' -- its real head noun -- to report a fabricated '42 users' claim. '42' must not be treated as a traction claim on 'users' at all here."""
+    corpus = _trace("The service runs in 42 regions worldwide.")
+    body = "Available in 42 regions for users worldwide."
+    claims = [f for f in gate.find_unsourced_specifics(body, corpus) if f["claim"].startswith("42")]
+    assert claims == []
+
+
+def test_number_not_misattributed_across_a_preposition_into_a_different_clause() -> None:
+    """Root-caused production false positive: '15' (correctly sourced from a tool call reporting 15 online) sits right after the preposition 'with', which starts its own clause -- the old backward scan crossed 'with' anyway to grab 'members' from the UNRELATED '320 members' earlier in the sentence, and then flagged '15' as an unsourced '15 members' claim (the real, grounded fact was 15 online, not 15 members). '15' must not be attributed to 'members' across that clause boundary."""
+    corpus = _trace('{"member_count": 320, "online_count": 15}')
+    body = "The Discord server has 320 members, with 15 online right now."
+    claims = [f for f in gate.find_unsourced_specifics(body, corpus) if f["claim"].startswith("15")]
+    assert claims == []
+
+
+def test_percent_of_noun_still_crosses_the_determiner() -> None:
+    """The fix must not break the standard, unambiguous 'N% of NOUN' construction -- 'of' is a safe forward crossing, unlike a clause-starting preposition like 'with'."""
+    corpus = _trace("no survey data fetched")
+    pct = {
+        f["claim"]
+        for f in gate.find_unsourced_specifics("Fully 60% of users completed onboarding.", corpus)
+        if f["kind"] == "percent"
+    }
+    assert "60%" in pct
+
+
 def test_clean_body_no_findings() -> None:
     """A digit run is not considered grounded just because it partially matches a longer number in the corpus."""
     corpus = _trace("Pera and Defly are the leading wallets.")

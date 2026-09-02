@@ -238,6 +238,83 @@ def test_parse_article_fields_grade_defaults_none() -> None:
     assert fields.heuristic_grade is None
 
 
+def test_parse_article_fields_threads_regrade_unconfirmed_hold_reason() -> None:
+    """Carries _regrade_unconfirmed_hold_reason from the payload dict onto the parsed dataclass, mirroring unsourced_hold_reason/broken_link_hold_reason -- publish_tasks._determine_review_divert reads it via ArticleComposeResult."""
+    payload = {
+        "title": "T",
+        "summary": "S",
+        "body": "B",
+        "_regrade_unconfirmed_hold_reason": "revision regrade could not confirm the fix",
+    }
+    fields = _parse_article_fields(payload)
+    assert fields.regrade_unconfirmed_hold_reason == "revision regrade could not confirm the fix"
+
+
+def test_parse_article_fields_regrade_unconfirmed_hold_reason_defaults_empty() -> None:
+    """Defaults to '' (not None) when no regrade-confirmation problem occurred -- publish_tasks treats a non-empty string as the hold trigger."""
+    fields = _parse_article_fields({"title": "T", "summary": "S", "body": "B"})
+    assert fields.regrade_unconfirmed_hold_reason == ""
+
+
+def test_degraded_regrade_after_revision_holds_instead_of_silent_publish(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Bug: a revision attempted specifically because the LLM quality rubric flagged a fixable issue, followed by a regrade whose rubric call itself fails (production case: SoftTimeLimitExceeded mid-revision), must not be silently treated as a clean confirm-and-publish.
+
+    Root cause: quality_needs_revision() reads a scoreless/errored quality
+    dict as "nothing below threshold" (CLAUDE.md invariant 8 -- empty is not
+    none-found), so the degraded regrade looks indistinguishable from a
+    genuinely clean pass and the loop would return best_current as if the
+    flagged narrative-synthesis issue had been confirmed fixed. It never was
+    -- the regrade that was supposed to confirm it crashed. This must instead
+    route to human review (CLAUDE.md invariant 1: never silently publish a
+    finished-but-unconfirmed compose) via a non-empty
+    _regrade_unconfirmed_hold_reason, the same wiring unsourced_hold_reason
+    and broken_link_hold_reason already use end-to-end.
+    """
+    monkeypatch.setattr(
+        "app.modules.newspaper.article_grader.grade_article_draft",
+        lambda **_kw: {"grade": 7.0, "issues": []},
+    )
+    quality_calls = {"n": 0}
+
+    def _quality(**_kw: object) -> dict:
+        quality_calls["n"] += 1
+        if quality_calls["n"] == 1:
+            return {
+                "narrative_synthesis": 2,
+                "technical_depth": 4,
+                "critical_distance": 4,
+                "repetition": 4,
+                "issues": ["narrative_synthesis scored 2/5 — weave the findings together"],
+            }
+        raise TimeoutError("SoftTimeLimitExceeded")  # the regrade's rubric call crashes
+
+    monkeypatch.setattr(
+        "app.modules.newspaper.article_quality_llm.grade_article_quality_llm", _quality
+    )
+    trace: list[dict] = []
+    fake = _FakeMistral({"title": "T2", "summary": "S", "body": "revised body attempting the fix"})
+
+    out = _review_and_revise(
+        fake,
+        {"title": "T", "summary": "S", "body": "original weak body"},
+        system="s",
+        gen_user="u",
+        trace=trace,
+    )
+
+    assert fake.calls == 1  # exactly one revision attempted, matching the scenario
+    reason = out.get("_regrade_unconfirmed_hold_reason", "")
+    assert reason, (
+        "a regrade degraded by a crashed rubric call after a revision attempt "
+        "must not silently look like a confirmed-clean pass"
+    )
+    assert "narrative_synthesis" in reason
+    fields = _parse_article_fields(out)
+    assert fields.regrade_unconfirmed_hold_reason == reason
+
+
 def test_low_repetition_score_triggers_revision_with_cut_instruction(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

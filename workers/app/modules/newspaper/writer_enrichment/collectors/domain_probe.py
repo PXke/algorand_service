@@ -24,15 +24,15 @@ def probe_domain(domain: str, *, timeout: float = 12.0) -> dict[str, Any]:
     url = f"https://{host}/"
     result: dict[str, Any] = {"domain": host, "url": url}
     try:
-        from app.core.http_client import get_http_client
-        from app.core.net_guard import assert_public_url
+        from app.core.net_guard import guarded_get, guarded_request
 
-        assert_public_url(url)
-        client = get_http_client(timeout=timeout, follow_redirects=True)
+        # Hop-checked: follow_redirects=True on the shared client would let a
+        # public host 302 into RFC1918 / cloud metadata after the first-URL
+        # assert_public_url had already passed.
         req_headers = {"User-Agent": _UA}
-        response = client.head(url, headers=req_headers)
+        response = guarded_request("HEAD", url, headers=req_headers, timeout=timeout)
         if response.status_code >= 400:
-            response = client.get(url, headers=req_headers)
+            response = guarded_get(url, headers=req_headers, timeout=timeout)
         result["status_code"] = response.status_code
         result["final_url"] = str(response.url)
         headers = {

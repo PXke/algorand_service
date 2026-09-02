@@ -64,8 +64,24 @@ def send_payout(*, receiver: str, amount_atomic: str, asset_id: str) -> PayoutRe
         )
         return PayoutResult(status="skipped", error=f"unrecognized settled asset id {asset_id!r}")
 
+    # Isolated from the broad except below on purpose (audit finding
+    # 2026-09-02, found while building the auto-refund mechanism that
+    # copies this file's shape): the installed algosdk's
+    # mnemonic.to_private_key raises ValueError(mnemonic) -- the exception
+    # MESSAGE IS THE ENTIRE 25-WORD SECRET PHRASE -- when any word is not
+    # in the wordlist. Letting that reach `logger.warning(..., exc, ...)`
+    # below would write the secret into logs on any misconfiguration.
+    # Never log str(exc) from this specific call.
     try:
         private_key = mnemonic.to_private_key(settings.kyc_payout_mnemonic)
+    except Exception:
+        logger.error(
+            "kya payout: configured payout mnemonic is invalid (value never logged) -- "
+            "the payout wallet cannot sign until this is fixed"
+        )
+        return PayoutResult(status="failed", error="payout mnemonic invalid")
+
+    try:
         sender = account.address_from_private_key(private_key)
         client = _algod_client()
         params = client.suggested_params()

@@ -29,6 +29,15 @@ _MAX_URL_LENGTH = 2048
 # it keeps a free query param from carrying an arbitrarily long partition key.
 MAX_TAG_LENGTH = 64
 
+# Bound on the self-declared `contact` field (migration 104). Not shape-
+# validated (an email, a URL, an agent identifier are all legitimate) --
+# only bounded, same reasoning as description's 2000-char cap: paid input
+# served back for free by search()/detail(), so an unbounded field here is
+# an unbounded free response at our egress cost. 256 comfortably covers any
+# real email or URL without inviting abuse as a second free-text dumping
+# ground.
+MAX_CONTACT_LENGTH = 256
+
 # Cap on one listing's serialized request schema. Deliberately far below the
 # 256 KiB global body cap (core/falcon_router.py): a listing is paid input that
 # GET /x402/search serves back inline, for free, up to
@@ -176,6 +185,8 @@ class ListingService:
         settlement_tx_id: str,
         payer: str,
         category: str = DEFAULT_CATEGORY,
+        reimburses: bool = False,
+        contact: str = "",
         now: datetime | None = None,
     ) -> StoredListing:
         """Store a paid listing for the configured term and return it.
@@ -271,6 +282,8 @@ class ListingService:
             tags=validate_tags(tags),
             payer=payer,
             category=validate_category(category),
+            reimburses=reimburses,
+            contact=contact.strip(),
         )
         if self.store.insert_if_absent(listing):
             return listing

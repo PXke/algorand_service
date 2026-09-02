@@ -160,3 +160,25 @@ def test_broken_link_claim_blocks_auto_approve_before_any_grading() -> None:
     assert passed is False
     assert meta["auto_applied"] == "0"
     assert "404" in meta["broken_link_hold_reason"]
+
+
+def test_regrade_unconfirmed_blocks_auto_approve_before_any_grading() -> None:
+    """A degraded revision-regrade must fail auto-approve closed on its own too: grade/headline/gatekeeper have no way to tell an unconfirmed fix from a genuinely clean draft, so a draft whose flagged issue was never actually re-verified (the regrade crashed, e.g. SoftTimeLimitExceeded) would otherwise clear the AND-gate and auto-publish under a grade that never confirmed the fix.
+
+    Short-circuits before any grading, so no Cassandra/Mistral is touched.
+    """
+    from app.modules.newspaper.tasks.publish_tasks import _fresh_auto_approve_passes
+
+    passed, meta = _fresh_auto_approve_passes(
+        title=_GOOD_TITLE,
+        body="Revised body attempting the fix.",
+        page_text="platform",
+        source_url="editorial://brief/x",
+        regrade_unconfirmed_hold_reason=(
+            "revision regrade could not confirm the fix (SoftTimeLimitExceeded); "
+            "previously flagged: narrative_synthesis scored 2/5"
+        ),
+    )
+    assert passed is False
+    assert meta["auto_applied"] == "0"
+    assert "SoftTimeLimitExceeded" in meta["regrade_unconfirmed_hold_reason"]

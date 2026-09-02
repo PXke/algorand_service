@@ -41,6 +41,15 @@ _STORE_GATES = {
     "kya": "kyc_store",
 }
 
+# Same idea for a product gated on a plain boolean instead of a store setting
+# (Product.bool_setting) -- added 2026-09-01 after x402_scan shipped with a
+# falcon_main.py registration but no PRODUCTS entry, and this file's "enable
+# everything" helpers didn't know a bool-gated product existed either, so the
+# cross-check tests passed vacuously without ever exercising it.
+_BOOL_GATES = {
+    "scan": "x402_scan_enabled",
+}
+
 
 class _FakeRedis:
     def __init__(self) -> None:
@@ -76,14 +85,31 @@ def _request(headers: dict[str, str] | None = None) -> Request:
 
 
 def _configure(monkeypatch: pytest.MonkeyPatch, *, enabled: bool = True, **stores: str) -> None:
-    """x402 on, every product store "memory" unless overridden by `stores`."""
+    """x402 on, every product store "memory" and every bool gate off unless overridden by `stores`.
+
+    A bool_setting override is passed the same way as a store override (e.g.
+    `x402_scan_enabled="true"` or any truthy value coerces via bool()) -- one
+    kwargs dict covers both gate shapes so callers don't need to know which
+    kind of gate a given product uses.
+    """
     monkeypatch.setattr(settings, "x402_enabled", enabled)
     monkeypatch.setattr(settings, "x402_network", ALGORAND_TESTNET_CAIP2)
     monkeypatch.setattr(settings, "x402_pay_to_address", _PAY_TO)
     for setting in _STORE_GATES.values():
         monkeypatch.setattr(settings, setting, "memory")
+    for setting in _BOOL_GATES.values():
+        monkeypatch.setattr(settings, setting, False)
     for setting, value in stores.items():
         monkeypatch.setattr(settings, setting, value)
+
+
+def _all_gates_on(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Turn on every store AND every bool gate -- the "everything is on" cross-check state."""
+    _configure(
+        monkeypatch,
+        **dict.fromkeys(_STORE_GATES.values(), "cassandra"),
+        **dict.fromkeys(_BOOL_GATES.values(), True),
+    )
 
 
 def _concrete(path: str) -> str:
@@ -157,6 +183,25 @@ def test_each_product_gate_matches_create_app(
             assert route.method not in _registered_methods(app, route.path), route.path
 
 
+@pytest.mark.parametrize(("product", "bool_setting"), sorted(_BOOL_GATES.items()))
+def test_each_bool_gated_product_matches_create_app(
+    monkeypatch: pytest.MonkeyPatch, product: str, bool_setting: str
+) -> None:
+    """Same cross-check as test_each_product_gate_matches_create_app, for a bool_setting-gated product."""
+    _configure(monkeypatch, **{bool_setting: True})
+    app = create_app()
+    listed = [route for route in _catalog_routes(monkeypatch) if route["product"] == product]
+    assert listed, f"{product} is enabled but the catalog lists no route for it"
+    for route in listed:
+        assert route["method"] in _registered_methods(app, route["path"]), route["path"]
+    # Every OTHER product's routes are neither registered nor listed.
+    for other in catalog_service.PRODUCTS:
+        if other.key in {product, "catalog"}:
+            continue
+        for route in other.routes:
+            assert route.method not in _registered_methods(app, route.path), route.path
+
+
 # --------------------------------------------------------------------------- #
 # Roster vs route table
 # --------------------------------------------------------------------------- #
@@ -164,10 +209,10 @@ def test_every_listed_route_is_registered_when_everything_is_on(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Every route the catalog lists resolves in create_app()'s router with that method."""
-    _configure(monkeypatch, **dict.fromkeys(_STORE_GATES.values(), "cassandra"))
+    _all_gates_on(monkeypatch)
     app = create_app()
     routes = _catalog_routes(monkeypatch)
-    assert {route["product"] for route in routes} == {"catalog", *_STORE_GATES}
+    assert {route["product"] for route in routes} == {"catalog", *_STORE_GATES, *_BOOL_GATES}
     for route in routes:
         assert route["method"] in _registered_methods(app, route["path"]), route
 
@@ -179,7 +224,7 @@ def test_every_registered_x402_route_is_listed(monkeypatch: pytest.MonkeyPatch) 
     template create_app() registered and demands a catalog entry per
     (method, path). Admin routes are exempt by design.
     """
-    _configure(monkeypatch, **dict.fromkeys(_STORE_GATES.values(), "cassandra"))
+    _all_gates_on(monkeypatch)
     app = create_app()
     listed = {(route["method"], route["path"]) for route in _catalog_routes(monkeypatch)}
     registered: set[tuple[str, str]] = set()
@@ -260,7 +305,7 @@ def test_every_paid_route_supports_promo_except_the_unwired_kya_lookup(
     deliberately left unwired rather than assumed safe by copying the same
     pattern as every other paid route.
     """
-    _configure(monkeypatch, **dict.fromkeys(_STORE_GATES.values(), "cassandra"))
+    _all_gates_on(monkeypatch)
     routes = _catalog_routes(monkeypatch)
     by_resource = {route["resource"]: route for route in routes if route["resource"]}
     assert by_resource

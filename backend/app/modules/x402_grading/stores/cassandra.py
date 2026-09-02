@@ -30,6 +30,9 @@ def _row_to_grade(row: object) -> StoredGrade:
         comment=row.comment or "",
         settlement_tx_id=row.settlement_tx_id or "",
         created_at_epoch=_epoch(row.created_at),
+        # A pre-103 row has no such column at all -- null reads as
+        # unverified, never as a false claim of verification.
+        usage_verified=bool(getattr(row, "usage_verified", False)),
     )
 
 
@@ -74,6 +77,7 @@ class CassandraGradeStore:
                 item.comment,
                 item.settlement_tx_id,
                 _dt(item.created_at_epoch),
+                item.usage_verified,
             ),
         )
         previous = session.execute(

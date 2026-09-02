@@ -41,6 +41,26 @@ def test_send_payout_skipped_when_wallet_not_configured(monkeypatch: pytest.Monk
     assert "not configured" in (result.error or "")
 
 
+def test_send_payout_invalid_mnemonic_never_logs_the_secret(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Found-in-audit fix (2026-09-02): the installed algosdk's mnemonic.to_private_key raises ValueError(mnemonic) -- the exception MESSAGE IS THE ENTIRE 25-WORD SECRET -- on a misconfigured mnemonic. That secret must never reach a log line."""
+    real_secret = "word1 word2 word3 not a real valid mnemonic phrase at all"
+    monkeypatch.setattr(settings, "kyc_payout_mnemonic", real_secret)
+
+    with caplog.at_level("DEBUG"):
+        result = send_payout(
+            receiver=RECEIVER, amount_atomic="1000000", asset_id=_DEFAULT_NETWORK_USDC_ASSET_ID
+        )
+
+    assert result.status == "failed"
+    assert "mnemonic invalid" in (result.error or "")
+    assert real_secret not in (result.error or "")
+    for record in caplog.records:
+        assert real_secret not in record.getMessage()
+        assert "word1" not in record.getMessage()
+
+
 def test_send_payout_skipped_when_amount_rounds_to_zero(monkeypatch: pytest.MonkeyPatch) -> None:
     """Skips the payout with a "zero" error when the floored share amount is zero."""
     priv, _ = account.generate_account()

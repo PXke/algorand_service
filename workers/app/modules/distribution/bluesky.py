@@ -72,7 +72,12 @@ class BlueskyDistributor(SocialDistributor):
         if not image_url:
             return None
         try:
-            img_resp = client.get(image_url, timeout=_TIMEOUT)
+            from app.core.net_guard import guarded_get
+
+            # image_url is scraped share art (often og:image). Fetch it through
+            # guarded_get so a planted public page cannot 302 this worker into
+            # Redis/Cassandra/metadata. The Bluesky client stays on bsky.social.
+            img_resp = guarded_get(image_url, timeout=_TIMEOUT)
             img_resp.raise_for_status()
             content_type = img_resp.headers.get("content-type", "image/png").split(";")[0]
             upload_resp = client.post(

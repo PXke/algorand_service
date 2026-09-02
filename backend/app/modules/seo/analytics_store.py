@@ -33,6 +33,20 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
+
+def _ip_token(client_ip: str | None) -> str:
+    """Single address for hashing, geo, and uniqueness.
+
+    Callers should pass the already-resolved client IP
+    (`app.core.request_headers.client_ip`). If a leftover X-Forwarded-For
+    chain is supplied, take the LAST hop: nginx's proxy_add_x_forwarded_for
+    appends $remote_addr, so the first element is attacker-controlled.
+    """
+    if not client_ip:
+        return ""
+    parts = [p.strip() for p in client_ip.split(",") if p.strip()]
+    return parts[-1] if parts else ""
+
 _BOT_TOKENS = (
     "bot",
     "crawl",
@@ -599,7 +613,7 @@ def mark_article_document_served(
     """Record that this (article, ip, ua) just requested the article's SSR HTML document -- the "first hand" the view-count two-hand check (article_document_recently_served) looks for before crediting a view from the JSON API. Called from the SSR article route, alongside the existing pageview record. Best-effort: a Redis hiccup must never block page serving."""
     if not article_id or not client_ip:
         return
-    ip = client_ip.split(",")[0].strip()
+    ip = _ip_token(client_ip)
     if not ip:
         return
     try:
@@ -628,7 +642,7 @@ def article_document_recently_served(
     """
     if not article_id or not client_ip:
         return True
-    ip = client_ip.split(",")[0].strip()
+    ip = _ip_token(client_ip)
     if not ip:
         return True
     try:
@@ -783,7 +797,7 @@ def record_unique(kind: str, client_ip: str | None, user_agent: str | None, day:
     """Best-effort: add this visitor to the day's HyperLogLog for `kind`."""
     if not client_ip:
         return
-    ip = client_ip.split(",")[0].strip()  # left-most of any X-Forwarded-For chain
+    ip = _ip_token(client_ip)
     if not ip:
         return
     try:
@@ -823,7 +837,7 @@ def record_session(
     """Best-effort: stitch this human pageview into a session and, on a new session, bump session_daily split by new/returning. Also confirms a session as multi-page the moment its 2nd hit lands (vtype="multipage", counted separately from new/returning — see `_session_counts_from_rows`). A UA denylist alone can't catch a scraper spoofing a browser UA; a session that never gets a 2nd hit is a cheap, record-time-free bot-likelihood signal for the breakdowns instead. Fails open."""
     if not client_ip:
         return
-    ip = client_ip.split(",")[0].strip()  # left-most of any X-Forwarded-For chain
+    ip = _ip_token(client_ip)
     if not ip:
         return
     try:
@@ -900,7 +914,7 @@ def country_for_ip(client_ip: str | None) -> str:
     """
     if not client_ip:
         return ""
-    ip = client_ip.split(",")[0].strip()  # left-most of any X-Forwarded-For chain
+    ip = _ip_token(client_ip)
     if not ip:
         return ""
     reader = _geoip_reader()
@@ -978,7 +992,7 @@ def is_hosting_ip(client_ip: str | None) -> bool:
     """
     if not client_ip:
         return False
-    ip = client_ip.split(",")[0].strip()
+    ip = _ip_token(client_ip)
     if not ip:
         return False
     reader = _geoip_asn_reader()
@@ -1245,7 +1259,7 @@ def is_internal_client(client_ip: str | None) -> bool:
     """True for self/internal traffic we never count: the server's own public IP (per ANALYTICS_IGNORE_IPS), plus all loopback / private / link-local ranges (health checks, monitoring, SSR self-fetch)."""
     if not client_ip:
         return False
-    ip = client_ip.split(",")[0].strip()  # X-Forwarded-For may be a chain
+    ip = _ip_token(client_ip)
     if ip.lower() in _ignored_hosts():
         return True
     try:
@@ -1409,7 +1423,7 @@ def _is_recent_duplicate_pageview(client_ip: str | None, user_agent: str | None,
     """True when the same visitor hit the same path within a few seconds — the usual SSR landing + Flutter beacon double-count, or a route-settling burst."""
     if not client_ip:
         return False
-    ip = client_ip.split(",")[0].strip()
+    ip = _ip_token(client_ip)
     if not ip:
         return False
     try:
@@ -1533,7 +1547,7 @@ def _write_pageview_counters(
         and path.startswith(_ARTICLE_PATH_PREFIX)
         and _stage_direct_pageview(
             article_id=path[len(_ARTICLE_PATH_PREFIX) :],
-            client_ip=client_ip.split(",")[0].strip(),
+            client_ip=_ip_token(client_ip),
             user_agent=user_agent,
             day=day,
             path=path,

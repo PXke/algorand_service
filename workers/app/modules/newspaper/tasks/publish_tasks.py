@@ -472,6 +472,7 @@ def _fresh_auto_approve_passes(
     defunct_domains: tuple[str, ...] = (),
     unsourced_hold_reason: str = "",
     broken_link_hold_reason: str = "",
+    regrade_unconfirmed_hold_reason: str = "",
 ) -> tuple[bool, dict[str, str]]:
     """Strict autonomous-approve gate for content that would otherwise wait for a human review click (owner decision 2026-07-12): grade + headline + gatekeeper factuality AND completeness must ALL clear a bar at least as strict as recompose_published's — fresh content has zero prior human vetting at all, unlike recompose which only touches content a human already approved once, so there's no argument for a looser bar here. Unlike recompose (which deliberately drops completeness from its gate — see the comment at its call site), fresh candidates are exactly what completeness's domain_provenance check exists to triage, so gate_ok uses gate.passed (factuality AND completeness), not factuality alone. Fails CLOSED: any missing or errored signal blocks auto-approve, never allows it. Always returns metadata (even on failure) for the review-row audit trail.
 
@@ -515,6 +516,14 @@ def _fresh_auto_approve_passes(
     if broken_link_hold_reason:
         meta["auto_applied"] = "0"
         meta["broken_link_hold_reason"] = broken_link_hold_reason[:200]
+        return False, meta
+    # Same reasoning again: a revision regrade that came back degraded gives no
+    # real confirmation the flagged issue was actually fixed — grade/headline/
+    # gatekeeper can't detect an unconfirmed fix either, so this is its own
+    # hard fail too (llm_compose._stamp_regrade_unconfirmed).
+    if regrade_unconfirmed_hold_reason:
+        meta["auto_applied"] = "0"
+        meta["regrade_unconfirmed_hold_reason"] = regrade_unconfirmed_hold_reason[:200]
         return False, meta
     grade_value: float | None = None
     if heuristic_grade:
@@ -935,6 +944,9 @@ def _determine_review_divert(
     defunct_domains = tuple(getattr(composed, "defunct_domains", ()) or ())
     unsourced_hold_reason = str(getattr(composed, "unsourced_hold_reason", "") or "")
     broken_link_hold_reason = str(getattr(composed, "broken_link_hold_reason", "") or "")
+    regrade_unconfirmed_hold_reason = str(
+        getattr(composed, "regrade_unconfirmed_hold_reason", "") or ""
+    )
     gate_enforced_review = (
         _gate_enforces_review(
             clf_decision=clf_decision,
@@ -947,6 +959,7 @@ def _determine_review_divert(
         or bool(defunct_domains)
         or bool(unsourced_hold_reason)
         or bool(broken_link_hold_reason)
+        or bool(regrade_unconfirmed_hold_reason)
     )
     if defunct_domains:
         logger.warning(
@@ -966,6 +979,12 @@ def _determine_review_divert(
             source_url,
             broken_link_hold_reason,
         )
+    if regrade_unconfirmed_hold_reason:
+        logger.warning(
+            "revision-regrade-unconfirmed gate diverting %s to review — %s",
+            source_url,
+            regrade_unconfirmed_hold_reason,
+        )
     # Human-readable divert reason for the review card, so a reviewer sees WHAT
     # tripped the hold (which dead domain / which unsourced specifics) instead of
     # a bare "diverted_by: gatekeeper" and having to re-read the whole draft.
@@ -976,6 +995,8 @@ def _determine_review_divert(
         hold_reasons.append(unsourced_hold_reason)
     if broken_link_hold_reason:
         hold_reasons.append(broken_link_hold_reason)
+    if regrade_unconfirmed_hold_reason:
+        hold_reasons.append(regrade_unconfirmed_hold_reason)
     return gate_enforced_review, defunct_domains, "; ".join(hold_reasons)
 
 
@@ -1026,6 +1047,7 @@ def _maybe_auto_approve(
     defunct_domains: tuple[str, ...],
     unsourced_hold_reason: str,
     broken_link_hold_reason: str,
+    regrade_unconfirmed_hold_reason: str,
     clf_category: str,
     clf_confidence: float,
     signals: ContentSignals,
@@ -1044,6 +1066,7 @@ def _maybe_auto_approve(
         defunct_domains=defunct_domains,
         unsourced_hold_reason=unsourced_hold_reason,
         broken_link_hold_reason=broken_link_hold_reason,
+        regrade_unconfirmed_hold_reason=regrade_unconfirmed_hold_reason,
     )
     if not fresh_auto_approved:
         return needs_review, False
@@ -1652,6 +1675,9 @@ def _publish_from_queued_row_impl(
     )
     unsourced_hold_reason = str(getattr(composed, "unsourced_hold_reason", "") or "")
     broken_link_hold_reason = str(getattr(composed, "broken_link_hold_reason", "") or "")
+    regrade_unconfirmed_hold_reason = str(
+        getattr(composed, "regrade_unconfirmed_hold_reason", "") or ""
+    )
 
     hero_image, image_field = _resolve_hero_and_image(payload, row, composed)
 
@@ -1666,6 +1692,7 @@ def _publish_from_queued_row_impl(
         defunct_domains=defunct_domains,
         unsourced_hold_reason=unsourced_hold_reason,
         broken_link_hold_reason=broken_link_hold_reason,
+        regrade_unconfirmed_hold_reason=regrade_unconfirmed_hold_reason,
         clf_category=clf_category,
         clf_confidence=clf_confidence,
         signals=signals,

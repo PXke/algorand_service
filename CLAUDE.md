@@ -156,7 +156,9 @@ become an excuse to defer proving the one thing the deadline depends on.
    behind a micro-price. Reuses live data already in Cassandra; no new infra.
 2. **Paid visibility board** — agents pay to appear with a link back, free to
    browse ("Million Dollar Homepage for bots"). Same shape as the directory.
-3. **x402 endpoint directory** — **in progress**. Pay to list, pay to boost
+3. **x402 endpoint directory** — **LIVE** (verified 2026-09-01 — the most
+   complete product here: full CRUD, category/tag search, probe +
+   probe-history reads, LWT-guarded first-insert). Pay to list, pay to boost
    rank, agents pay for ranked JSON search, humans browse free. See §4.1/§5.1.
 4. **Feature-request board** — agents pay to request an endpoint and vote;
    builders pay to read demand. Same shape as the directory.
@@ -165,17 +167,28 @@ become an excuse to defer proving the one thing the deadline depends on.
    VibeKit) — do not install VibeKit before this item is actually started.
 6. **Endpoint grading** — agents pay a small stake to grade endpoints they
    actually paid; paid score lookup. Already scoped in the build plan (§5.3).
-7. **Probe / monitoring** — scheduled micro-payments to every listed
-   endpoint, selling measured uptime/latency/spec-correctness. Already
-   scoped (§5.3). Probe traffic is flagged and excluded from every ranking —
-   this is the one deliberate exception to "no wash volume."
+7. **Probe / monitoring** — scheduled probing of every listed endpoint
+   (reachability, latency, 402 validity). Probe traffic is flagged and
+   excluded from every ranking — this is the one deliberate exception to "no
+   wash volume." **LIVE, and the read side is deliberately FREE, not
+   paid** (owner call 2026-08-31, commit `10b3dd5`): real measured uptime
+   history works better as a trust signal an agent can point to for free
+   than as its own paid product — the same "don't charge for what's already
+   effectively public" reasoning as the News Engine's free article read, and
+   a direct answer to a real agent's ask on Moltbook. Every listing detail
+   read already surfaces the newest probe result automatically. **Item 20
+   below is merged into this item, not a separate product** — see 20.
 8. **Know Your Agent (KYA)** — tiered bot/agent identity (wallet, web
    identity, verified owner, behaviour), on-chain attestation, paid verify.
    This is `modules/kyc/` (module directory name predates the KYA/KYB
    terminology split — rename opportunistically if touching this module, not
-   as its own task), currently broken (a real, reproduced bug — see
-   `services/enrollment_service.py`/`api/routes.py`'s `declare_discovery_extension`
-   call passing a raw dict where the installed package requires `OutputConfig`).
+   as its own task). The `declare_discovery_extension`/`OutputConfig` bug
+   once described here is fixed (verified 2026-09-01 — see
+   `app/modules/x402/discovery.py`'s shared wrapper and its regression
+   test); the module is code-complete (enrollment, tiered trust signals,
+   paid verify/payout) and registered live, but gated off in prod by owner
+   decision, and still has no real on-chain attestation write — only
+   off-chain indexer-derived signals.
    **This is KYA, not KYB** — see the constraints note above. Do not conflate
    with regulated Know-Your-Business/entity compliance, which stays excluded.
 9. **Starter credit** — endpoint-funded trial USDC for newly-identified
@@ -221,9 +234,15 @@ become an excuse to defer proving the one thing the deadline depends on.
     "needs deliberate design first" flag as 12/15/16/17.
 19. **Agent-to-agent job escrow** — pay when output passes a test. Overlaps
     5/10 — same resolution needed on the shared escrow primitive.
-20. **Reputation / uptime-proof ledger** — endpoints pay to attach verified
-    proofs. Overlaps 7 (probe) — likely the same underlying data, a second
-    paid view of it, not a second measurement system.
+20. **~~Reputation / uptime-proof ledger~~** — **merged into item 7, not a
+    separate product** (owner decision 2026-09-02): the original idea was
+    "endpoints pay to attach verified proofs," but item 7's free probe data
+    already surfaces automatically on every listing, which covers the same
+    value without a second payment flow. Do not build a separate paid
+    "attach a proof" route — if this is ever revisited, keep the measured
+    layer itself free forever (charging endpoints to influence what's
+    presented as measurement would poison the one trust signal this
+    marketplace owns).
 21. **USDC→EURQ swap route** — so agents pay euro-priced services without
     noticing. Depends on Quantoz integration (Phase 2 in the original build
     plan) — do not front-run this before 12/13's storage work or Phase 0.
@@ -238,10 +257,27 @@ become an excuse to defer proving the one thing the deadline depends on.
     audits for and disqualifies exactly this pattern (§14 of the official
     rules). Do not build, do not revisit without an explicit new owner
     decision overriding this one.
+25. **Formal-verification safety-contract proofs** (owner idea, 2026-09-01,
+    genuinely just a "wondering if possible" — no build authorized) — a
+    paying agent currently has no way to know an endpoint does what it
+    claims before paying. A general "prove the output is correct" proof is
+    not achievable (e.g. proving a malware scanner's verdict is "right" is a
+    category error — there's no formal ground truth for "malicious"). What
+    IS provable: narrow, deterministic SAFETY-CONTRACT properties a route's
+    code obeys — payment always precedes product work, a resource cap is
+    enforced before the expensive operation runs, a sandbox never executes
+    its input. Realistic shape: formally verify (Lean 4, e.g. via Mistral's
+    Leanstral agent, or an equivalent tool) a small translated control-flow
+    slice of one of these properties, publish the proof as an attached,
+    checkable artifact on the endpoint's marketplace listing. Needs a real
+    design pass (which properties, how a translated slice stays honest to
+    the actual running code, how a payer verifies the proof) before any
+    code — same "needs explicit human design decision" flag as the items
+    below.
 
 **Sequencing note**: items 1, 2, 4 are the cheapest next builds after Phase 0
 proves out — same shape as the directory, no new infra or fund-custody
-design required. Items 5/9/10/11/12/16/19/21/22/23 all need an explicit
+design required. Items 5/9/10/11/12/16/19/21/22/23/25 all need an explicit
 human design decision (financial exposure, new infra spend, or cryptography)
 before any agent starts writing code against them — flag and stop, don't
 guess and build.

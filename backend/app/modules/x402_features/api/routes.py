@@ -22,8 +22,10 @@ from app.core.http import Request, Response, Router
 from app.core.http_errors import json_error_from_platform, json_error_response
 from app.core.query_params import query_param
 from app.modules.admin.auth import require_admin_wallet
+from app.modules.x402 import circuit_breaker
 from app.modules.x402.discovery import describe_json_endpoint
-from app.modules.x402.paid_request import mark_fulfilled, require_paid_request
+from app.modules.x402.paid_request import mark_fulfilled, require_paid_request, run_with_refund
+from app.modules.x402.preview import preview_requested
 from app.modules.x402.promo import promo_request_params
 from app.modules.x402_features.models.domain import (
     ClaimSummary,
@@ -41,6 +43,10 @@ from app.schemas import X402FeatureRequestSubmission
 # Store is resolved lazily on first use, so this is safe as a module-level
 # singleton shared by all four routes.
 feature_service = FeatureService()
+
+_VOTE_RESOURCE = "x402-features-vote"
+_CLAIM_RESOURCE = "x402-features-claim"
+_DEMAND_RESOURCE = "x402-features-demand"
 
 _REQUEST_EXAMPLE = {
     "title": "Historical ASA price candles endpoint",
@@ -158,11 +164,19 @@ def x402_features_vote(request: Request) -> Response:
     if not request_id or not feature_service.exists(request_id):
         return json_error_response(404, "not_found", "No feature request with that id")
 
+    if circuit_breaker.is_tripped(_VOTE_RESOURCE):
+        return json_error_response(
+            503,
+            "temporarily_disabled",
+            "This endpoint is temporarily disabled after an elevated failure rate. "
+            "Try again later.",
+        )
+
     promo_code, promo_wallet = promo_request_params(request)
     result = require_paid_request(
         request,
         price=settings.x402_features_vote_price,
-        resource="x402-features-vote",
+        resource=_VOTE_RESOURCE,
         resource_path="/api/v1/x402/features/{request_id}/vote",
         promo_code=promo_code,
         promo_wallet=promo_wallet,
@@ -184,26 +198,49 @@ def x402_features_vote(request: Request) -> Response:
     if result.error:
         return result.error
 
-    vote_total = feature_service.vote(
-        request_id=request_id,
-        # A promo redemption settles nothing, so result.payer is empty —
-        # attribute the vote to the caller's own claimed wallet instead
-        # (already validated in promo.attempt_promo_redemption).
-        voter=result.payer or promo_wallet,
-        settlement_tx_id=result.payment_txid or "",
-    )
-    if not result.is_promo:
-        mark_fulfilled(result.payment_txid, resource="x402-features-vote")
+    if result.is_promo:
+        # A promo redemption settles nothing, so there is no payer/txid to
+        # refund on failure -- run_with_refund is for a real settlement only.
+        # Same let-it-propagate-to-500 behaviour this path has always had.
+        vote_total = feature_service.vote(
+            request_id=request_id, voter=promo_wallet, settlement_tx_id=""
+        )
+        return Response(
+            status_code=200,
+            headers={"Content-Type": "application/json", **result.settlement_headers},
+            description=serialization.dumps(
+                {
+                    "request_id": request_id,
+                    "vote_total": vote_total,
+                    "settlement_tx_id": "",
+                    "via": "promo",
+                }
+            ),
+        )
 
+    outcome = run_with_refund(
+        result,
+        resource=_VOTE_RESOURCE,
+        product_write=lambda: {
+            "vote_total": feature_service.vote(
+                request_id=request_id,
+                voter=result.payer,
+                settlement_tx_id=result.payment_txid or "",
+            )
+        },
+    )
+    if isinstance(outcome, Response):
+        return outcome
+
+    mark_fulfilled(result.payment_txid, resource=_VOTE_RESOURCE)
     return Response(
         status_code=200,
         headers={"Content-Type": "application/json", **result.settlement_headers},
         description=serialization.dumps(
             {
                 "request_id": request_id,
-                "vote_total": vote_total,
+                "vote_total": outcome["vote_total"],
                 "settlement_tx_id": result.payment_txid or "",
-                **({"via": "promo"} if result.is_promo else {}),
             }
         ),
     )
@@ -246,11 +283,19 @@ def x402_features_claim(request: Request) -> Response:
     if not request_id or not feature_service.exists(request_id):
         return json_error_response(404, "not_found", "No feature request with that id")
 
+    if circuit_breaker.is_tripped(_CLAIM_RESOURCE):
+        return json_error_response(
+            503,
+            "temporarily_disabled",
+            "This endpoint is temporarily disabled after an elevated failure rate. "
+            "Try again later.",
+        )
+
     promo_code, promo_wallet = promo_request_params(request)
     result = require_paid_request(
         request,
         price=settings.x402_features_vote_price,
-        resource="x402-features-claim",
+        resource=_CLAIM_RESOURCE,
         promo_code=promo_code,
         promo_wallet=promo_wallet,
         description=(
@@ -274,25 +319,48 @@ def x402_features_claim(request: Request) -> Response:
     if result.error:
         return result.error
 
-    summary = feature_service.claim(
-        request_id=request_id,
-        # A promo redemption settles nothing, so result.payer is empty —
-        # attribute the claim to the caller's own claimed wallet instead
-        # (already validated in promo.attempt_promo_redemption).
-        claimer=result.payer or promo_wallet,
-        settlement_tx_id=result.payment_txid or "",
+    if result.is_promo:
+        # A promo redemption settles nothing, so there is no payer/txid to
+        # refund on failure -- run_with_refund is for a real settlement only.
+        summary = feature_service.claim(
+            request_id=request_id, claimer=promo_wallet, settlement_tx_id=""
+        )
+        return Response(
+            status_code=200,
+            headers={"Content-Type": "application/json", **result.settlement_headers},
+            description=serialization.dumps(
+                {
+                    "request_id": request_id,
+                    **_claims_json(summary),
+                    "settlement_tx_id": "",
+                    "via": "promo",
+                }
+            ),
+        )
+
+    outcome = run_with_refund(
+        result,
+        resource=_CLAIM_RESOURCE,
+        product_write=lambda: {
+            "summary": feature_service.claim(
+                request_id=request_id,
+                claimer=result.payer,
+                settlement_tx_id=result.payment_txid or "",
+            )
+        },
     )
-    if not result.is_promo:
-        mark_fulfilled(result.payment_txid, resource="x402-features-claim")
+    if isinstance(outcome, Response):
+        return outcome
+
+    mark_fulfilled(result.payment_txid, resource=_CLAIM_RESOURCE)
     return Response(
         status_code=200,
         headers={"Content-Type": "application/json", **result.settlement_headers},
         description=serialization.dumps(
             {
                 "request_id": request_id,
-                **_claims_json(summary),
+                **_claims_json(outcome["summary"]),
                 "settlement_tx_id": result.payment_txid or "",
-                **({"via": "promo"} if result.is_promo else {}),
             }
         ),
     )
@@ -314,18 +382,27 @@ def x402_features_demand(request: Request) -> Response:
     except ValueError:
         return json_error_response(400, "invalid_request", "limit must be an integer")
 
+    if circuit_breaker.is_tripped(_DEMAND_RESOURCE):
+        return json_error_response(
+            503,
+            "temporarily_disabled",
+            "This endpoint is temporarily disabled after an elevated failure rate. "
+            "Try again later.",
+        )
+
     promo_code, promo_wallet = promo_request_params(request)
     result = require_paid_request(
         request,
         price=settings.x402_features_demand_price,
-        resource="x402-features-demand",
+        resource=_DEMAND_RESOURCE,
         promo_code=promo_code,
         promo_wallet=promo_wallet,
         description=(
             "Read the PXke x402 feature-request board ranked by paid demand, "
             "with each request's vote total — what agents have actually staked "
             "money on wanting built. The free GET /api/v1/x402/features lists "
-            "the same requests without the demand signal."
+            "the same requests without the demand signal. Supports ?preview=true "
+            "(redacted, unpaid, rate-limited)."
         ),
         # A GET whose input is query params, so no body_type — the package's
         # default query-params declaration is the correct one here.
@@ -352,28 +429,88 @@ def x402_features_demand(request: Request) -> Response:
                 "settlement_tx_id": "...",
             },
         ),
+        preview=preview_requested(request),
     )
     if result.error:
         return result.error
 
-    ranked = feature_service.rank_by_demand(limit=limit)
-    claims = feature_service.claim_summaries([item.request for item in ranked])
-    if not result.is_promo:
-        mark_fulfilled(result.payment_txid, resource="x402-features-demand")
+    if result.is_preview:
+        # Shape, not values: rank_by_demand is never called for a preview
+        # caller -- the ORDER is derived from vote_total (the paid signal),
+        # not just the numbers, so a real ranking must never leak even with
+        # vote_total blanked out. One redacted exemplar row, matching the
+        # free /features board's own example fields, plus a sentinel
+        # vote_total (-1 -- a real one is never negative).
+        return Response(
+            status_code=200,
+            headers={"Content-Type": "application/json"},
+            description=serialization.dumps(
+                {
+                    "items": [
+                        {
+                            **_REQUEST_EXAMPLE,
+                            "request_id": "<preview>",
+                            "submitter": None,
+                            "created_at_epoch": 0,
+                            "vote_total": -1,
+                            "claims_count": 0,
+                            "latest_claimer": None,
+                        }
+                    ],
+                    "settlement_tx_id": "<preview>",
+                }
+            ),
+        )
+
+    if result.is_promo:
+        # A promo redemption settles nothing, so there is no payer/txid to
+        # refund on failure -- run_with_refund is for a real settlement only.
+        ranked = feature_service.rank_by_demand(limit=limit)
+        claims = feature_service.claim_summaries([item.request for item in ranked])
+        return Response(
+            status_code=200,
+            headers={"Content-Type": "application/json", **result.settlement_headers},
+            description=serialization.dumps(
+                {
+                    "items": [
+                        _demand_json(item, claims.get(item.request.request_id, ClaimSummary()))
+                        for item in ranked
+                    ],
+                    "settlement_tx_id": "",
+                    "via": "promo",
+                }
+            ),
+        )
+
+    outcome = run_with_refund(
+        result,
+        resource=_DEMAND_RESOURCE,
+        product_write=lambda: _demand_product_write(limit),
+    )
+    if isinstance(outcome, Response):
+        return outcome
+
+    mark_fulfilled(result.payment_txid, resource=_DEMAND_RESOURCE)
     return Response(
         status_code=200,
         headers={"Content-Type": "application/json", **result.settlement_headers},
-        description=serialization.dumps(
-            {
-                "items": [
-                    _demand_json(item, claims.get(item.request.request_id, ClaimSummary()))
-                    for item in ranked
-                ],
-                "settlement_tx_id": result.payment_txid or "",
-                **({"via": "promo"} if result.is_promo else {}),
-            }
-        ),
+        description=serialization.dumps({**outcome, "settlement_tx_id": result.payment_txid or ""}),
     )
+
+
+def _demand_product_write(limit: int) -> dict:
+    """The real demand-ranking read run_with_refund wraps: rank + claim annotations.
+
+    Returns a plain dict (never a Response), same contract as _ping_product_write.
+    """
+    ranked = feature_service.rank_by_demand(limit=limit)
+    claims = feature_service.claim_summaries([item.request for item in ranked])
+    return {
+        "items": [
+            _demand_json(item, claims.get(item.request.request_id, ClaimSummary()))
+            for item in ranked
+        ]
+    }
 
 
 def x402_admin_delete_feature_request(request: Request) -> Response | dict:

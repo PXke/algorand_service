@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 from algosdk import account, util
 
-from app.modules.kya.models.domain import KycError
+from app.modules.kya.models.domain import KycError, StoredEnrollment
 from app.modules.kya.services.consent_message import build_kyc_consent_message
 from app.modules.kya.services.enrollment_service import (
     EnrollmentService,
@@ -16,6 +16,26 @@ from app.modules.kya.services.indexer_client import WalletSignals
 from app.modules.kya.stores.memory import InMemoryEnrollmentStore
 
 WALLET = "W" * 58
+_NONCE = "test-nonce"
+_EXPIRES = 2_000_000_000
+
+
+def _consent_message(addr: str) -> str:
+    return build_kyc_consent_message(wallet_address=addr, nonce=_NONCE, expires_at=_EXPIRES)
+
+
+def _enroll(
+    service: EnrollmentService,
+    *,
+    wallet_address: str = WALLET,
+    consent_signature_b64: str = "c2ln",
+) -> StoredEnrollment:
+    return service.enroll(
+        wallet_address=wallet_address,
+        consent_signature_b64=consent_signature_b64,
+        consent_nonce=_NONCE,
+        consent_expires_at=_EXPIRES,
+    )
 
 
 def _always_valid(_wallet: str, _message: str, _signature: str) -> bool:
@@ -34,7 +54,7 @@ def test_default_signature_verifier_accepts_real_pera_dialect_signature() -> Non
     # default verifier actually checks THAT convention, not the suggestions
     # module's raw-message one (they are not interchangeable).
     sk, addr = account.generate_account()
-    message = build_kyc_consent_message(wallet_address=addr)
+    message = _consent_message(addr)
     sig = util.sign_bytes(message.encode(), sk)
 
     assert _default_signature_verifier(addr, message, sig) is True
@@ -47,7 +67,7 @@ def test_default_signature_verifier_rejects_raw_non_mx_signature() -> None:
     from nacl.signing import SigningKey
 
     sk, addr = account.generate_account()
-    message = build_kyc_consent_message(wallet_address=addr)
+    message = _consent_message(addr)
     # Raw signature (no "MX" prefix) — what the suggestions module's
     # verify_wallet_signature accepts, but the KYA default must not.
     private_key_bytes = base64.b64decode(sk)[:32]
@@ -68,7 +88,7 @@ def test_enroll_success_stores_signals_and_level() -> None:
         current_round_fetcher=lambda: 200_000,
     )
 
-    record = service.enroll(wallet_address=WALLET, consent_signature_b64="c2ln")
+    record = _enroll(service)
 
     assert record.wallet_address == WALLET
     assert record.wallet_age_round == 1000
@@ -86,7 +106,7 @@ def test_enroll_invalid_signature_raises() -> None:
     )
 
     with pytest.raises(KycError) as exc:
-        service.enroll(wallet_address=WALLET, consent_signature_b64="c2ln")
+        _enroll(service)
     assert exc.value.code == "invalid_signature"
 
 
@@ -106,7 +126,7 @@ def test_enroll_never_calls_signals_fetcher_when_signature_invalid() -> None:
         signals_fetcher=_tracking_fetcher,
     )
     with pytest.raises(KycError):
-        service.enroll(wallet_address=WALLET, consent_signature_b64="c2ln")
+        _enroll(service)
     assert calls == []
 
 
@@ -119,8 +139,8 @@ def test_reenrollment_preserves_original_enrolled_at() -> None:
         signals_fetcher=lambda _addr: WalletSignals(wallet_age_round=1000, recent_tx_count=1),
     )
 
-    first = service.enroll(wallet_address=WALLET, consent_signature_b64="c2ln")
-    second = service.enroll(wallet_address=WALLET, consent_signature_b64="c2ln2")
+    first = _enroll(service)
+    second = _enroll(service, consent_signature_b64="c2ln2")
 
     assert second.enrolled_at_epoch == first.enrolled_at_epoch
     assert second.consent_signature_b64 == "c2ln2"

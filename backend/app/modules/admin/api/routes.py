@@ -93,7 +93,6 @@ def admin_analytics(request: Request) -> Response | dict:
 
         return read_analytics(days=days)
 
-
     from app.core.cache import cached_json
 
     # This aggregate does a full sequential pass over `days` day-partitions
@@ -116,7 +115,13 @@ def admin_patch_article(request: Request) -> Response:
         return json_error_response(400, "invalid_request", str(exc))
     wallet = verified_admin_wallet(request)
 
-    updated = store.update_article(article_id, title=payload.title, summary=payload.summary, body=payload.body, editor=f"admin:{wallet}", )
+    updated = store.update_article(
+        article_id,
+        title=payload.title,
+        summary=payload.summary,
+        body=payload.body,
+        editor=f"admin:{wallet}",
+    )
     if updated is None:
         return json_error_response(404, "not_found", "Article not found")
     return asdict(updated)
@@ -211,7 +216,11 @@ def admin_delete_article(request: Request) -> Response:
 
         domain = domain_from_url(source_url)
         if domain:
-            store.reject_domain_source(domain=domain, wallet=wallet, source_url_hint=source_url, )
+            store.reject_domain_source(
+                domain=domain,
+                wallet=wallet,
+                source_url_hint=source_url,
+            )
             blocked = True
     return {"deleted": True, "article_id": article_id, "source_blocked": blocked}
 
@@ -237,7 +246,15 @@ def admin_create_brief(request: Request) -> Response:
         return json_error_response(400, "invalid_request", str(exc))
     wallet = verified_admin_wallet(request)
 
-    item = store.create_brief(title=payload.title, body_markdown=payload.body_markdown, keywords=payload.keywords, status=payload.status, wallet_address=wallet, refresh_every_days=payload.refresh_every_days, is_special_edition=payload.is_special_edition, )
+    item = store.create_brief(
+        title=payload.title,
+        body_markdown=payload.body_markdown,
+        keywords=payload.keywords,
+        status=payload.status,
+        wallet_address=wallet,
+        refresh_every_days=payload.refresh_every_days,
+        is_special_edition=payload.is_special_edition,
+    )
     try:
         from celery import Celery
 
@@ -347,7 +364,22 @@ def admin_classifier_feedback(request: Request) -> Response:
         return json_error_response(400, "invalid_request", str(exc))
     wallet = verified_admin_wallet(request)
 
-    result = store.record_classifier_feedback(url=payload.url, text_sample=payload.text_sample, category=payload.category, predicted_category=payload.predicted_category, quality=payload.quality, predicted_publish=payload.predicted_publish, approved=payload.approved, admin_wallet=wallet, review_id=payload.review_id, article_id=payload.article_id, source_relevant=payload.source_relevant, categories=payload.categories, training_only=payload.training_only, corrected_scores=payload.corrected_scores, )
+    result = store.record_classifier_feedback(
+        url=payload.url,
+        text_sample=payload.text_sample,
+        category=payload.category,
+        predicted_category=payload.predicted_category,
+        quality=payload.quality,
+        predicted_publish=payload.predicted_publish,
+        approved=payload.approved,
+        admin_wallet=wallet,
+        review_id=payload.review_id,
+        article_id=payload.article_id,
+        source_relevant=payload.source_relevant,
+        categories=payload.categories,
+        training_only=payload.training_only,
+        corrected_scores=payload.corrected_scores,
+    )
     # Labeling changes the Training-tab aggregate — drop its cache so the
     # next load reflects this decision immediately (don't wait for the TTL).
     from app.core.cache import invalidate
@@ -407,7 +439,10 @@ def admin_merge_services(request: Request) -> Response:
 
     from app.modules.registry.sources import merge_services
 
-    return merge_services(target_service_id=payload.target_service_id, source_service_ids=payload.source_service_ids, )
+    return merge_services(
+        target_service_id=payload.target_service_id,
+        source_service_ids=payload.source_service_ids,
+    )
 
 
 def admin_delete_source(request: Request) -> Response:
@@ -624,8 +659,9 @@ def admin_health_check(request: Request) -> Response:
     Split out of `/health/ready` so the System tab can fire one request per
     check in parallel instead of one combined call that blocks on the
     slowest dependency (Typesense and the Conduit chain-index query are
-    usually the culprits). `/health/ready` itself is untouched — the deploy
-    pipeline still gates on that single combined payload.
+    usually the culprits). `/health/ready` itself stays a combined payload
+    for the deploy pipeline, but its public JSON is name+ok only — exception
+    `detail` strings stay on this admin route.
     """
     denied = require_admin_wallet(request)
     if denied is not None:
@@ -683,7 +719,6 @@ def admin_reset_articles(request: Request) -> Response:
         for table in tables:
             session.execute(f"TRUNCATE {table}")
 
-
     try:
         _truncate_all()
     except Exception:
@@ -711,7 +746,6 @@ def admin_clear_classifier_reviews(request: Request) -> Response:
         session = get_cassandra_session()
         for table in _CLEAR_CLASSIFIER_REVIEWS_TABLES:
             session.execute(f"TRUNCATE {table}")
-
 
     _truncate()
     return {"cleared": True}
@@ -955,7 +989,6 @@ def admin_list_domains(request: Request) -> Response:
         page_size = 25
     page_size = max(1, min(page_size, 100))
 
-
     return _admin_domains_page(status, page, page_size)
 
 
@@ -968,7 +1001,6 @@ def admin_list_tool_suggestions(request: Request) -> Response:
         "1",
         "true",
     )
-
 
     items = store.list_tool_suggestions(include_resolved=include_resolved)
     return {"items": items}
@@ -1013,7 +1045,6 @@ def admin_list_compose_feedback(request: Request) -> Response:
             for r in rows
         ]
         return {"items": items}
-
 
     return _compute()
 
@@ -1068,7 +1099,9 @@ def admin_list_compose_sessions(request: Request) -> Response:
             rows = [
                 r
                 for bucket in buckets
-                for r in session.execute(ToolInsightStmts.LIST_COMPOSE_SESSIONS_SUMMARY, (bucket, limit))
+                for r in session.execute(
+                    ToolInsightStmts.LIST_COMPOSE_SESSIONS_SUMMARY, (bucket, limit)
+                )
             ]
         rows.sort(key=lambda r: r.created_at, reverse=True)
         rows = rows[:limit]
@@ -1091,7 +1124,6 @@ def admin_list_compose_sessions(request: Request) -> Response:
             for r in rows
         ]
         return {"items": items}
-
 
     from app.core.cache import cached_json
 
@@ -1146,7 +1178,6 @@ def admin_get_compose_session(request: Request) -> Response:
         except Exception:
             msgs = []
         return {"messages": msgs, "final_output": row.final_output or ""}
-
 
     return _compute()
 
@@ -1207,9 +1238,7 @@ def admin_interrogate_compose_session(request: Request) -> Response | dict:
         try:
             result = async_result.get(timeout=90)
         except CeleryTimeoutError:
-            return json_error_response(
-                504, "timeout", "the writer model took too long to respond"
-            )
+            return json_error_response(504, "timeout", "the writer model took too long to respond")
     except Exception as exc:
         return json_error_response(502, "broker_unavailable", str(exc))
 
@@ -1503,7 +1532,6 @@ def admin_set_domain(request: Request) -> Response:
     if payload.is_relevant:
         payload.domain = store._normalize_domain_input(payload.domain)
 
-
     result = _admin_set_domain_compute(payload, wallet)
     _invalidate_domains_cache()
     return result
@@ -1577,9 +1605,7 @@ def admin_compose_next(request: Request) -> Response:
         # 2026-08-25: repointed from drain_standard_publish_queue (retired)
         # to its editorial-room successor -- see
         # workers/app/modules/newspaper/tasks/queue_drain_tasks.py.
-        drain_async = app_c.send_task(
-            "app.tasks.newspaper.drain_to_compose", queue="pipeline"
-        )
+        drain_async = app_c.send_task("app.tasks.newspaper.drain_to_compose", queue="pipeline")
         # Both tasks return almost instantly when they find nothing to do
         # (Redis/Cassandra reads only) — real scraping/composing/publishing
         # takes far longer. A short wait doubles as "did it actually find
@@ -1719,7 +1745,6 @@ def admin_investigation_findings(request: Request) -> Response:
             )
         return {"items": items}
 
-
     return _compute()
 
 
@@ -1803,7 +1828,7 @@ def admin_artifacts_to_compose_selected(request: Request) -> Response | dict:
 
 
 def admin_reset_to_compose_for_day(request: Request) -> Response | dict:
-    """"Redo today's picks": clear `day`'s (default: tomorrow, matching the sibling to-compose routes and the Queue tab's own day field) locked-in `to_compose` selection and immediately re-run selection over the widened pool -- the fix for a bad automatic pick, or forcing a re-pick after correcting an upstream priority/pool bug, without waiting for the next daily beat.
+    """ "Redo today's picks": clear `day`'s (default: tomorrow, matching the sibling to-compose routes and the Queue tab's own day field) locked-in `to_compose` selection and immediately re-run selection over the widened pool -- the fix for a bad automatic pick, or forcing a re-pick after correcting an upstream priority/pool bug, without waiting for the next daily beat.
 
     2026-08-26: calls algorand_shared.to_compose_selection.reset_and_reselect_for_day
     directly instead of dispatching into a worker over Celery. It clears

@@ -19,6 +19,15 @@ Two things every row carries beyond the raw payment:
   A row that stays False is a paid-but-unfulfilled settlement an operator
   must reconcile by hand -- see paid_request.py for the contract routes
   follow.
+* `refund_tx_id` / `refund_status`: written by record_refund (migration 102)
+  when a route opted into paid_request.run_with_refund and its product write
+  failed after payment settled. Both stay null on a row that never needed a
+  refund attempt -- null refund_status is NOT the same thing as "no refund
+  needed": pair it with `fulfilled` to tell them apart (fulfilled=true,
+  refund_status=null -> succeeded normally; fulfilled=false,
+  refund_status=null -> failed and no refund was ever attempted, an open
+  reconciliation item; fulfilled=false, refund_status set -> a refund was
+  attempted, check the status).
 """
 
 from __future__ import annotations
@@ -59,6 +68,11 @@ class SettlementRecord:
     eur_value: float = EUR_VALUE_UNAVAILABLE
     # False until the route's product write succeeded and mark_fulfilled ran.
     fulfilled: bool = False
+    # Set by record_refund (migration 102) once a refund has been attempted
+    # for this settlement. Both stay None until then -- see this module's
+    # own docstring for how to read them together with `fulfilled`.
+    refund_tx_id: str | None = None
+    refund_status: str | None = None
 
 
 class SettlementStore(Protocol):
@@ -74,6 +88,10 @@ class SettlementStore(Protocol):
 
     def mark_fulfilled(self, tx_id: str) -> bool:
         """Flip one settlement to fulfilled. Returns False if no such row exists."""
+        ...
+
+    def record_refund(self, tx_id: str, *, refund_tx_id: str | None, refund_status: str) -> bool:
+        """Record a refund attempt's outcome for one settlement. Returns False if no such row exists."""
         ...
 
     def list_for_day(self, day: str, *, limit: int) -> list[SettlementRecord]:
@@ -110,6 +128,8 @@ class CassandraSettlementStore:
                 item.network,
                 item.eur_value,
                 item.fulfilled,
+                item.refund_tx_id,
+                item.refund_status,
             ),
         )
         session.execute(
@@ -125,6 +145,8 @@ class CassandraSettlementStore:
                 item.network,
                 item.eur_value,
                 item.fulfilled,
+                item.refund_tx_id,
+                item.refund_status,
             ),
         )
 
@@ -146,6 +168,8 @@ class CassandraSettlementStore:
             settled_at_epoch=int(row.settled_at.replace(tzinfo=UTC).timestamp()),
             eur_value=EUR_VALUE_UNAVAILABLE if row.eur_value is None else float(row.eur_value),
             fulfilled=bool(row.fulfilled),
+            refund_tx_id=row.refund_tx_id,
+            refund_status=row.refund_status,
         )
 
     def mark_fulfilled(self, tx_id: str) -> bool:
@@ -169,6 +193,29 @@ class CassandraSettlementStore:
             (True, row.day, row.settled_at, tx_id),
         )
         session.execute(X402Stmts.MARK_SETTLEMENT_BY_TX_FULFILLED, (True, tx_id))
+        return True
+
+    def record_refund(self, tx_id: str, *, refund_tx_id: str | None, refund_status: str) -> bool:
+        """Record a refund attempt's outcome in both tables.
+
+        Same read-then-update-on-known-key safety as mark_fulfilled: the
+        lookup gives us the (day, settled_at) half of the ledger key, so this
+        never upserts a phantom row for a txid the ledger never recorded.
+        """
+        from app.core.cassandra import get_cassandra_session
+        from app.core.statements import X402Stmts
+
+        session = get_cassandra_session()
+        row = session.execute(X402Stmts.GET_SETTLEMENT_BY_TX, (tx_id,)).one()
+        if row is None:
+            return False
+        session.execute(
+            X402Stmts.MARK_SETTLEMENT_REFUNDED,
+            (refund_tx_id, refund_status, row.day, row.settled_at, tx_id),
+        )
+        session.execute(
+            X402Stmts.MARK_SETTLEMENT_BY_TX_REFUNDED, (refund_tx_id, refund_status, tx_id)
+        )
         return True
 
     def list_for_day(self, day: str, *, limit: int) -> list[SettlementRecord]:
@@ -197,6 +244,8 @@ class CassandraSettlementStore:
                 settled_at_epoch=int(row.settled_at.replace(tzinfo=UTC).timestamp()),
                 eur_value=EUR_VALUE_UNAVAILABLE if row.eur_value is None else float(row.eur_value),
                 fulfilled=bool(row.fulfilled),
+                refund_tx_id=row.refund_tx_id,
+                refund_status=row.refund_status,
             )
             for row in rows
         ]
@@ -225,6 +274,15 @@ class InMemorySettlementStore:
         if record is None:
             return False
         record.fulfilled = True
+        return True
+
+    def record_refund(self, tx_id: str, *, refund_tx_id: str | None, refund_status: str) -> bool:
+        """Record a refund attempt's outcome. Returns False if no such row exists."""
+        record = self.get_settlement(tx_id)
+        if record is None:
+            return False
+        record.refund_tx_id = refund_tx_id
+        record.refund_status = refund_status
         return True
 
     def list_for_day(self, day: str, *, limit: int) -> list[SettlementRecord]:
@@ -391,6 +449,59 @@ def mark_fulfilled(
             resource,
         )
     return marked
+
+
+def record_refund(
+    settlement_tx_id: str | None,
+    *,
+    refund_tx_id: str | None,
+    refund_status: str,
+    resource: str,
+    store: SettlementStore | None = None,
+) -> bool:
+    """Record a refund attempt's outcome on the settlement ledger.
+
+    Call this AFTER attempting the refund (whatever its outcome), never
+    before -- same store-before-mark discipline as mark_fulfilled, just for
+    the refund leg instead of the fulfillment leg. Never raises -- the refund
+    attempt already happened (or was skipped) and the caller must still
+    return a response -- but a failure or a missing ledger row is logged at
+    ERROR with the txid so the row can be reconciled by hand.
+
+    Returns True when the ledger now carries the refund outcome, False
+    otherwise.
+    """
+    if not settlement_tx_id:
+        logger.error(
+            "x402 record_refund called with no settlement txid for resource %s; the refund "
+            "outcome (status=%s, refund_tx_id=%s) cannot be attached to any ledger row",
+            resource,
+            refund_status,
+            refund_tx_id,
+        )
+        return False
+    try:
+        recorded = (store or get_settlement_store()).record_refund(
+            settlement_tx_id, refund_tx_id=refund_tx_id, refund_status=refund_status
+        )
+    except Exception:
+        logger.exception(
+            "x402 REFUND OUTCOME RECORD FAILED — refund status=%s refund_tx_id=%s, ledger "
+            "still shows no refund attempt. Reconcile by hand: tx_id=%s resource=%s",
+            refund_status,
+            refund_tx_id,
+            settlement_tx_id,
+            resource,
+        )
+        return False
+    if not recorded:
+        logger.error(
+            "x402 record_refund found no ledger row for tx_id=%s resource=%s; the settlement "
+            "write must have failed earlier (see its own ERROR line)",
+            settlement_tx_id,
+            resource,
+        )
+    return recorded
 
 
 def recent_real_settlements(

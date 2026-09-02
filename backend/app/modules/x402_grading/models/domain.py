@@ -66,6 +66,17 @@ class StoredGrade:
 
     `settlement_tx_id` is the txid of the payment that bought THIS grade -- the
     audit trail from the stored opinion back to the payment that funded it.
+
+    `usage_verified` (owner ask 2026-09-02) is True when the grader's cited
+    payment txid was independently confirmed on-chain as a real payment from
+    this same wallet to the graded endpoint's own payTo -- see
+    services/usage_proof.py. Every stored grade has attempted this (a grade
+    with no txid is refused before the gate, see x402_grade_submit), so this
+    is normally True; it reads False only in the narrow operator-configured
+    fallback where the indexer itself was unreachable at submit time
+    (settings.x402_grading_usage_proof_required=False). It does NOT feed
+    credibility weighting (services/credibility.py) -- a visible flag on the
+    grade, not a new weight input.
     """
 
     url_hash: str
@@ -75,6 +86,7 @@ class StoredGrade:
     comment: str
     settlement_tx_id: str
     created_at_epoch: int
+    usage_verified: bool = False
 
 
 @dataclass

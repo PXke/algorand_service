@@ -194,6 +194,30 @@ def test_get_detail_flags_a_draft_row_exactly_like_get(monkeypatch: Any) -> None
     assert article.draft is True
 
 
+def test_get_detail_flags_backlog_and_on_hold_as_draft_too(monkeypatch: Any) -> None:  # noqa: ANN401
+    """A not-yet-released article (backlog/on_hold) must gate the same as draft.
+
+    Root-caused 2026-09-01: these used to come back draft=False (the old
+    schema's behavior), which meant get_article() served a backlog
+    article's full body to anyone who had -- or guessed -- its UUID,
+    through both the public site route and the paid x402 News Engine
+    endpoint, before it was ever actually released.
+    """
+    for status in ("backlog", "on_hold"):
+        session = _FakeAsyncSession(_row(status=status))
+        patch_cassandra(monkeypatch, session)
+        article = CassandraArticleStore().get_detail(_ARTICLE_ID)
+        assert article is not None
+        assert article.draft is True, status
+
+
+# The NewsService-level gate itself (draft=True -> get_article() returns
+# None, get_article_ignoring_draft_gate still serves it) is already covered
+# generically in test_news_service.py / test_admin_article_draft.py -- the
+# tests above are this fix's actual regression coverage: proving backlog/
+# on_hold now PRODUCE draft=True in the first place.
+
+
 # --------------------------------------------------------------------------- #
 # CassandraArticleStore.get_many_detail / get_many (bulk path)
 # --------------------------------------------------------------------------- #

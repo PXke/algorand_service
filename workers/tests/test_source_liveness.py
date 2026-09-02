@@ -27,8 +27,7 @@ def _mock_get(monkeypatch: pytest.MonkeyPatch, response: _FakeResponse | Excepti
             raise response
         return response
 
-    monkeypatch.setattr(source_liveness.httpx, "get", fake_get)
-    monkeypatch.setattr(source_liveness, "assert_public_url", lambda url: url)
+    monkeypatch.setattr(source_liveness, "guarded_get", fake_get)
 
 
 def test_true_on_known_parking_marker(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -75,12 +74,13 @@ def test_false_for_empty_url() -> None:
 
 
 def test_unsafe_url_fails_open(monkeypatch: pytest.MonkeyPatch) -> None:
-    """assert_public_url raising (an internal/private target) is caught and reads as alive, never propagates."""
+    """guarded_get raising (internal/private target or a 302 into one) is caught and reads as alive, never propagates."""
+    from app.core.net_guard import UnsafeUrlError
 
-    def _boom(_url: str) -> str:
-        raise ValueError("blocked: private host")
+    def _boom(_url: str, **_k: object) -> object:
+        raise UnsafeUrlError("blocked: private host")
 
-    monkeypatch.setattr(source_liveness, "assert_public_url", _boom, raising=False)
+    monkeypatch.setattr(source_liveness, "guarded_get", _boom)
     assert source_liveness.is_source_parked_or_expired("http://169.254.169.254/") is False
 
 

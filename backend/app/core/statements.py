@@ -804,8 +804,8 @@ class X402DirectoryStmts:
         "INSERT INTO algorand_platform.x402_listings ("
         "url_hash, url, price, assets, description, schema_json, tags, "
         "term_end, settlement_tx_id, created_at, payer, category, "
-        "verified_wallet, verified_at"
-        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        "verified_wallet, verified_at, reimburses, contact"
+        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
     )
     # First-time listing path: a lightweight transaction, so two concurrent
     # first-time listers of the same url cannot both observe "not listed" and
@@ -816,20 +816,21 @@ class X402DirectoryStmts:
         "INSERT INTO algorand_platform.x402_listings ("
         "url_hash, url, price, assets, description, schema_json, tags, "
         "term_end, settlement_tx_id, created_at, payer, category, "
-        "verified_wallet, verified_at"
-        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) IF NOT EXISTS"
+        "verified_wallet, verified_at, reimburses, contact"
+        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) IF NOT EXISTS"
     )
     GET_LISTING = _Stmt(
         "SELECT url_hash, url, price, assets, description, schema_json, tags, "
-        "term_end, settlement_tx_id, created_at, payer, verified_wallet, verified_at, category "
+        "term_end, settlement_tx_id, created_at, payer, verified_wallet, verified_at, category, "
+        "reimburses, contact "
         "FROM algorand_platform.x402_listings WHERE url_hash = ?"
     )
     INSERT_RECENCY = _Stmt(
         "INSERT INTO algorand_platform.x402_listings_by_recency ("
         "directory, created_at, url_hash, url, price, assets, description, "
         "schema_json, tags, term_end, settlement_tx_id, payer, category, "
-        "verified_wallet, verified_at"
-        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        "verified_wallet, verified_at, reimburses, contact"
+        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
     )
     # Deletes the row a re-listing supersedes. Needs the exact created_at of
     # the previous listing (read from x402_listings first), since created_at is
@@ -846,7 +847,8 @@ class X402DirectoryStmts:
     # and the caller clamps it (no unbounded listings, CLAUDE.md section 4).
     LIST_RECENT = _Stmt(
         "SELECT url_hash, url, price, assets, description, schema_json, tags, "
-        "term_end, settlement_tx_id, created_at, payer, verified_wallet, verified_at, category "
+        "term_end, settlement_tx_id, created_at, payer, verified_wallet, verified_at, category, "
+        "reimburses, contact "
         "FROM algorand_platform.x402_listings_by_recency "
         "WHERE directory = ? LIMIT ?"
     )
@@ -860,8 +862,8 @@ class X402DirectoryStmts:
         "INSERT INTO algorand_platform.x402_listings_by_tag ("
         "tag, created_at, url_hash, url, price, assets, description, "
         "schema_json, tags, term_end, settlement_tx_id, payer, category, "
-        "verified_wallet, verified_at"
-        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        "verified_wallet, verified_at, reimburses, contact"
+        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
     )
     # Same addressing rule as DELETE_RECENCY: created_at is a clustering
     # column, so the previous listing's exact created_at is needed.
@@ -871,7 +873,8 @@ class X402DirectoryStmts:
     )
     LIST_BY_TAG = _Stmt(
         "SELECT url_hash, url, price, assets, description, schema_json, tags, "
-        "term_end, settlement_tx_id, created_at, payer, verified_wallet, verified_at, category "
+        "term_end, settlement_tx_id, created_at, payer, verified_wallet, verified_at, category, "
+        "reimburses, contact "
         "FROM algorand_platform.x402_listings_by_tag "
         "WHERE tag = ? LIMIT ?"
     )
@@ -1015,26 +1018,29 @@ class X402Stmts:
     modules/x402/settlement.py.
     """
 
-    # Full INSERT of every column, fulfilled included (migration 095), so the
-    # row never has an unwritten column reading back as null.
+    # Full INSERT of every column, fulfilled + refund_tx_id/refund_status
+    # included (migrations 095, 102), so the row never has an unwritten
+    # column reading back as null by accident. refund_tx_id/refund_status
+    # are always null at insert time -- a refund is only ever attempted
+    # later, if the product write fails (see paid_request.run_with_refund).
     INSERT_SETTLEMENT = _Stmt(
         "INSERT INTO algorand_platform.x402_settlements ("
         "day, settled_at, tx_id, asset_id, amount_atomic, payer, resource, "
-        "network, eur_value, fulfilled"
-        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        "network, eur_value, fulfilled, refund_tx_id, refund_status"
+        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
     )
     # By-txid lookup (migration 095): the ledger's key is (day, settled_at,
-    # tx_id) and a route only holds the txid, so mark_fulfilled needs this to
-    # find the ledger row's full key without ALLOW FILTERING.
+    # tx_id) and a route only holds the txid, so mark_fulfilled/record_refund
+    # need this to find the ledger row's full key without ALLOW FILTERING.
     INSERT_SETTLEMENT_BY_TX = _Stmt(
         "INSERT INTO algorand_platform.x402_settlements_by_tx ("
         "tx_id, day, settled_at, asset_id, amount_atomic, payer, resource, "
-        "network, eur_value, fulfilled"
-        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        "network, eur_value, fulfilled, refund_tx_id, refund_status"
+        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
     )
     GET_SETTLEMENT_BY_TX = _Stmt(
         "SELECT tx_id, day, settled_at, asset_id, amount_atomic, payer, resource, "
-        "network, eur_value, fulfilled "
+        "network, eur_value, fulfilled, refund_tx_id, refund_status "
         "FROM algorand_platform.x402_settlements_by_tx WHERE tx_id = ?"
     )
     # Single-column UPDATEs are safe here ONLY because the caller has just
@@ -1048,6 +1054,17 @@ class X402Stmts:
     MARK_SETTLEMENT_BY_TX_FULFILLED = _Stmt(
         "UPDATE algorand_platform.x402_settlements_by_tx SET fulfilled = ? WHERE tx_id = ?"
     )
+    # Same known-key-only-UPDATE safety as MARK_SETTLEMENT_FULFILLED above,
+    # for a refund attempt's outcome (migration 102). See
+    # CassandraSettlementStore.record_refund.
+    MARK_SETTLEMENT_REFUNDED = _Stmt(
+        "UPDATE algorand_platform.x402_settlements SET refund_tx_id = ?, refund_status = ? "
+        "WHERE day = ? AND settled_at = ? AND tx_id = ?"
+    )
+    MARK_SETTLEMENT_BY_TX_REFUNDED = _Stmt(
+        "UPDATE algorand_platform.x402_settlements_by_tx "
+        "SET refund_tx_id = ?, refund_status = ? WHERE tx_id = ?"
+    )
     # Full-column day partition read for the free recent-settlements feed
     # (modules/x402_catalog): a shared-ledger read, so it lives here on
     # X402Stmts, not on X402GradingStmts's narrower four-column
@@ -1055,8 +1072,8 @@ class X402Stmts:
     # deliberately stays put -- see credibility.py).
     LIST_SETTLEMENTS_FOR_DAY_FULL = _Stmt(
         "SELECT settled_at, tx_id, asset_id, amount_atomic, payer, resource, "
-        "network, eur_value, fulfilled FROM algorand_platform.x402_settlements "
-        "WHERE day = ? LIMIT ?"
+        "network, eur_value, fulfilled, refund_tx_id, refund_status "
+        "FROM algorand_platform.x402_settlements WHERE day = ? LIMIT ?"
     )
 
 
@@ -1078,11 +1095,13 @@ class X402PromoStmts:
     # code's resource/count/expiry.
     INSERT_PROMO_CODE_IF_ABSENT = _Stmt(
         "INSERT INTO algorand_platform.x402_promo_codes ("
-        "code, resource, starting_count, created_at, expires_at, active"
-        ") VALUES (?, ?, ?, ?, ?, ?) IF NOT EXISTS"
+        "code, resource, starting_count, created_at, expires_at, active, "
+        "max_redemptions_per_wallet"
+        ") VALUES (?, ?, ?, ?, ?, ?, ?) IF NOT EXISTS"
     )
     GET_PROMO_CODE = _Stmt(
-        "SELECT code, resource, starting_count, created_at, expires_at, active "
+        "SELECT code, resource, starting_count, created_at, expires_at, active, "
+        "max_redemptions_per_wallet "
         "FROM algorand_platform.x402_promo_codes WHERE code = ?"
     )
     # No WHERE clause -- a full-partition scan bounded by a literal LIMIT,
@@ -1091,7 +1110,8 @@ class X402PromoStmts:
     # unbounded listings). Promo codes are hand-issued by an admin, never
     # bulk-created, so 500 is generous headroom.
     LIST_ALL_PROMO_CODES = _Stmt(
-        "SELECT code, resource, starting_count, created_at, expires_at, active "
+        "SELECT code, resource, starting_count, created_at, expires_at, active, "
+        "max_redemptions_per_wallet "
         "FROM algorand_platform.x402_promo_codes LIMIT 500"
     )
     # IF EXISTS, same precedent as the probe badge (097): a deactivate can
@@ -1099,14 +1119,27 @@ class X402PromoStmts:
     DEACTIVATE_PROMO_CODE = _Stmt(
         "UPDATE algorand_platform.x402_promo_codes SET active = false WHERE code = ? IF EXISTS"
     )
-    # The redemption cap: (code, wallet_hash) is the primary key, so this one
-    # statement is both the append-only audit write and the atomic
-    # once-per-wallet-per-code claim. wallet_hash is a sha256 hex digest of
-    # the wallet address -- the raw address is never stored (see promo.py).
-    INSERT_PROMO_REDEMPTION_IF_ABSENT = _Stmt(
-        "INSERT INTO algorand_platform.x402_promo_redemptions ("
-        "code, wallet_hash, redeemed_at, resource"
-        ") VALUES (?, ?, ?, ?) IF NOT EXISTS"
+    # v2 (migration 101): purely the durable audit log -- the abuse cap (up
+    # to max_redemptions_per_wallet redemptions per wallet per code) lives
+    # in Redis (modules/x402/promo.py). A plain INSERT, not IF NOT EXISTS: the
+    # clustering key (redemption_id) is a server-generated `now()` timeuuid,
+    # always fresh, so an LWT here would never actually reject anything --
+    # see 101's own migration comment for why redeemed_at (a Python-supplied
+    # timestamp) was rejected as the clustering key first (it collided under
+    # realistic rapid same-wallet redemptions).
+    INSERT_PROMO_REDEMPTION = _Stmt(
+        "INSERT INTO algorand_platform.x402_promo_redemptions_v2 ("
+        "code, wallet_hash, redemption_id, redeemed_at, resource"
+        ") VALUES (?, ?, now(), ?, ?)"
+    )
+    # Single-partition, newest-first, bounded read of how many times this
+    # wallet has redeemed this code -- COUNT_PROMO_REDEMPTIONS_FOR_WALLET's
+    # LIMIT must stay >= the largest max_redemptions_per_wallet any code can
+    # ever be created with (see promo.py's MAX_REDEMPTIONS_PER_WALLET_LIMIT)
+    # so a real count is never truncated into looking exhausted.
+    COUNT_PROMO_REDEMPTIONS_FOR_WALLET = _Stmt(
+        "SELECT redemption_id FROM algorand_platform.x402_promo_redemptions_v2 "
+        "WHERE code = ? AND wallet_hash = ? LIMIT 1000"
     )
 
 
@@ -1120,20 +1153,22 @@ class X402GradingStmts:
     # This single statement is also the whole "one grade per (grader, url),
     # latest overwrites" rule: (url_hash, grader) is the primary key, so a
     # re-grade addresses and replaces the same row rather than adding one.
+    # usage_verified (103) added ADD COLUMN, nullable: a pre-103 row reads
+    # back as null, mapped to False in Python (CassandraGradeStore._row_to_grade).
     UPSERT_GRADE = _Stmt(
         "INSERT INTO algorand_platform.x402_grades ("
-        "url_hash, grader, url, score, comment, settlement_tx_id, created_at"
-        ") VALUES (?, ?, ?, ?, ?, ?, ?)"
+        "url_hash, grader, url, score, comment, settlement_tx_id, created_at, usage_verified"
+        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
     )
     GET_GRADE = _Stmt(
-        "SELECT url_hash, grader, url, score, comment, settlement_tx_id, created_at "
+        "SELECT url_hash, grader, url, score, comment, settlement_tx_id, created_at, usage_verified "
         "FROM algorand_platform.x402_grades WHERE url_hash = ? AND grader = ?"
     )
     # One endpoint's grades, for the aggregate. Single partition, clustered by
     # grader; the LIMIT is bound, never interpolated, and the caller clamps it
     # (no unbounded listings, CLAUDE.md section 4).
     LIST_GRADES = _Stmt(
-        "SELECT url_hash, grader, url, score, comment, settlement_tx_id, created_at "
+        "SELECT url_hash, grader, url, score, comment, settlement_tx_id, created_at, usage_verified "
         "FROM algorand_platform.x402_grades WHERE url_hash = ? LIMIT ?"
     )
     INSERT_GRADED_ENDPOINT = _Stmt(

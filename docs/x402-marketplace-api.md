@@ -78,11 +78,28 @@ Rules every paid route follows:
   payment_replayed`. If verification or settlement fails you get `402` again
   (`settlement_failed` names the facilitator's reason) and the header is
   released for a retry.
-- The only settled-then-refused cases are ownership checks that cannot run
-  until the payer is known (directory relist or renewal by a different
-  wallet, board renewal by a non-owner). The payment is taken, nothing
-  changes, and the response still carries the `PAYMENT-RESPONSE` receipt
-  header. Each route's description in the 402 offer says so.
+- **Settled-then-refused, payment kept, nothing refunded**: ownership checks
+  that cannot run until the payer is known (directory relist or renewal by a
+  different wallet, board renewal by a non-owner) and any other business
+  rejection that is the caller's fault, not ours. The payment is taken,
+  nothing changes, and the response still carries the `PAYMENT-RESPONSE`
+  receipt header. Each route's description in the 402 offer says so.
+- **Settled-then-our-side-failure, auto-refunded**: if the product write
+  itself fails after your payment settled (a bug or outage on our end, not
+  anything about your request), the full settled amount is automatically
+  refunded from a dedicated refund wallet — no dispute process, nothing you
+  need to do. You get a `503` with one of: `product_failed_refunded` (refund
+  sent — the refund transaction id is in the message; treat it as
+  `sent_unconfirmed` if you can't find it on-chain yet, in which case it's
+  still your reconciliation reference) or, rarely,
+  `product_failed_refund_pending` (the refund itself did not go through
+  immediately — the message carries your original payment's `tx_id` as the
+  reference to reconcile by hand). A resource with repeated refund failures
+  trips a circuit breaker and starts returning `503 temporarily_disabled`
+  *before* the payment gate — no charge — until an operator resets it. There
+  is no escrow: payment always settles first, on-chain, before any product
+  work runs; the refund is a same-marketplace remediation step afterward,
+  not a smart-contract guarantee.
 - Error bodies are always `{"error": {"code": "...", "message": "..."}}`.
 
 Discovery: every paid route declares a Bazaar discovery extension (input
@@ -99,10 +116,25 @@ booleans. As of this writing `supports_promo` is set on every paid route
 except `GET /api/v1/kyc/verify` (KYA's lookup route triggers a real payout to
 the looked-up wallet on a hit -- see services/payout_service.py -- and is
 deliberately left unwired rather than assumed safe by copying the same
-pattern as every other paid route). `supports_preview` is set only on
-`GET /api/v1/x402/ping`, the reference wiring the mechanism was built
-against; the underlying mechanism is generic and future routes may wire it
-in without a new catalog shape.
+pattern as every other paid route). `supports_preview` is set on the paid
+INFO READS -- `GET /api/v1/x402/ping` (the reference wiring the mechanism
+was built against), `GET /api/v1/x402/grades/score`, `GET
+/api/v1/x402/grades/top`, and `GET /api/v1/x402/features/demand` -- but
+deliberately NOT on write/action routes (a directory listing, a board
+placement, a vote, a claim, a grade submission): there is nothing to preview
+on a route whose whole point is performing the paid action, only on a route
+that sells reading data back. The underlying mechanism is generic and future
+paid reads may wire it in without a new catalog shape.
+
+On the three non-`ping` routes, preview never computes the real aggregate/
+ranking at all (not even to redact it after the fact) -- it returns one
+redacted exemplar with the same keys the real response would carry, using an
+impossible sentinel value (a negative `count`/`vote_total`/
+`candidates_considered`, or the literal string `"<preview>"`) precisely
+because the free pre-checks each route already runs (URL is graded, tag is
+rankable) guarantee a real response can never legitimately carry that value.
+`grades/top`'s preview in particular never reveals the real ranked order,
+since which endpoint comes first is itself part of what that route sells.
 
 **`?preview=true`** (also `1`/`yes`, case-insensitive) bypasses payment
 entirely and returns a **redacted** version of the same response shape, with
@@ -178,10 +210,14 @@ own price text), "description": str (<=2000), "assets": [str<=64] (<=16),
 "tags": [str<=64] (<=16, stored trimmed+lowercased; tags starting with
 `category:` are reserved and rejected), "category": one of `data, ai,
 finance, identity, storage, compute, social, tooling, other` (default
-`other`), "schema": object|null (<=4 KiB serialized)}`. Response:
-`{"listing": {url, price, description, assets, tags, category, schema,
-term_end_epoch, created_at_epoch, settlement_tx_id, payer, verified_wallet,
-verified_at_epoch}, "settlement_tx_id", "term_days"}`.
+`other`), "schema": object|null (<=4 KiB serialized), "reimburses": bool
+(default `false`), "contact": str (<=256, default `""`)}`. `reimburses` and
+`contact` are optional, self-declared and **never verified** by us for a
+third-party listing — they are the endpoint owner's own claim, not a badge we
+audit. Response: `{"listing": {url, price, description, assets, tags,
+category, schema, reimburses, contact, term_end_epoch, created_at_epoch,
+settlement_tx_id, payer, verified_wallet, verified_at_epoch},
+"settlement_tx_id", "term_days"}`.
 Relisting a URL you own (or one whose term has expired) starts a fresh term;
 a URL another wallet currently holds a live term on is refused with `403
 listing_owned_by_another_payer` after settlement (see rules above).
@@ -282,9 +318,15 @@ wallet is building it. `{"request_id", "claims_count", "latest_claimer",
 | paid | `GET /api/v1/x402/grades/top` | $0.03 |
 
 **`POST /grades`** — Body: `{"url": str (8-2048, any http(s) endpoint,
-listed or not), "score": int 1-5, "comment": str (<=280)}`. One grade per
-wallet per URL; re-grading replaces. Response: `{"url_hash", "url", "grade":
-{grader, score, comment, created_at_epoch, settlement_tx_id},
+listed or not), "score": int 1-5, "comment": str (<=280), "tx_id": str
+(exactly 52 characters)}`. `tx_id` is **mandatory** (owner ask 2026-09-02,
+Amazon's "verified purchase" bar applied to grading): the base32 Algorand
+transaction id of a real payment the grader made to the graded endpoint's
+own payTo, independently verified on-chain before the payment gate — no
+txid, no grade, and the txid's shape alone is checked before payment while
+its on-chain sender/receiver are verified before the grade is stored. One
+grade per wallet per URL; re-grading replaces. Response: `{"url_hash", "url",
+"grade": {grader, score, comment, created_at_epoch, settlement_tx_id},
 "settlement_tx_id"}`. Grades are weighted in aggregates by the grader
 wallet's total spend with this marketplace over the last 30 days
 (min 10,000 atomic, capped at 1,000,000).
@@ -330,8 +372,11 @@ IP (own counter, same budget as the headline list).
 
 **`GET /news/search?q=&limit=`** — paid; `q` is 1-200 characters. `{query,
 engine, items: [{article_id, slug, title, summary, snippet, score,
-published_at_epoch, url}], settlement_tx_id}`. `503 search_unavailable` if
-the engine failed (the payment is recorded as unfulfilled for reconciliation).
+published_at_epoch, url}], settlement_tx_id}`. If the search engine fails
+after a real payment settled, the payment is auto-refunded (see the refund
+rule above) rather than left as an unfulfilled ledger row; a `?promo=` call,
+which never settles anything, still gets a plain `503 search_unavailable`
+since there is nothing to refund.
 
 ### Know Your Agent (KYA) — not currently enabled
 

@@ -12,6 +12,7 @@ needed on the API host's nginx server block
 from __future__ import annotations
 
 import time
+from typing import Any
 
 from app.core import serialization
 from app.core.config import settings
@@ -19,8 +20,9 @@ from app.core.http import Request, Response, Router
 from app.core.http_errors import json_error_from_platform, json_error_response
 from app.core.query_params import query_param
 from app.modules.admin.auth import require_admin_wallet
+from app.modules.x402 import circuit_breaker
 from app.modules.x402.discovery import describe_json_endpoint
-from app.modules.x402.paid_request import mark_fulfilled, require_paid_request
+from app.modules.x402.paid_request import mark_fulfilled, require_paid_request, run_with_refund
 from app.modules.x402.preview import preview_requested
 from app.modules.x402.promo import (
     PromoError,
@@ -39,6 +41,8 @@ from app.modules.x402_catalog.services.rate_limit import (
     settlements_rate_limited,
 )
 from app.schemas import X402PromoCreateRequest
+
+_RESOURCE = "x402-ping"
 
 
 def x402_catalog(request: Request) -> Response | dict:
@@ -80,12 +84,29 @@ def x402_ping(request: Request) -> Response:
       payment, not product quality) with `settlement_tx_id` empty (nothing
       settled) and an extra `via: "promo"` field so nothing downstream can
       mistake it for a real payment.
+
+    Also the reference wiring for the auto-refund opt-in (modules/x402/
+    paid_request.run_with_refund, migration 102): the actual response body
+    is built by `_ping_product_write` below and run through
+    `run_with_refund` rather than called directly, so a route that DOES have
+    a real product write to protect (unlike ping, which has none) can copy
+    this exact shape. `circuit_breaker.is_tripped` is checked first, before
+    the payment gate, so a resource with too many recent refund-triggering
+    failures is refused before anyone is charged again.
     """
+    if circuit_breaker.is_tripped(_RESOURCE):
+        return json_error_response(
+            503,
+            "temporarily_disabled",
+            "This endpoint is temporarily disabled after an elevated failure rate. "
+            "Try again later.",
+        )
+
     promo_code, promo_wallet = promo_request_params(request)
     result = require_paid_request(
         request,
         price=settings.x402_ping_price,
-        resource="x402-ping",
+        resource=_RESOURCE,
         description=(
             "Integration test: proves your x402 client can build, sign and settle a real "
             "payment against this marketplace's facilitator setup at the lowest price we "
@@ -127,18 +148,38 @@ def x402_ping(request: Request) -> Response:
             ),
         )
 
-    mark_fulfilled(result.payment_txid, resource="x402-ping")
+    outcome = run_with_refund(result, resource=_RESOURCE, product_write=_ping_product_write)
+    if isinstance(outcome, Response):
+        # run_with_refund's own failure-path Response (refunded, or refund
+        # pending) -- return it directly, and do NOT call mark_fulfilled,
+        # same "nothing to mark" reasoning as the preview/promo branches
+        # above. A SUCCESSFUL product_write() never returns a Response
+        # itself (see _ping_product_write's own docstring for why that
+        # distinction matters), so this isinstance check is unambiguous.
+        return outcome
+
+    mark_fulfilled(result.payment_txid, resource=_RESOURCE)
     return Response(
         status_code=200,
         headers={"Content-Type": "application/json", **result.settlement_headers},
-        description=serialization.dumps(
-            {
-                "pong": True,
-                "settlement_tx_id": result.payment_txid or "",
-                "served_at_epoch": int(time.time()),
-            }
-        ),
+        description=serialization.dumps({**outcome, "settlement_tx_id": result.payment_txid or ""}),
     )
+
+
+def _ping_product_write() -> dict[str, Any]:
+    """The (trivial) product write ping "sells": a receipt of the round trip.
+
+    Returns the raw payload dict, NOT a Response -- run_with_refund's caller
+    (x402_ping above) distinguishes "product_write succeeded" from "it
+    failed and run_with_refund built its own error Response" purely by
+    checking isinstance(outcome, Response), so a successful product_write
+    must never itself return a Response or that check would be ambiguous.
+    Extracted to its own function purely so run_with_refund has something to
+    wrap -- ping has no real product to fail, but every other paid route
+    that adopts this same wiring has a genuine product_write that can raise,
+    and this is the shape that follow-up pass copies.
+    """
+    return {"pong": True, "served_at_epoch": int(time.time())}
 
 
 def x402_admin_list_promo(request: Request) -> Response | dict:
@@ -181,6 +222,7 @@ def x402_admin_create_promo(request: Request) -> Response | dict:
             resource=payload.resource,
             starting_count=payload.starting_count,
             expires_at_epoch=payload.expires_at_epoch,
+            max_redemptions_per_wallet=payload.max_redemptions_per_wallet,
         )
     except PromoError as exc:
         return json_error_from_platform(exc)
@@ -192,6 +234,7 @@ def x402_admin_create_promo(request: Request) -> Response | dict:
         "created_at_epoch": record.created_at_epoch,
         "expires_at_epoch": record.expires_at_epoch,
         "active": record.active,
+        "max_redemptions_per_wallet": record.max_redemptions_per_wallet,
     }
 
 
@@ -216,6 +259,28 @@ def x402_admin_delete_promo(request: Request) -> Response | dict:
     return {"deactivated": True, "code": raw_code}
 
 
+def x402_admin_reset_refund_breaker(request: Request) -> Response | dict:
+    """Admin: clear a resource's tripped refund circuit breaker (modules/x402/circuit_breaker.py).
+
+    Takes the resource id as a query param, not a body -- same convention as
+    the promo/delist admin actions. Not idempotent in the sense that matters
+    to an operator: resetting a breaker that was not tripped is a harmless
+    no-op (the Redis key simply may not have existed), so this always
+    reports success rather than distinguishing "was tripped" from "already
+    clear" -- there is nothing actionable in that distinction for the admin.
+    """
+    denied = require_admin_wallet(request)
+    if denied is not None:
+        return denied
+
+    resource = query_param(request.query_params.get("resource", ""))
+    if not resource:
+        return json_error_response(400, "invalid_request", "resource is required")
+
+    circuit_breaker.reset(resource)
+    return {"reset": True, "resource": resource}
+
+
 def register_x402_catalog_routes(app: Router) -> None:
     """Register the free catalog route, the free recent-settlements proof-of-volume feed, the paid ping, and the admin promo-code routes."""
     app.get(CATALOG_PATH)(x402_catalog)
@@ -224,3 +289,4 @@ def register_x402_catalog_routes(app: Router) -> None:
     app.get("/api/v1/admin/x402/promo")(x402_admin_list_promo)
     app.post("/api/v1/admin/x402/promo")(x402_admin_create_promo)
     app.delete("/api/v1/admin/x402/promo")(x402_admin_delete_promo)
+    app.post("/api/v1/admin/x402/refund-breaker/reset")(x402_admin_reset_refund_breaker)

@@ -47,6 +47,10 @@ class ArticleComposeResult:
     defunct_domains: tuple[str, ...] = ()
     unsourced_hold_reason: str = ""
     broken_link_hold_reason: str = ""
+    # Revision regrade came back degraded (grader/rubric error) and could not
+    # confirm a just-attempted fix -- same forward-or-drop hazard as the two
+    # hold reasons above (llm_compose._stamp_regrade_unconfirmed).
+    regrade_unconfirmed_hold_reason: str = ""
 
 
 def _require_mistral() -> None:
@@ -138,6 +142,7 @@ def compose_scrape_article(
             defunct_domains=getattr(fields, "defunct_domains", ()),
             unsourced_hold_reason=getattr(fields, "unsourced_hold_reason", ""),
             broken_link_hold_reason=getattr(fields, "broken_link_hold_reason", ""),
+            regrade_unconfirmed_hold_reason=getattr(fields, "regrade_unconfirmed_hold_reason", ""),
         )
 
     if topic == PublishTopic.COMMUNITY_RECAP and transcript_text:
@@ -185,6 +190,7 @@ def compose_scrape_article(
         confirmed_alert=getattr(fields, "confirmed_alert", None),
         defunct_domains=getattr(fields, "defunct_domains", ()),
         unsourced_hold_reason=getattr(fields, "unsourced_hold_reason", ""),
+        regrade_unconfirmed_hold_reason=getattr(fields, "regrade_unconfirmed_hold_reason", ""),
     )
 
 

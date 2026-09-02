@@ -117,6 +117,13 @@ class LLMArticleFields:
     # draft into human review instead of auto-publishing (lumirogue.com,
     # recurred 2026-08-10 and 2026-08-12).
     broken_link_hold_reason: str = ""
+    # A revision was attempted to fix a flagged issue and the regrade meant to
+    # confirm the fix came back degraded (grader/rubric error, e.g.
+    # SoftTimeLimitExceeded mid-revision) -- non-empty forces the draft into
+    # human review instead of silently publishing under an unconfirmed grade
+    # (see _grade_is_degraded / _stamp_regrade_unconfirmed in
+    # _run_grade_revise_loop).
+    regrade_unconfirmed_hold_reason: str = ""
 
 
 # The single hardest accuracy rule. The small model, told to write full-depth,
@@ -1505,6 +1512,36 @@ def _grade_current_draft(
     return fuse_quality_into_grade(review, quality)
 
 
+def _grade_is_degraded(review: dict) -> bool:
+    """True when this pass's grade carries no real signal to judge by — the deterministic grader errored (no numeric grade) or the LLM quality rubric errored (``llm_rubric_error``, no rubric scores). ``quality_needs_revision`` reads a scoreless quality dict as "nothing below threshold" (CLAUDE.md invariant 8: empty is not none-found), so a degraded grade must never be trusted as a confirmed-clean re-evaluation of a draft that was JUST revised to fix a flagged issue — see the ``regrade_unconfirmed`` use in ``_run_grade_revise_loop``."""
+    if review.get("grade") is None:
+        return True
+    quality = review.get("quality") or {}
+    return bool(quality.get("error")) or quality.get("model") == "llm_rubric_error"
+
+
+def _regrade_is_unconfirmed(revise_count: int, review: dict) -> bool:
+    """True when this pass is a REGRADE (a revision already ran this loop) that came back degraded -- see _grade_is_degraded's docstring for why that can't be trusted as a confirmed-clean re-evaluation."""
+    return revise_count > 0 and _grade_is_degraded(review)
+
+
+def _maybe_stamp_regrade_unconfirmed(
+    draft: dict, review: dict, flagged: set[str], *, unconfirmed: bool
+) -> None:
+    """A revision was attempted specifically because something was flagged, and the regrade meant to CONFIRM the fix came back degraded (grader or rubric error) -- we have no real signal on whether the flagged issue is actually resolved. Publishing this as if the regrade had come back clean would silently reuse an unconfirmed grade exactly like a stale one (CLAUDE.md invariant 1) -- stamp a hold reason so the publish gate routes this to human review instead (mirrors unsourced_hold_reason/broken_link_hold_reason's existing wiring through LLMArticleFields -> ArticleComposeResult -> publish_tasks). A no-op when ``unconfirmed`` is False."""
+    if not unconfirmed:
+        return
+    detail = (
+        review.get("error")
+        or (review.get("quality") or {}).get("error")
+        or "grader/rubric returned no usable score"
+    )
+    draft["_regrade_unconfirmed_hold_reason"] = (
+        f"revision regrade could not confirm the fix ({str(detail)[:200]}); "
+        f"previously flagged: {', '.join(sorted(flagged))[:300] or '(unknown)'}"
+    )
+
+
 def _link_gate_issues(body: str, trace: list[dict], link_check_cache: dict) -> list[str]:
     """Dead-link feedback: an untraced url that doesn't resolve forces a revision pass with the specific url named, so the writer can swap in a working alternative from its research instead of the final gate silently delinking it (which loses the citation entirely)."""
     from app.core.config import LINK_GATE_ENABLED
@@ -2027,11 +2064,25 @@ def _run_grade_revise_loop(
             best_score = score
             best_current = current
 
+        # ever_raised still holds whatever was flagged BEFORE this pass (this
+        # pass's own `fixable` hasn't been folded in yet below), i.e. exactly
+        # the issue(s) the just-attempted revision was supposed to fix.
+        regrade_unconfirmed = _regrade_is_unconfirmed(revise_count, review)
+
         if not fixable:
+            _maybe_stamp_regrade_unconfirmed(
+                best_current, review, ever_raised, unconfirmed=regrade_unconfirmed
+            )
             return best_current
         if revise_count >= max_revisions:
             # Out of revisions — return the BEST pass seen, not necessarily
             # this last one (see best-of-N note above).
+            _maybe_stamp_regrade_unconfirmed(
+                best_current,
+                review,
+                ever_raised | set(fixable),
+                unconfirmed=regrade_unconfirmed,
+            )
             return best_current
 
         already_fixed = sorted(ever_raised - set(fixable))
@@ -2494,6 +2545,7 @@ def _parse_article_fields(payload: dict[str, Any]) -> LLMArticleFields:
         defunct_domains=tuple(payload.get("_defunct_domains") or ()),
         unsourced_hold_reason=str(payload.get("_unsourced_hold_reason") or ""),
         broken_link_hold_reason=str(payload.get("_broken_link_hold_reason") or ""),
+        regrade_unconfirmed_hold_reason=str(payload.get("_regrade_unconfirmed_hold_reason") or ""),
     )
 
 
@@ -3460,9 +3512,7 @@ def _compose_via_writer_tools_locked(
                 else None
             )
 
-            research_llm = research_client or get_llm_research_client(
-                timeout=research_timeout
-            )
+            research_llm = research_client or get_llm_research_client(timeout=research_timeout)
             register = session_register or SessionRegisterCassandra()
             from app.modules.scraper.core.browser_scrape import maybe_start_session
 
@@ -3534,11 +3584,7 @@ def _compose_via_writer_tools_locked(
                         trace=trace,
                         service_id=source_url,
                         source_url=source_url,
-                        model=(
-                            research_llm.model
-                            if stage_status == "researching"
-                            else llm.model
-                        ),
+                        model=(research_llm.model if stage_status == "researching" else llm.model),
                         # final_output is otherwise always empty on a terminal
                         # failure status -- reusing it to carry the exception
                         # text costs no schema change and is the ONLY place

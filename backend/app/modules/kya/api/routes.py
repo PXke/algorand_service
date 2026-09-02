@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import time
+
 from algosdk.encoding import is_valid_address
 
 from app.core import serialization
@@ -10,6 +12,11 @@ from app.core.http import Request, Response, Router
 from app.core.http_errors import json_error_from_platform, json_error_response
 from app.core.query_params import query_param
 from app.modules.kya.models.domain import KycError
+from app.modules.kya.services.consent_challenge import (
+    ConsentStoreError,
+    consume_consent_challenge,
+    issue_consent_challenge,
+)
 from app.modules.kya.services.consent_message import build_kyc_consent_message
 from app.modules.kya.services.enrollment_service import EnrollmentService
 from app.modules.kya.services.lookup_service import LookupService
@@ -46,8 +53,24 @@ def kyc_consent_message(request: Request) -> Response:
     wallet = query_param(request.query_params.get("wallet_address", ""))
     if not wallet:
         return json_error_response(400, "invalid_request", "wallet_address required")
-    message = build_kyc_consent_message(wallet_address=wallet)
-    return {"message": message, "wallet_address": wallet}
+    try:
+        challenge = issue_consent_challenge(wallet)
+    except ConsentStoreError:
+        return json_error_response(
+            503,
+            "consent_store_unavailable",
+            "Consent challenge store unavailable — please try again shortly",
+        )
+    message = build_kyc_consent_message(
+        wallet_address=wallet,
+        nonce=challenge.nonce,
+        expires_at=challenge.expires_at,
+    )
+    return {
+        "message": message,
+        "wallet_address": wallet,
+        "expires_at": challenge.expires_at,
+    }
 
 
 def kyc_enroll(request: Request) -> Response:
@@ -78,9 +101,26 @@ def kyc_enroll(request: Request) -> Response:
         )
 
     try:
+        challenge = consume_consent_challenge(payload.wallet_address)
+    except ConsentStoreError:
+        return json_error_response(
+            503,
+            "consent_store_unavailable",
+            "Consent challenge store unavailable — please try again shortly",
+        )
+    if challenge is None or challenge.expires_at < int(time.time()):
+        return json_error_response(
+            401,
+            "invalid_or_expired_consent",
+            "Consent challenge missing or expired — request a new consent-message",
+        )
+
+    try:
         record = enrollment_service.enroll(
             wallet_address=payload.wallet_address,
             consent_signature_b64=payload.consent_signature_b64,
+            consent_nonce=challenge.nonce,
+            consent_expires_at=challenge.expires_at,
         )
     except KycError as exc:
         return json_error_from_platform(exc)

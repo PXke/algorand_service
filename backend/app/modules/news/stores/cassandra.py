@@ -10,6 +10,11 @@ from uuid import UUID
 from app.core.feed_bucket import cursor_from_ms, to_ms
 from app.modules.news.stores.base import StoredArticle, TagSummary
 
+# Not yet publicly released -- gated the same way by StoredArticle.draft
+# (see _build_stored_article). 'published' and 'deleted' are handled
+# separately ('deleted' returns None outright before this ever applies).
+_UNRELEASED_STATUSES = frozenset({"draft", "backlog", "on_hold"})
+
 
 def _epoch(dt: datetime | None) -> int:
     """UTC epoch seconds from a stored timestamp. The Cassandra driver returns timezone-NAIVE datetimes that are already UTC; calling .timestamp() directly would make Python assume the server's local zone and shift the value (which is why 'Xh ago' looked wrong on non-UTC hosts)."""
@@ -84,16 +89,19 @@ def _articles_row_to_stored(row: Any) -> StoredArticle | None:
     sitemap.py) is untouched by this and keeps working exactly as before --
     it never depended on get()'s return value, only on its own table.
 
-    status='draft' -> draft=True: this is exactly what the old schema's
-    separate articles_by_id.draft boolean column meant; the caller's own
-    admin-only draft gate (NewsService._fetch_detail) is unchanged and reads
-    this same flag.
-
-    status in ('on_hold', 'backlog') is still returned (draft=False) --
-    matching the OLD schema's behavior exactly: an unlisted article has
-    always been directly fetchable by id (just not listed/indexed), since
-    articles_by_id never had a separate "is this listed" check inside get()
-    itself.
+    status in ('draft', 'backlog', 'on_hold') -> draft=True: none of these
+    are publicly released yet, so all three are gated the same way as the
+    old schema's articles_by_id.draft boolean meant for 'draft' alone --
+    the caller's own admin-only draft gate (NewsService._fetch_detail)
+    reads this one flag and doesn't otherwise know these are different
+    statuses. Widened 2026-09-01: 'backlog'/'on_hold' used to return
+    draft=False here (matching the OLD schema, where an unlisted article
+    was always directly fetchable by id) -- but that meant a backlog
+    article's full body was readable by anyone who had (or guessed) its
+    UUID, through both the public site route and the paid x402 News Engine
+    endpoint, before it was ever actually released. NewsService.get_article_
+    ignoring_draft_gate (admin/sharing's own deliberate escape hatch) is
+    unaffected -- it bypasses this flag entirely, not just for 'draft'.
     """
     if row.status == "deleted":
         return None
@@ -121,7 +129,7 @@ def _build_stored_article(row: Any, *, translations: dict[str, str] | None) -> S
         translations=translations,
         updated_at_epoch=_epoch(row.updated_at) or None,
         first_published_at_epoch=_epoch(row.first_published_at) or None,
-        draft=row.status == "draft",
+        draft=row.status in _UNRELEASED_STATUSES,
     )
 
 

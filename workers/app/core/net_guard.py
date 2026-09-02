@@ -81,7 +81,8 @@ def assert_public_url(url: str) -> str:
     return url
 
 
-def guarded_get(
+def guarded_request(
+    method: str,
     url: str,
     *,
     headers: dict | None = None,
@@ -89,7 +90,7 @@ def guarded_get(
     timeout: float = 12.0,
     max_redirects: int = 5,
 ) -> httpx.Response:
-    """Httpx GET that re-validates the target on every redirect hop.
+    """Httpx request that re-validates the target on every redirect hop.
 
     follow_redirects must stay off here: otherwise a public URL could 302 to an
     internal one and the client would follow it before any guard runs. We follow
@@ -107,11 +108,12 @@ def guarded_get(
 
     from app.core.http_client import get_http_client
 
+    verb = method.upper()
     current = url
     client = get_http_client(timeout=timeout, follow_redirects=False)
     for _ in range(max_redirects + 1):
         assert_public_url(current)
-        response = client.get(current, headers=headers, params=params)
+        response = client.request(verb, current, headers=headers, params=params)
         location = response.headers.get("location")
         if response.is_redirect and location:
             current = str(httpx.URL(response.url).join(location))
@@ -119,3 +121,22 @@ def guarded_get(
             continue
         return response
     raise UnsafeUrlError("too many redirects")
+
+
+def guarded_get(
+    url: str,
+    *,
+    headers: dict | None = None,
+    params: dict | None = None,
+    timeout: float = 12.0,
+    max_redirects: int = 5,
+) -> httpx.Response:
+    """SSRF-guarded GET; see guarded_request for hop re-validation."""
+    return guarded_request(
+        "GET",
+        url,
+        headers=headers,
+        params=params,
+        timeout=timeout,
+        max_redirects=max_redirects,
+    )

@@ -41,6 +41,9 @@ def _row_to_listing(row: object) -> StoredListing:
         verified_at_epoch=_epoch(getattr(row, "verified_at", None)),
         # Pre-099 rows read back null; they are DEFAULT_CATEGORY by definition.
         category=getattr(row, "category", None) or DEFAULT_CATEGORY,
+        # Pre-104 rows read back null; unset either way, never a fabricated claim.
+        reimburses=bool(getattr(row, "reimburses", None)),
+        contact=getattr(row, "contact", None) or "",
     )
 
 
@@ -84,6 +87,8 @@ def _canonical_params(item: StoredListing) -> tuple:
         item.payer,
         item.category,
         *_badge_params(item),
+        item.reimburses,
+        item.contact,
     )
 
 
@@ -104,6 +109,8 @@ def _projection_params(partition: str, item: StoredListing) -> tuple:
         item.payer,
         item.category,
         *_badge_params(item),
+        item.reimburses,
+        item.contact,
     )
 
 

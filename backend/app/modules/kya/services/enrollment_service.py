@@ -65,9 +65,20 @@ class EnrollmentService:
         self._fetch_signals = signals_fetcher or fetch_wallet_signals
         self._fetch_current_round = current_round_fetcher or (lambda: None)
 
-    def enroll(self, *, wallet_address: str, consent_signature_b64: str) -> StoredEnrollment:
+    def enroll(
+        self,
+        *,
+        wallet_address: str,
+        consent_signature_b64: str,
+        consent_nonce: str,
+        consent_expires_at: int,
+    ) -> StoredEnrollment:
         """Verify consent, fetch wallet signals, and store the enrollment."""
-        message = build_kyc_consent_message(wallet_address=wallet_address)
+        message = build_kyc_consent_message(
+            wallet_address=wallet_address,
+            nonce=consent_nonce,
+            expires_at=consent_expires_at,
+        )
         if not self._verify_signature(wallet_address, message, consent_signature_b64):
             raise KycError("invalid_signature", "Signature does not match wallet or payload")
 

@@ -71,26 +71,38 @@ class CatalogRoute:
 
 @dataclass(frozen=True)
 class Product:
-    """One x402 product: its routes and the store setting gating its registration.
+    """One x402 product: its routes and the gate(s) on its registration.
 
     `store_setting` is the settings attribute falcon_main.py compares against
     "memory" before registering the product. None means the product has no
-    store gate of its own and is registered whenever x402 is enabled (only the
-    catalog itself).
+    store gate of its own.
+    `bool_setting` is a plain boolean settings attribute that must be True
+    (e.g. x402_scan_enabled -- a stateless prototype product with no store of
+    its own to gate on). None means no such gate. Found missing 2026-09-01:
+    x402_scan was registered in falcon_main.py and live-reachable but had no
+    PRODUCTS entry at all, so it never appeared in the catalog or
+    /.well-known/x402 -- store_setting alone had no way to express a plain
+    boolean gate, so a product like this was easy to add to falcon_main.py
+    and simply forget here. Both gates apply (AND'd) when both are set; a
+    product with neither gate (only the catalog itself) is registered
+    whenever x402 is enabled.
     """
 
     key: str
     title: str
     store_setting: str | None
     routes: tuple[CatalogRoute, ...]
+    bool_setting: str | None = None
 
     def enabled(self) -> bool:
         """The same condition falcon_main.py registers this product under."""
         if not settings.x402_enabled:
             return False
-        if self.store_setting is None:
-            return True
-        return getattr(settings, self.store_setting) != "memory"
+        if self.store_setting is not None and getattr(settings, self.store_setting) == "memory":
+            return False
+        if self.bool_setting is not None:
+            return bool(getattr(settings, self.bool_setting))
+        return True
 
 
 _EXAMPLE_URL = "https://api.example.com/v1/quote"
@@ -145,7 +157,9 @@ PRODUCTS: tuple[Product, ...] = (
                 description=(
                     "List one x402 endpoint in the public directory for "
                     "x402_listing_term_days days (JSON body: url, price, description, "
-                    "assets, tags, category, schema)."
+                    "assets, tags, category, schema, reimburses, contact). `reimburses` "
+                    "and `contact` are optional, self-declared and unverified for "
+                    "third-party listings."
                 ),
                 price_setting="x402_listing_price",
                 resource="x402-directory-list",
@@ -156,6 +170,8 @@ PRODUCTS: tuple[Product, ...] = (
                     "assets": ["USDC"],
                     "tags": ["fx", "market-data"],
                     "category": "finance",
+                    "reimburses": False,
+                    "contact": "support@example.com",
                 },
                 supports_promo=True,
             ),
@@ -277,6 +293,7 @@ PRODUCTS: tuple[Product, ...] = (
                 resource="x402-features-demand",
                 input_example={"limit": 25},
                 supports_promo=True,
+                supports_preview=True,
             ),
             CatalogRoute(
                 method="POST",
@@ -305,8 +322,10 @@ PRODUCTS: tuple[Product, ...] = (
                 method="POST",
                 path="/api/v1/x402/grades",
                 description=(
-                    "Grade any http(s) x402 endpoint 1-5 (JSON body: url, score, comment); "
-                    "one grade per wallet per URL, re-grading replaces."
+                    "Grade any http(s) x402 endpoint 1-5 (JSON body: url, score, comment, "
+                    "tx_id); one grade per wallet per URL, re-grading replaces. tx_id is "
+                    "mandatory: a real payment YOU made to the graded endpoint's own payTo, "
+                    "verified on-chain before the gate -- no txid, no grade."
                 ),
                 price_setting="x402_grading_grade_price",
                 resource="x402-grading-submit",
@@ -314,6 +333,7 @@ PRODUCTS: tuple[Product, ...] = (
                     "url": _EXAMPLE_URL,
                     "score": 4,
                     "comment": "Accurate quotes, ~300ms, spec matched the 402 offer exactly.",
+                    "tx_id": "YOURPAYMENTTXIDYOURPAYMENTTXIDYOURPAYMENTTXIDYOURPAY",
                 },
                 supports_promo=True,
             ),
@@ -332,6 +352,7 @@ PRODUCTS: tuple[Product, ...] = (
                 resource="x402-grading-score",
                 input_example={"url": _EXAMPLE_URL},
                 supports_promo=True,
+                supports_preview=True,
             ),
             CatalogRoute(
                 method="GET",
@@ -346,6 +367,7 @@ PRODUCTS: tuple[Product, ...] = (
                 resource="x402-grading-top",
                 input_example={"tag": "pricing"},
                 supports_promo=True,
+                supports_preview=True,
             ),
         ),
     ),
@@ -380,6 +402,30 @@ PRODUCTS: tuple[Product, ...] = (
         ),
     ),
     Product(
+        key="scan",
+        title="Sandboxed file/tarball scan",
+        store_setting=None,
+        bool_setting="x402_scan_enabled",
+        routes=(
+            CatalogRoute(
+                method="POST",
+                path="/api/v1/x402/scan/url",
+                description=(
+                    "Static security scan of a file fetched from a URL: known-malware "
+                    "signature match (ClamAV), file-type verification, entropy, embedded "
+                    "URL/IP extraction, and a zip/tar-bomb-safe archive member listing "
+                    "with the same checks applied per member. The target is downloaded "
+                    "server-side and scanned in a network-isolated sandbox that never "
+                    "executes it."
+                ),
+                price_setting="x402_scan_price",
+                resource="x402-scan-url",
+                input_example={"url": _EXAMPLE_URL},
+                supports_promo=True,
+            ),
+        ),
+    ),
+    Product(
         key="kya",
         title="Know Your Agent",
         store_setting="kyc_store",
@@ -387,7 +433,7 @@ PRODUCTS: tuple[Product, ...] = (
             CatalogRoute(
                 method="GET",
                 path="/api/v1/kyc/consent-message",
-                description="The consent message a wallet signs to enrol; ?wallet_address=.",
+                description="Single-use consent message a wallet signs to enrol; ?wallet_address=.",
             ),
             CatalogRoute(
                 method="POST",

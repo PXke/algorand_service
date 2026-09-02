@@ -44,12 +44,11 @@ class SessionStore:
         )
 
     def pop_nonce_challenge(self, wallet_address: str) -> str | None:
-        """Pop and return the pending nonce challenge JSON for a wallet, or None if absent."""
-        key = f"auth:nonce:{wallet_address}"
-        raw = self._redis.get(key)
-        if raw:
-            self._redis.delete(key)
-        return raw
+        """Atomically pop the pending nonce challenge JSON, or None if absent.
+
+        GETDEL so two parallel verify requests cannot both read the same nonce.
+        """
+        return self._redis.getdel(f"auth:nonce:{wallet_address}")
 
     def set_session(self, token: str, wallet_address: str) -> SessionRecord:
         """Create and store a new session for a wallet, returning the session record."""

@@ -26,6 +26,7 @@ from app.core import rate_limit as rate_limit_core
 from app.core import serialization
 from app.core.config import settings
 from app.core.http import QueryParams, Request
+from app.modules.x402 import circuit_breaker
 from app.modules.x402 import client as x402_client
 from app.modules.x402 import guard as x402_guard
 from app.modules.x402 import paid_request as payment_service
@@ -41,7 +42,7 @@ _PAY_TO = "A" * 58
 # Fakes (same shape as test_x402_directory.py's)
 # --------------------------------------------------------------------------- #
 class _FakeRedis:
-    """Enough of the Redis API for the preview rate limiter."""
+    """Enough of the Redis API for the preview rate limiter and the refund circuit breaker."""
 
     def __init__(self) -> None:
         self.store: dict[str, str] = {}
@@ -55,6 +56,9 @@ class _FakeRedis:
     def expire(self, key: str, seconds: int) -> bool:
         self.expires[key] = seconds
         return True
+
+    def get(self, key: str) -> str | None:
+        return self.store.get(key)
 
 
 class _BrokenRedis:
@@ -127,6 +131,13 @@ def fake_redis(monkeypatch: pytest.MonkeyPatch) -> _FakeRedis:
     # preview.py itself imports no Redis client directly.
     monkeypatch.setattr(rate_limit_core, "get_redis", lambda **_kw: client)
     monkeypatch.setattr(replay_module, "get_redis", lambda **_kw: client)
+    # circuit_breaker.is_tripped reads app.core.redis_client's get_redis
+    # directly (not through incr_with_expiry), so it needs its own seam --
+    # same one-binding-per-importer convention every other x402 module here
+    # already follows. Without this, ping's now-mandatory pre-gate breaker
+    # check fails closed against the real (blocked) Redis connection and
+    # every ping test gets a 503 regardless of what it is actually testing.
+    monkeypatch.setattr(circuit_breaker, "get_redis", lambda **_kw: client)
     return client
 
 

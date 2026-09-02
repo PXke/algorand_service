@@ -8,10 +8,14 @@ is httpx.MockTransport, which never opens a socket.
 from __future__ import annotations
 
 from collections.abc import Iterator
+from typing import Never
 
 import httpx
 import pytest
 
+from app.core import rate_limit as rate_limit_core
+from app.core.config import settings
+from app.core.http import QueryParams, Request
 from app.modules.media.api import routes as media_routes
 
 
@@ -132,3 +136,58 @@ def test_resolve_public_ip_rejects_when_any_resolved_address_is_private(
 
     monkeypatch.setattr(media_routes.socket, "getaddrinfo", fake_getaddrinfo)
     assert media_routes._resolve_public_ip("mixed.example") is None
+
+
+def test_resolve_public_ip_rejects_cgnat(monkeypatch: pytest.MonkeyPatch) -> None:
+    """100.64.0.0/10 is not is_private; is_global must still reject it."""
+
+    def fake_getaddrinfo(_host: str, _port: int | None) -> list[tuple]:
+        return [(None, None, None, None, ("100.64.0.1", 0))]
+
+    monkeypatch.setattr(media_routes.socket, "getaddrinfo", fake_getaddrinfo)
+    assert media_routes._resolve_public_ip("cgnat.attacker.example") is None
+
+
+class _FakeRedis:
+    def __init__(self) -> None:
+        self.store: dict[str, str] = {}
+
+    def incr(self, key: str) -> int:
+        value = int(self.store.get(key, "0")) + 1
+        self.store[key] = str(value)
+        return value
+
+    def expire(self, key: str, seconds: int) -> bool:
+        _ = key, seconds
+        return True
+
+
+class _BrokenRedis:
+    def incr(self, *_args: object, **_kwargs: object) -> Never:
+        raise ConnectionError("redis down")
+
+    def expire(self, *_args: object, **_kwargs: object) -> Never:
+        raise ConnectionError("redis down")
+
+
+def test_image_proxy_is_rate_limited_per_ip_and_fails_open(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Third call from one IP within a budget of 2 is limited; another IP is not; Redis failure fails open."""
+    monkeypatch.setattr(settings, "img_proxy_rate_limit_per_hour", 2)
+    fake = _FakeRedis()
+    monkeypatch.setattr(rate_limit_core, "get_redis", lambda: fake)
+
+    def req(ip: str) -> Request:
+        return Request(
+            method="GET",
+            headers={"X-Real-IP": ip},
+            query_params=QueryParams({}),
+            path_params={},
+        )
+
+    assert media_routes._image_proxy_rate_limited(req("203.0.113.9")) is False
+    assert media_routes._image_proxy_rate_limited(req("203.0.113.9")) is False
+    assert media_routes._image_proxy_rate_limited(req("203.0.113.9")) is True
+    assert media_routes._image_proxy_rate_limited(req("203.0.113.10")) is False
+
+    monkeypatch.setattr(rate_limit_core, "get_redis", _BrokenRedis)
+    assert media_routes._image_proxy_rate_limited(req("203.0.113.9")) is False

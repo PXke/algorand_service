@@ -28,9 +28,7 @@ from __future__ import annotations
 
 import logging
 
-import httpx
-
-from app.core.net_guard import assert_public_url
+from app.core.net_guard import guarded_get
 
 logger = logging.getLogger(__name__)
 
@@ -63,11 +61,11 @@ def is_source_parked_or_expired(url: str) -> bool:
     if not url or not url.lower().startswith("http"):
         return False
     try:
-        assert_public_url(url)
-        response = httpx.get(
+        # guarded_get re-checks every redirect hop: a public parking page that
+        # 302s to an internal/metadata URL must not be followed.
+        response = guarded_get(
             url,
             timeout=_TIMEOUT,
-            follow_redirects=True,
             headers={"User-Agent": "algorand-platform-liveness/1.0"},
         )
         if response.status_code >= 400:

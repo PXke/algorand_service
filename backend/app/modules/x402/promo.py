@@ -22,14 +22,26 @@ Storage split (migration 100, backend/schema/migrations/app/100_x402_promo_codes
     deliberately carries NO TTL: expiring it would let a partially-redeemed
     code silently reseed to its full starting_count on the next attempt,
     handing out redemptions the durable ledger never authorised.
-  * Cassandra `x402_promo_redemptions` — append-only audit log AND the whole
-    per-(code, wallet) abuse cap in one: its primary key IS (code,
-    wallet_hash), so the `INSERT ... IF NOT EXISTS` that writes the audit row
-    is also the atomic once-per-wallet-per-code claim. Only ever written for
-    a redemption that actually succeeded — the Redis slot reserved by the
-    decrement above is undone (re-incremented) whenever this insert does not
-    apply (already redeemed) or itself fails, so a rejected attempt never
-    burns a slot from the durable total.
+  * Cassandra `x402_promo_redemptions_v2` (migration 101; superseded
+    `x402_promo_redemptions` from 100, left in place untouched as history) —
+    the append-only audit log, `PRIMARY KEY ((code, wallet_hash),
+    redemption_id)` where `redemption_id` is a server-generated (`now()`)
+    `timeuuid`, not a Python-supplied timestamp — a first attempt at this
+    migration clustered on `redeemed_at` (second-precision) and it collided
+    under realistic rapid same-wallet redemptions, wrongly rejecting a
+    genuine 2nd/3rd/4th redemption as a duplicate; `timeuuid` is
+    collision-proof by construction. As of 101 a wallet may redeem up to
+    `PromoRecord.max_redemptions_per_wallet` times (default 1, so a pre-101
+    code keeps its exact old one-per-wallet behavior) — the abuse cap for
+    that is a SEPARATE Redis counter,
+    `algorand:x402:promo:wallet_remaining:<code>:<wallet_hash>`, seeded from
+    `max_redemptions_per_wallet` and DECRemented the same
+    reserve-then-undo-on-failure way as the global remaining count above
+    (see `_reserve_wallet_slot`/`_undo_reserved_wallet_slot`). The Cassandra
+    insert is a plain `INSERT` (not `IF NOT EXISTS` — `now()` is always
+    fresh, so an LWT here would never reject anything) — it is no longer
+    the security boundary that a v1 single-row-per-wallet primary key made
+    it; Redis is.
 
 Fail-open vs fail-closed (CLAUDE.md section 2 invariant 9 says cooldown/
 lock/budget checks fail open — this is a deliberate, documented exception):
@@ -40,8 +52,9 @@ Redis blip is worse than briefly refusing free access; there is no
 availability cost since paying normally is still on the table. The
 complementary per-IP redemption-attempt rate limit (`x402_promo_rate_limit_
 per_hour`), by contrast, DOES fail open — it is a second, best-effort abuse
-layer on top of the LWT cap and the atomic decrement, not itself a source of
-truth, so a Redis blip there should not additionally block the fallback path.
+layer on top of the two atomic Redis decrements (global and per-wallet), not
+itself a source of truth, so a Redis blip there should not additionally
+block the fallback path.
 
 Every failure mode (unknown code, wrong resource, expired, exhausted,
 already redeemed by this wallet, a malformed wallet, a rate-limited IP, or
@@ -86,8 +99,14 @@ logger = logging.getLogger(__name__)
 
 MAX_CODE_LENGTH = 64
 MAX_RESOURCE_LENGTH = 128
+# Upper bound on how many times any one code may let a single wallet redeem.
+# Also the LIMIT on COUNT_PROMO_REDEMPTIONS_FOR_WALLET (statements.py) --
+# that read must never truncate a real count into looking exhausted, so it
+# stays comfortably above this.
+MAX_REDEMPTIONS_PER_WALLET_LIMIT = 100
 
 _REMAINING_PREFIX = "algorand:x402:promo:remaining:"
+_WALLET_REMAINING_PREFIX = "algorand:x402:promo:wallet_remaining:"
 _ATTEMPT_RATE_LIMIT_PREFIX = "algorand:x402:promo:attempt_rl:"
 _ATTEMPT_RATE_LIMIT_WINDOW_SECONDS = 3600
 
@@ -111,11 +130,16 @@ class PromoRecord:
     # 0 means "no expiry".
     expires_at_epoch: int
     active: bool
+    # How many times ONE wallet may redeem this code. Defaults to 1 (a
+    # pre-101 code, or a null column on an old row, reads back as 1 --
+    # CassandraPromoStore.get_code/list_codes are responsible for that
+    # default, not this dataclass) -- see the module docstring.
+    max_redemptions_per_wallet: int = 1
 
 
 @dataclass
 class RedemptionRecord:
-    """One redemption, as the append-only x402_promo_redemptions log holds it."""
+    """One redemption, as the append-only x402_promo_redemptions_v2 log holds it (migration 101)."""
 
     code: str
     wallet_hash: str
@@ -139,7 +163,13 @@ class PromoStore(Protocol):
         ...
 
     def insert_redemption_if_absent(self, item: RedemptionRecord) -> bool:
-        """Append one redemption, atomically, iff (code, wallet_hash) has never redeemed before."""
+        """Append one redemption row. Returns True unless the write itself fails.
+
+        The per-wallet abuse cap (up to PromoRecord.max_redemptions_per_wallet
+        redemptions) is enforced in Redis before this is ever called (see
+        attempt_promo_redemption) -- this is purely the durable audit log,
+        not a second enforcement mechanism.
+        """
         ...
 
     def list_codes(self) -> list[PromoRecord]:
@@ -161,6 +191,7 @@ class CassandraPromoStore:
                 _dt(record.created_at_epoch),
                 _dt(record.expires_at_epoch) if record.expires_at_epoch else None,
                 record.active,
+                record.max_redemptions_per_wallet,
             ),
         )
         return bool(result.was_applied)
@@ -177,6 +208,11 @@ class CassandraPromoStore:
             created_at_epoch=_epoch(row.created_at),
             expires_at_epoch=_epoch(row.expires_at),
             active=bool(row.active),
+            # A pre-101 row has this column NULL -- reads back as 1, the
+            # exact behavior that row already had (migration 101's own
+            # comment: "every pre-existing code keeps its exact prior
+            # one-per-wallet behavior").
+            max_redemptions_per_wallet=int(row.max_redemptions_per_wallet or 1),
         )
 
     def deactivate_code(self, code: str) -> bool:
@@ -185,12 +221,21 @@ class CassandraPromoStore:
         return bool(result.was_applied)
 
     def insert_redemption_if_absent(self, item: RedemptionRecord) -> bool:
-        """Append one redemption via INSERT ... IF NOT EXISTS -- the whole per-(code, wallet_hash) abuse cap in one atomic statement."""
-        result = get_cassandra_session().execute(
-            X402PromoStmts.INSERT_PROMO_REDEMPTION_IF_ABSENT,
+        """Append one redemption row. Returns True unless the write itself raises.
+
+        A plain INSERT as of migration 101, not IF NOT EXISTS -- the
+        clustering key (redemption_id) is a server-generated `now()`
+        timeuuid, always fresh, so an LWT here would never reject anything
+        (see 101's migration comment). The actual per-wallet abuse cap is
+        enforced in Redis before this is ever called (see
+        attempt_promo_redemption's _reserve_wallet_slot); this call raising
+        is the only way it can signal a real failure to its caller.
+        """
+        get_cassandra_session().execute(
+            X402PromoStmts.INSERT_PROMO_REDEMPTION,
             (item.code, item.wallet_hash, _dt(item.redeemed_at_epoch), item.resource),
         )
-        return bool(result.was_applied)
+        return True
 
     def list_codes(self) -> list[PromoRecord]:
         """Every stored code (bounded LIMIT 500, see LIST_ALL_PROMO_CODES) -- admin listing only."""
@@ -203,6 +248,7 @@ class CassandraPromoStore:
                 created_at_epoch=_epoch(row.created_at),
                 expires_at_epoch=_epoch(row.expires_at),
                 active=bool(row.active),
+                max_redemptions_per_wallet=int(row.max_redemptions_per_wallet or 1),
             )
             for row in rows
         ]
@@ -214,7 +260,7 @@ class InMemoryPromoStore:
     def __init__(self) -> None:
         """Start with no codes and no redemptions."""
         self._codes: dict[str, PromoRecord] = {}
-        self._redemptions: set[tuple[str, str]] = set()
+        self._redemptions: list[RedemptionRecord] = []
 
     def create_code(self, record: PromoRecord) -> bool:
         """Insert `record`. False means a code with that name already exists."""
@@ -236,11 +282,14 @@ class InMemoryPromoStore:
         return True
 
     def insert_redemption_if_absent(self, item: RedemptionRecord) -> bool:
-        """Append one redemption iff (code, wallet_hash) has never redeemed before."""
-        key = (item.code, item.wallet_hash)
-        if key in self._redemptions:
-            return False
-        self._redemptions.add(key)
+        """Append one redemption row. Always returns True -- mirrors CassandraPromoStore's post-101 contract.
+
+        A wallet may have many rows here, one per redemption, up to
+        whatever max_redemptions_per_wallet allowed -- the abuse cap is
+        Redis (attempt_promo_redemption's _reserve_wallet_slot), not this
+        store; this is purely the audit log.
+        """
+        self._redemptions.append(item)
         return True
 
     def list_codes(self) -> list[PromoRecord]:
@@ -287,12 +336,15 @@ def create_promo_code(
     resource: str,
     starting_count: int,
     expires_at_epoch: int = 0,
+    max_redemptions_per_wallet: int = 1,
     store: PromoStore | None = None,
 ) -> PromoRecord:
     """Create one promo code scoped to one resource. Raises PromoError on a bad request or a duplicate code.
 
     `code` is admin-chosen (not generated), so a code can be a memorable
     campaign name; callers of the admin route decide their own naming.
+    `max_redemptions_per_wallet` defaults to 1 (a caller that never passes it
+    gets byte-for-byte the old one-per-wallet behavior, migration 101).
     """
     code = code.strip()
     resource = resource.strip()
@@ -308,6 +360,11 @@ def create_promo_code(
         raise PromoError("invalid_request", "starting_count must be a positive integer")
     if expires_at_epoch < 0:
         raise PromoError("invalid_request", "expires_at_epoch must not be negative")
+    if not (1 <= max_redemptions_per_wallet <= MAX_REDEMPTIONS_PER_WALLET_LIMIT):
+        raise PromoError(
+            "invalid_request",
+            f"max_redemptions_per_wallet must be between 1 and {MAX_REDEMPTIONS_PER_WALLET_LIMIT}",
+        )
 
     record = PromoRecord(
         code=code,
@@ -316,6 +373,7 @@ def create_promo_code(
         created_at_epoch=int(datetime.now(tz=UTC).timestamp()),
         expires_at_epoch=expires_at_epoch,
         active=True,
+        max_redemptions_per_wallet=max_redemptions_per_wallet,
     )
     applied = (store or get_promo_store()).create_code(record)
     if not applied:
@@ -376,6 +434,7 @@ def list_promo_codes(*, store: PromoStore | None = None) -> list[dict]:
             "created_at_epoch": record.created_at_epoch,
             "expires_at_epoch": record.expires_at_epoch,
             "active": record.active,
+            "max_redemptions_per_wallet": record.max_redemptions_per_wallet,
         }
         for record in records
     ]
@@ -398,10 +457,10 @@ def promo_request_params(request: Request) -> tuple[str, str]:
 def _attempt_rate_limited(request: Request) -> bool:
     """True when this IP has exceeded the hourly redemption-ATTEMPT budget.
 
-    Fails OPEN — a second, complementary abuse layer on top of the Redis
-    atomic decrement and the Cassandra per-wallet LWT cap, not itself a
-    source of truth, so its own unavailability must not additionally block
-    the fallback to the normal paid gate.
+    Fails OPEN — a second, complementary abuse layer on top of the two Redis
+    atomic decrements (global remaining count, per-wallet remaining count),
+    not itself a source of truth, so its own unavailability must not
+    additionally block the fallback to the normal paid gate.
     """
     ip = client_ip(request.headers)
     if not ip:
@@ -477,6 +536,54 @@ def _reserve_slot(code: str, starting_count: int) -> tuple[object, str] | None:
     return redis_client, remaining_key
 
 
+def _undo_reserved_wallet_slot(
+    redis_client: object, key: str, *, code: str, wallet_hash: str
+) -> None:
+    """Re-increment a per-wallet remaining-count key after a decrement turns out not to be a real redemption."""
+    try:
+        redis_client.incr(key)  # type: ignore[attr-defined]
+    except Exception:
+        logger.warning(
+            "x402 promo: could not undo a reserved wallet slot for code=%s wallet_hash=%s; "
+            "that wallet's remaining count may now under-count by one until an operator "
+            "reconciles it",
+            code,
+            wallet_hash,
+            exc_info=True,
+        )
+
+
+def _reserve_wallet_slot(
+    code: str, wallet_hash: str, max_redemptions_per_wallet: int
+) -> tuple[object, str] | None:
+    """Atomically reserve one of THIS wallet's redemption slots for `code`, via Redis DECR.
+
+    Mirrors _reserve_slot exactly, just keyed per (code, wallet_hash) instead
+    of per code alone -- same SET NX seed, same DECR-then-undo-if-negative
+    shape, same fail-CLOSED-on-Redis-error policy (see the module docstring).
+    Returns (redis_client, remaining_key) on success; None (having already
+    undone the reservation) when Redis is unreachable or this wallet has
+    already used up its allowance for this code.
+    """
+    remaining_key = f"{_WALLET_REMAINING_PREFIX}{code}:{wallet_hash}"
+    try:
+        redis_client = get_redis()
+        redis_client.set(remaining_key, max_redemptions_per_wallet, nx=True)
+        remaining = int(redis_client.decr(remaining_key))
+    except Exception:
+        logger.warning(
+            "x402 promo: Redis unavailable during per-wallet redemption check for code=%s; "
+            "failing CLOSED, falling through to normal payment",
+            code,
+            exc_info=True,
+        )
+        return None
+    if remaining < 0:
+        _undo_reserved_wallet_slot(redis_client, remaining_key, code=code, wallet_hash=wallet_hash)
+        return None
+    return redis_client, remaining_key
+
+
 def attempt_promo_redemption(
     request: Request,
     *,
@@ -515,8 +622,17 @@ def attempt_promo_redemption(
         return None
     redis_client, remaining_key = reserved
 
-    now_epoch = int(datetime.now(tz=UTC).timestamp())
     wallet_hash = _hash_wallet(wallet)
+    wallet_reserved = _reserve_wallet_slot(code, wallet_hash, record.max_redemptions_per_wallet)
+    if wallet_reserved is None:
+        # This wallet has used up its allowance for this code (or Redis blipped
+        # on the per-wallet check) -- the global slot was never actually
+        # spent, give it back.
+        _undo_reserved_slot(redis_client, remaining_key, code=code)
+        return None
+    wallet_redis_client, wallet_remaining_key = wallet_reserved
+
+    now_epoch = int(datetime.now(tz=UTC).timestamp())
     redemption = RedemptionRecord(
         code=code, wallet_hash=wallet_hash, redeemed_at_epoch=now_epoch, resource=resource
     )
@@ -524,17 +640,26 @@ def attempt_promo_redemption(
         claimed = active_store.insert_redemption_if_absent(redemption)
     except Exception:
         logger.warning(
-            "x402 promo: redemption-log write failed for code=%s; undoing the reserved slot, "
+            "x402 promo: redemption-log write failed for code=%s; undoing both reserved slots, "
             "falling through to normal payment",
             code,
             exc_info=True,
         )
         _undo_reserved_slot(redis_client, remaining_key, code=code)
+        _undo_reserved_wallet_slot(
+            wallet_redis_client, wallet_remaining_key, code=code, wallet_hash=wallet_hash
+        )
         return None
     if not claimed:
-        # This wallet already redeemed this code -- the decremented slot was
-        # never actually spent, so give it back to the durable total.
+        # Defensive: both store implementations always return True on a
+        # successful write as of migration 101 (a store-level failure raises
+        # instead, handled above) -- a future PromoStore implementation may
+        # still legitimately return False for its own reasons, and this must
+        # give both reserved slots back rather than silently leaking them.
         _undo_reserved_slot(redis_client, remaining_key, code=code)
+        _undo_reserved_wallet_slot(
+            wallet_redis_client, wallet_remaining_key, code=code, wallet_hash=wallet_hash
+        )
         return None
 
     logger.info("x402 promo: code=%s redeemed for resource=%s", code, resource)

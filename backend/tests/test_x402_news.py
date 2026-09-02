@@ -59,7 +59,7 @@ _UNKNOWN_ID = "33333333-3333-4333-8333-333333333333"
 # Fakes
 # --------------------------------------------------------------------------- #
 class _FakeRedis:
-    """Enough of the Redis API for the replay claim and the rate-limit counter."""
+    """Enough of the Redis API for the replay claim, the rate-limit counter, and the refund circuit breaker's plain GET check."""
 
     def __init__(self) -> None:
         self.store: dict[str, str] = {}
@@ -72,6 +72,9 @@ class _FakeRedis:
         if ex is not None:
             self.expires[key] = ex
         return True
+
+    def get(self, key: str) -> str | None:
+        return self.store.get(key)
 
     def delete(self, key: str) -> int:
         return 1 if self.store.pop(key, None) is not None else 0
@@ -228,10 +231,11 @@ def testnet_settings(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.fixture
 def fake_redis(monkeypatch: pytest.MonkeyPatch) -> _FakeRedis:
-    """Swap both Redis seams for one in-process fake shared by replay and rate limiting."""
+    """Swap all three Redis seams for one in-process fake: replay, rate limiting, and the refund circuit breaker (modules/x402/circuit_breaker.py reads app.core.redis_client's get_redis directly, its own binding per the one-binding-per-importer convention every x402 module's tests follow)."""
     client = _FakeRedis()
     monkeypatch.setattr(replay_module, "get_redis", lambda **_kw: client)
     monkeypatch.setattr(rate_limit_core, "get_redis", lambda **_kw: client)
+    monkeypatch.setattr(news_routes.circuit_breaker, "get_redis", lambda **_kw: client)
     return client
 
 
@@ -467,7 +471,7 @@ def test_a_search_whose_engine_failed_is_a_503_and_not_marked_fulfilled(
     fulfilled: list[tuple[str | None, str]],
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """An engine failure after payment is a 503 with the ledger row left unfulfilled -- an empty result is never passed off as "no matches". The payer still gets the settlement headers (the receipt) and the failure is logged with the payment txid so the operator can find the row."""
+    """An engine failure after payment goes through run_with_refund (modules/x402/paid_request.py): a 503, an attempted refund (reported as pending here since no refund wallet is configured in tests), and the ledger row left unfulfilled -- an empty result is never passed off as "no matches". The payer still gets the settlement headers (the receipt) and the failure is logged with the payment txid so the operator can find the row."""
     monkeypatch.setattr(news_routes, "require_paid_request", lambda *_a, **_kw: _settled_result())
     monkeypatch.setattr(
         engine,
@@ -479,12 +483,60 @@ def test_a_search_whose_engine_failed_is_a_503_and_not_marked_fulfilled(
         response = news_routes.x402_news_search(_request(query={"q": "governance"}))
 
     assert response.status_code == 503
-    assert "search_unavailable" in response.description
+    assert "product_failed_refund_pending" in response.description
+    # Fixed centrally (2026-09-02, same day this gap was found): run_with_refund
+    # now attaches result.settlement_headers on every failure-path Response,
+    # same as the old bespoke 503 this replaced -- the payer still gets the
+    # PAYMENT-RESPONSE receipt even when the product write itself failed.
     assert response.headers["PAYMENT-RESPONSE"] == "ok"
     assert response.headers["Content-Type"] == "application/json"
     assert fulfilled == []
     errors = [rec for rec in caplog.records if rec.levelno >= logging.ERROR]
     assert any("TX123" in rec.getMessage() for rec in errors)
+
+
+@pytest.mark.usefixtures("engine", "fake_redis")
+def test_a_promo_search_whose_engine_failed_is_still_a_503_with_no_refund_attempt(
+    monkeypatch: pytest.MonkeyPatch, fulfilled: list[tuple[str | None, str]]
+) -> None:
+    """A promo bypass settles nothing, so an engine failure is still the old bespoke 503 -- run_with_refund (which undoes a real settlement) must never be invoked on a promo path."""
+    monkeypatch.setattr(
+        news_routes,
+        "require_paid_request",
+        lambda *_a, **_kw: x402_guard.PaymentResult(error=None, is_promo=True),
+    )
+    monkeypatch.setattr(
+        news_routes,
+        "run_with_refund",
+        lambda *_a, **_kw: pytest.fail("run_with_refund must not run on a promo bypass"),
+    )
+    monkeypatch.setattr(
+        news_routes.news_engine,
+        "search",
+        lambda query, *, limit: {"query": query, "engine": "error", "items": [], "limit": limit},
+    )
+
+    response = news_routes.x402_news_search(
+        _request(query={"q": "governance", "promo": "LAUNCH50", "promo_wallet": _PAYER})
+    )
+
+    assert response.status_code == 503
+    assert "search_unavailable" in response.description
+    assert fulfilled == []
+
+
+@pytest.mark.usefixtures("engine", "testnet_settings", "fake_redis")
+def test_search_is_refused_before_the_gate_while_the_circuit_breaker_is_tripped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A tripped breaker for this resource is checked BEFORE require_paid_request, so no money is ever at risk while tripped."""
+    monkeypatch.setattr(news_routes, "require_paid_request", _must_not_charge)
+    monkeypatch.setattr(news_routes.circuit_breaker, "is_tripped", lambda _resource: True)
+
+    response = news_routes.x402_news_search(_request(query={"q": "governance"}))
+
+    assert response.status_code == 503
+    assert "temporarily_disabled" in response.description
 
 
 # --------------------------------------------------------------------------- #

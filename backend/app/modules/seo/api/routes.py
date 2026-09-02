@@ -20,6 +20,7 @@ from app.core.config import settings
 from app.core.http import Request, Response, Router
 from app.core.http_errors import json_error_response
 from app.core.query_params import query_param
+from app.core.request_headers import client_ip as request_client_ip
 from app.core.tracking import tracking_opted_out_from_headers
 from app.modules.news.services.news_service import NewsService
 from app.modules.seo import analytics_store, feeds, render, shell, sitemap
@@ -137,8 +138,8 @@ def _record(request: Request, path: str, *, navigation: bool = True) -> None:
         path=path,
         referer=_header(request, "referer") or _header(request, "referrer"),
         user_agent=_header(request, "user-agent"),
-        # Behind nginx the real client is in X-Forwarded-For / X-Real-IP.
-        client_ip=_header(request, "x-forwarded-for") or _header(request, "x-real-ip"),
+        # nginx X-Real-IP / last XFF hop — leftmost XFF is attacker-controlled.
+        client_ip=request_client_ip(request.headers),
         # Campaign tag (utm_*/ref) off the landing URL — names dark-social traffic.
         campaign=analytics_store.campaign_label(_query_params(request)),
         accept_language=_header(request, "accept-language"),
@@ -213,7 +214,7 @@ def _record_notfound(request: Request, path: str) -> None:
     """Best-effort record of a request to an unknown article/section URL."""
     analytics_store.record_notfound(
         path=path,
-        client_ip=_header(request, "x-forwarded-for") or _header(request, "x-real-ip"),
+        client_ip=request_client_ip(request.headers),
     )
 
 
@@ -414,7 +415,7 @@ def _article_document(request: Request, lang: str | None) -> Response:
     # on mount). A scraper going straight for the JSON API skips this.
     analytics_store.mark_article_document_served(
         article_id,
-        _header(request, "x-forwarded-for") or _header(request, "x-real-ip"),
+        request_client_ip(request.headers),
         _header(request, "user-agent"),
     )
     # The browser's ACTUAL path, locale prefix included -- must match

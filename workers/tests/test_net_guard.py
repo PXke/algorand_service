@@ -5,7 +5,7 @@ from __future__ import annotations
 import httpx
 import pytest
 
-from app.core.net_guard import UnsafeUrlError, guarded_get
+from app.core.net_guard import UnsafeUrlError, guarded_get, guarded_request
 
 
 def _patch_shared_client(monkeypatch: pytest.MonkeyPatch, transport: httpx.MockTransport) -> list:
@@ -81,3 +81,24 @@ def test_guarded_get_passes_through_timeout_and_headers(monkeypatch: pytest.Monk
     assert calls[0]["timeout"] == 7.5
     assert seen["headers"]["x-test"] == "yes"
     assert "q=algorand" in seen["query"]
+
+
+def test_guarded_request_head_rejects_a_redirect_to_a_private_host(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """HEAD uses the same hop re-validation as GET — domain_probe must not follow a 302 to metadata."""
+    methods: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        methods.append(request.method)
+        if str(request.url) == "https://example.com/start":
+            return httpx.Response(
+                302, headers={"location": "http://127.0.0.1/"}
+            )
+        raise AssertionError("must not actually request the internal redirect target")
+
+    _patch_shared_client(monkeypatch, httpx.MockTransport(handler))
+
+    with pytest.raises(UnsafeUrlError):
+        guarded_request("HEAD", "https://example.com/start")
+    assert methods == ["HEAD"]

@@ -24,6 +24,7 @@ from app.core import serialization
 from app.core.config import settings
 from app.core.http import QueryParams, Request
 from app.core.http_errors import json_error_response
+from app.modules.x402 import circuit_breaker
 from app.modules.x402 import guard as x402_guard
 from app.modules.x402 import promo as promo_module
 from app.modules.x402.promo import (
@@ -70,6 +71,9 @@ class _FakeRedis:
         value = int(self.store.get(key, "0")) - 1
         self.store[key] = str(value)
         return value
+
+    def delete(self, key: str) -> int:
+        return 1 if self.store.pop(key, None) is not None else 0
 
     def expire(self, key: str, seconds: int) -> bool:
         _ = key, seconds
@@ -125,6 +129,10 @@ def fake_redis(monkeypatch: pytest.MonkeyPatch) -> _FakeRedis:
     client = _FakeRedis()
     monkeypatch.setattr(promo_module, "get_redis", lambda **_kw: client)
     monkeypatch.setattr(rate_limit_core, "get_redis", lambda **_kw: client)
+    # ping's mandatory pre-gate circuit-breaker check reads its own get_redis
+    # seam directly (app.modules.x402.circuit_breaker) -- see
+    # test_x402_preview.py's fake_redis for the same fix and why it's needed.
+    monkeypatch.setattr(circuit_breaker, "get_redis", lambda **_kw: client)
     return client
 
 
@@ -156,6 +164,7 @@ def _seed(
     starting_count: int = 5,
     expires_at_epoch: int = 0,
     active: bool = True,
+    max_redemptions_per_wallet: int = 1,
 ) -> None:
     store.create_code(
         PromoRecord(
@@ -165,6 +174,7 @@ def _seed(
             created_at_epoch=1000,
             expires_at_epoch=expires_at_epoch,
             active=active,
+            max_redemptions_per_wallet=max_redemptions_per_wallet,
         )
     )
 
@@ -282,6 +292,129 @@ def test_same_code_and_wallet_twice_is_refused_the_second_time(
     assert second is None  # falls through, does not error
     # The reserved slot from the refused second attempt was given back.
     assert fake_redis.store[f"{promo_module._REMAINING_PREFIX}LAUNCH"] == "4"
+
+
+def test_wallet_redeems_up_to_its_per_wallet_cap_then_falls_through(
+    promo_store: InMemoryPromoStore, fake_redis: _FakeRedis
+) -> None:
+    """max_redemptions_per_wallet=4 lets the SAME wallet succeed 4 times, then falls through on the 5th."""
+    _seed(promo_store, starting_count=25, max_redemptions_per_wallet=4)
+    headers = {"x-real-ip": "1.1.1.1"}
+
+    results = [
+        promo_module.attempt_promo_redemption(
+            _request(headers=headers),
+            code="LAUNCH",
+            wallet=_WALLET,
+            resource=_RESOURCE,
+            store=promo_store,
+        )
+        for _ in range(5)
+    ]
+
+    assert [r is not None for r in results] == [True, True, True, True, False]
+    # 4 real redemptions spent from the global total; the 5th (refused)
+    # attempt's reservation was given back.
+    assert fake_redis.store[f"{promo_module._REMAINING_PREFIX}LAUNCH"] == "21"
+    # The per-wallet counter is fully spent (0), not negative -- the refused
+    # 5th attempt's wallet-slot reservation was also given back.
+    assert (
+        fake_redis.store[
+            f"{promo_module._WALLET_REMAINING_PREFIX}LAUNCH:{promo_module._hash_wallet(_WALLET)}"
+        ]
+        == "0"
+    )
+
+
+@pytest.mark.usefixtures("fake_redis")
+def test_default_max_redemptions_per_wallet_is_still_exactly_one(
+    promo_store: InMemoryPromoStore,
+) -> None:
+    """A code seeded without max_redemptions_per_wallet keeps the pre-101 exactly-once behavior."""
+    _seed(promo_store, starting_count=25)  # max_redemptions_per_wallet defaults to 1
+    headers = {"x-real-ip": "1.1.1.1"}
+
+    first = promo_module.attempt_promo_redemption(
+        _request(headers=headers),
+        code="LAUNCH",
+        wallet=_WALLET,
+        resource=_RESOURCE,
+        store=promo_store,
+    )
+    second = promo_module.attempt_promo_redemption(
+        _request(headers=headers),
+        code="LAUNCH",
+        wallet=_WALLET,
+        resource=_RESOURCE,
+        store=promo_store,
+    )
+
+    assert first is not None
+    assert second is None
+
+
+@pytest.mark.usefixtures("fake_redis")
+def test_different_wallets_each_get_their_own_full_per_wallet_allowance(
+    promo_store: InMemoryPromoStore,
+) -> None:
+    """A second, distinct wallet is unaffected by the first wallet exhausting its own cap."""
+    _seed(promo_store, starting_count=25, max_redemptions_per_wallet=1)
+    headers = {"x-real-ip": "1.1.1.1"}
+
+    first_wallet_first = promo_module.attempt_promo_redemption(
+        _request(headers=headers),
+        code="LAUNCH",
+        wallet=_WALLET,
+        resource=_RESOURCE,
+        store=promo_store,
+    )
+    first_wallet_second = promo_module.attempt_promo_redemption(
+        _request(headers=headers),
+        code="LAUNCH",
+        wallet=_WALLET,
+        resource=_RESOURCE,
+        store=promo_store,
+    )
+    second_wallet_first = promo_module.attempt_promo_redemption(
+        _request(headers=headers),
+        code="LAUNCH",
+        wallet=_WALLET_2,
+        resource=_RESOURCE,
+        store=promo_store,
+    )
+
+    assert first_wallet_first is not None
+    assert first_wallet_second is None  # same wallet, already used its one slot
+    assert second_wallet_first is not None  # different wallet, its own fresh allowance
+
+
+def test_redemption_log_write_failure_undoes_both_global_and_wallet_slots(
+    promo_store: InMemoryPromoStore, fake_redis: _FakeRedis, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """If the audit-log write itself raises, both reserved slots are given back, not just the global one."""
+    _seed(promo_store, starting_count=25, max_redemptions_per_wallet=4)
+
+    def _boom(_self: InMemoryPromoStore, _item: RedemptionRecord) -> bool:
+        raise RuntimeError("cassandra write failed")
+
+    monkeypatch.setattr(InMemoryPromoStore, "insert_redemption_if_absent", _boom)
+
+    result = promo_module.attempt_promo_redemption(
+        _request(headers={"x-real-ip": "1.1.1.1"}),
+        code="LAUNCH",
+        wallet=_WALLET,
+        resource=_RESOURCE,
+        store=promo_store,
+    )
+
+    assert result is None
+    assert fake_redis.store[f"{promo_module._REMAINING_PREFIX}LAUNCH"] == "25"
+    assert (
+        fake_redis.store[
+            f"{promo_module._WALLET_REMAINING_PREFIX}LAUNCH:{promo_module._hash_wallet(_WALLET)}"
+        ]
+        == "4"
+    )
 
 
 def test_redis_down_fails_closed(
@@ -664,6 +797,54 @@ def test_admin_delete_promo_nonexistent_code_returns_404(
 
 
 # --------------------------------------------------------------------------- #
+# x402_admin_reset_refund_breaker
+# --------------------------------------------------------------------------- #
+def _admin_reset_breaker_request(resource: str) -> Request:
+    return _request(
+        method="POST",
+        query={"resource": resource},
+        path="/api/v1/admin/x402/refund-breaker/reset",
+    )
+
+
+def test_admin_reset_refund_breaker_without_admin_wallet_is_rejected() -> None:
+    """No admin session configured at all -> the real require_admin_wallet refuses."""
+    response = catalog_routes.x402_admin_reset_refund_breaker(
+        _admin_reset_breaker_request("x402-ping")
+    )
+    assert getattr(response, "status_code", 200) != 200
+
+
+def test_admin_reset_refund_breaker_requires_a_resource(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A missing ?resource= is a free 400, never a silent no-op."""
+    monkeypatch.setattr(catalog_routes, "require_admin_wallet", lambda _r: None)
+
+    response = catalog_routes.x402_admin_reset_refund_breaker(_admin_reset_breaker_request(""))
+
+    assert response.status_code == 400
+
+
+def test_admin_reset_refund_breaker_clears_a_tripped_resource(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An authorized reset actually un-trips the breaker for that resource."""
+    monkeypatch.setattr(catalog_routes, "require_admin_wallet", lambda _r: None)
+    monkeypatch.setattr(settings, "x402_refund_breaker_max_failures", 1)
+    fake = _FakeRedis()
+    monkeypatch.setattr(circuit_breaker, "get_redis", lambda **_kw: fake)
+    monkeypatch.setattr(rate_limit_core, "get_redis", lambda **_kw: fake)
+    circuit_breaker.record_refund_failure("x402-ping")
+    assert circuit_breaker.is_tripped("x402-ping") is True
+
+    response = catalog_routes.x402_admin_reset_refund_breaker(
+        _admin_reset_breaker_request("x402-ping")
+    )
+
+    assert response == {"reset": True, "resource": "x402-ping"}
+    assert circuit_breaker.is_tripped("x402-ping") is False
+
+
+# --------------------------------------------------------------------------- #
 # x402_ping: the worked example's promo branch
 # --------------------------------------------------------------------------- #
 @pytest.mark.usefixtures("fake_redis")
@@ -690,12 +871,12 @@ def test_ping_promo_serves_the_real_response_with_no_settlement(
 # --------------------------------------------------------------------------- #
 # Cassandra statement sequence (migration 100)
 # --------------------------------------------------------------------------- #
-def test_redemption_insert_uses_a_lightweight_transaction_no_phantom_rows(
+def test_redemption_insert_is_a_single_plain_insert_no_phantom_rows(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """insert_redemption_if_absent is a single INSERT ... IF NOT EXISTS -- the whole abuse cap in one atomic statement, never a separate read-then-write."""
+    """insert_redemption_if_absent is one plain INSERT (migration 101: redemption_id is a server-generated now() timeuuid, so IF NOT EXISTS would never reject anything) -- never a separate read-then-write, and always returns True on a successful write."""
     session = _patch_cassandra(monkeypatch)
-    session.execute.return_value = SimpleNamespace(was_applied=True)
+    session.execute.return_value = SimpleNamespace()
 
     applied = CassandraPromoStore().insert_redemption_if_absent(
         RedemptionRecord(
@@ -707,27 +888,27 @@ def test_redemption_insert_uses_a_lightweight_transaction_no_phantom_rows(
     pairs = execute_pairs(session)
     assert len(pairs) == 1
     stmt, params = pairs[0]
-    assert "x402_promo_redemptions" in stmt
-    assert "IF NOT EXISTS" in stmt
+    assert "x402_promo_redemptions_v2" in stmt
+    assert "IF NOT EXISTS" not in stmt
+    assert "now()" in stmt
     assert params[0] == "LAUNCH"
     assert params[1] == "deadbeef"
     assert params[3] == _RESOURCE
 
 
-def test_redemption_insert_reports_a_losing_lwt_as_not_applied(
+def test_redemption_insert_failure_raises_not_swallowed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """was_applied=False (another redemption already holds that (code, wallet_hash)) reads back as False, not raised."""
+    """A real write failure (e.g. Cassandra unreachable) raises -- attempt_promo_redemption is the layer that catches it and undoes both reserved slots, not this store method."""
     session = _patch_cassandra(monkeypatch)
-    session.execute.return_value = SimpleNamespace(was_applied=False)
+    session.execute.side_effect = RuntimeError("cassandra write failed")
 
-    applied = CassandraPromoStore().insert_redemption_if_absent(
-        RedemptionRecord(
-            code="LAUNCH", wallet_hash="deadbeef", redeemed_at_epoch=1000, resource=_RESOURCE
+    with pytest.raises(RuntimeError):
+        CassandraPromoStore().insert_redemption_if_absent(
+            RedemptionRecord(
+                code="LAUNCH", wallet_hash="deadbeef", redeemed_at_epoch=1000, resource=_RESOURCE
+            )
         )
-    )
-
-    assert applied is False
 
 
 def test_create_code_uses_a_lightweight_transaction(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -780,6 +961,7 @@ def test_list_codes_reads_back_every_row_bounded(monkeypatch: pytest.MonkeyPatch
             created_at=datetime(2026, 8, 30, tzinfo=UTC),
             expires_at=None,
             active=True,
+            max_redemptions_per_wallet=1,
         ),
         SimpleNamespace(
             code="OTHER",
@@ -788,6 +970,7 @@ def test_list_codes_reads_back_every_row_bounded(monkeypatch: pytest.MonkeyPatch
             created_at=datetime(2026, 8, 31, tzinfo=UTC),
             expires_at=None,
             active=False,
+            max_redemptions_per_wallet=4,
         ),
     ]
     session = _patch_cassandra(monkeypatch)
@@ -814,6 +997,7 @@ def test_get_code_reads_back_a_full_record(monkeypatch: pytest.MonkeyPatch) -> N
         created_at=datetime(2026, 8, 30, tzinfo=UTC),
         expires_at=None,
         active=True,
+        max_redemptions_per_wallet=None,
     )
     session = _patch_cassandra(monkeypatch)
     session.execute.return_value = SimpleNamespace(one=lambda: row)
@@ -827,4 +1011,5 @@ def test_get_code_reads_back_a_full_record(monkeypatch: pytest.MonkeyPatch) -> N
         created_at_epoch=int(row.created_at.timestamp()),
         expires_at_epoch=0,
         active=True,
+        max_redemptions_per_wallet=1,
     )

@@ -9,6 +9,7 @@ import falcon
 from app.core.config import settings
 from app.core.cors import (
     ALLOW_CORS_METHODS,
+    DEFAULT_CORS_EXPOSE_HEADERS,
     DEFAULT_CORS_HEADERS,
     origin_allowed,
 )
@@ -37,6 +38,7 @@ from app.modules.x402_directory.api.routes import register_x402_directory_routes
 from app.modules.x402_features.api.routes import register_x402_features_routes
 from app.modules.x402_grading.api.routes import register_x402_grading_routes
 from app.modules.x402_news.api.routes import register_x402_news_routes
+from app.modules.x402_scan.api.routes import register_x402_scan_routes
 from app.modules.x402_wellknown.api.routes import register_x402_wellknown_routes
 
 
@@ -75,6 +77,7 @@ class CorsMiddleware:
         if origin and origin_allowed(origin, self._origins):
             resp.set_header("Access-Control-Allow-Origin", origin)
             resp.set_header("Access-Control-Allow-Credentials", "true")
+            resp.set_header("Access-Control-Expose-Headers", ", ".join(DEFAULT_CORS_EXPOSE_HEADERS))
             resp.set_header("Vary", "Origin")
 
 
@@ -104,9 +107,12 @@ class HealthReadyResource:
         _ = req
         checks = run_readiness_checks()
         ok = all(check.ok for check in checks if check.name in {"redis", "cassandra"})
+        # Public: name + ok only. Check `detail` can contain exception strings
+        # (Redis URLs, Cassandra hosts) and queue depths — those stay on the
+        # admin health-check route.
         resp.media = {
             "status": "ok" if ok else "degraded",
-            "checks": [{"name": c.name, "ok": c.ok, "detail": c.detail} for c in checks],
+            "checks": [{"name": c.name, "ok": c.ok} for c in checks],
         }
 
 
@@ -145,41 +151,52 @@ def create_app() -> falcon.App:
     if settings.suggestions_enabled:
         register_suggestions_routes(router)
     if settings.x402_enabled:
-        # Each product is gated a second time on its own store setting, not
-        # just the shared x402_enabled switch: "memory" is a per-process dict
-        # (CLAUDE.md section 9: memory backend is dev/test only), and under
-        # gunicorn's multiple worker processes a paid write in one worker is
-        # invisible to a read that lands on another. Registering a paid route
-        # backed by memory in a x402_enabled deployment would accept real
-        # settled payments with no reliable way to honor what was paid for --
-        # so a product stays unregistered (a clean 404, nothing charged)
-        # until its own store is explicitly set to something durable, rather
-        # than going live silently alongside whichever products actually are.
-        if settings.kyc_store != "memory":
-            register_kya_routes(router)
-        if settings.x402_directory_store != "memory":
-            register_x402_directory_routes(router)
-        if settings.x402_board_store != "memory":
-            register_x402_board_routes(router)
-        if settings.x402_features_store != "memory":
-            register_x402_features_routes(router)
-        if settings.x402_grading_store != "memory":
-            register_x402_grading_routes(router)
-        # The News Engine has no store of its own: it reads through the news
-        # module's store, so its durability gate is the news store's setting.
-        if settings.news_store != "memory":
-            register_x402_news_routes(router)
-        # The catalog lists whichever of the products above were registered
-        # (it re-evaluates the same gates), so it comes last and is gated
-        # only on the shared switch.
-        register_x402_catalog_routes(router)
-        # /.well-known/x402 and /openapi.json are meta/bootstrap routes, like
-        # the catalog itself: no product store gate of their own, they just
-        # reshape whatever register_x402_catalog_routes's build_catalog()
-        # already produced.
-        register_x402_wellknown_routes(router)
+        _register_x402_routes(router)
     register_seo_routes(router)
     return app
+
+
+def _register_x402_routes(router: FalconRouter) -> None:
+    """Register every x402 product route, each gated a second time on its own store setting.
+
+    "memory" is a per-process dict (CLAUDE.md section 9: memory backend is
+    dev/test only), and under gunicorn's multiple worker processes a paid
+    write in one worker is invisible to a read that lands on another.
+    Registering a paid route backed by memory in a x402_enabled deployment
+    would accept real settled payments with no reliable way to honor what
+    was paid for -- so a product stays unregistered (a clean 404, nothing
+    charged) until its own store is explicitly set to something durable,
+    rather than going live silently alongside whichever products actually
+    are. Split out of create_app to keep that function's branching bounded.
+    """
+    if settings.kyc_store != "memory":
+        register_kya_routes(router)
+    if settings.x402_directory_store != "memory":
+        register_x402_directory_routes(router)
+    if settings.x402_board_store != "memory":
+        register_x402_board_routes(router)
+    if settings.x402_features_store != "memory":
+        register_x402_features_routes(router)
+    if settings.x402_grading_store != "memory":
+        register_x402_grading_routes(router)
+    # The News Engine has no store of its own: it reads through the news
+    # module's store, so its durability gate is the news store's setting.
+    if settings.news_store != "memory":
+        register_x402_news_routes(router)
+    # Prototype, off by default -- see modules/x402_scan/__init__.py for the
+    # two owner decisions (which host runs the sandbox container engine;
+    # whether/when to add dynamic analysis) still outstanding before this is
+    # safe to flip on for real traffic.
+    if settings.x402_scan_enabled:
+        register_x402_scan_routes(router)
+    # The catalog lists whichever of the products above were registered (it
+    # re-evaluates the same gates), so it comes last and is gated only on
+    # the shared switch.
+    register_x402_catalog_routes(router)
+    # /.well-known/x402 and /openapi.json are meta/bootstrap routes, like the
+    # catalog itself: no product store gate of their own, they just reshape
+    # whatever register_x402_catalog_routes's build_catalog() already produced.
+    register_x402_wellknown_routes(router)
 
 
 app = create_app()

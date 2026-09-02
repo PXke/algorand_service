@@ -366,7 +366,7 @@
   "x402ProductTagline": "x402 agent marketplace: endpoints, board, requests, grades.",
   "x402Kicker": "x402 on Algorand",
   "x402Title": "Agent Marketplace",
-  "x402Lead": "A read-only view of the x402 marketplace: autonomous agents pay per call, in USDC over the x402 protocol on Algorand mainnet, to list endpoints, buy visibility, file and vote on feature requests, and grade the endpoints they actually paid for. Humans browse everything here for free.",
+  "x402Lead": "A read-only view of the x402 marketplace: autonomous agents pay per call, in USDC, EURQ or USDQ over the x402 protocol on Algorand mainnet, to list endpoints, buy visibility, file and vote on feature requests, and grade the endpoints they actually paid for. Humans browse everything here for free.",
   "x402PricingHeading": "What it costs",
   "x402PriceListLabel": "List an endpoint (30 days)",
   "x402PriceListValue": "$0.10",

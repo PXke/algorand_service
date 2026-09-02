@@ -28,6 +28,7 @@ from app.core import rate_limit as rate_limit_core
 from app.core import serialization
 from app.core.config import settings
 from app.core.http import QueryParams, Request, Response
+from app.modules.x402 import circuit_breaker as circuit_breaker_module
 from app.modules.x402 import client as x402_client
 from app.modules.x402 import guard as x402_guard
 from app.modules.x402 import paid_request as payment_service
@@ -74,6 +75,9 @@ class _FakeRedis:
     def delete(self, key: str) -> int:
         return 1 if self.store.pop(key, None) is not None else 0
 
+    def get(self, key: str) -> str | None:
+        return self.store.get(key)
+
     def incr(self, key: str) -> int:
         value = int(self.store.get(key, "0")) + 1
         self.store[key] = str(value)
@@ -91,6 +95,9 @@ class _BrokenRedis:
         raise ConnectionError("redis down")
 
     def delete(self, *_args: object, **_kwargs: object) -> Never:
+        raise ConnectionError("redis down")
+
+    def get(self, *_args: object, **_kwargs: object) -> Never:
         raise ConnectionError("redis down")
 
     def incr(self, *_args: object, **_kwargs: object) -> Never:
@@ -170,10 +177,11 @@ def testnet_settings(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.fixture
 def fake_redis(monkeypatch: pytest.MonkeyPatch) -> _FakeRedis:
-    """Swap both Redis seams for one in-process fake shared by replay and rate limiting."""
+    """Swap all three Redis seams for one in-process fake: replay, rate limiting, and the refund circuit breaker (2026-09-02 retrofit)."""
     client = _FakeRedis()
     monkeypatch.setattr(replay_module, "get_redis", lambda **_kw: client)
     monkeypatch.setattr(rate_limit_core, "get_redis", lambda **_kw: client)
+    monkeypatch.setattr(circuit_breaker_module, "get_redis", lambda **_kw: client)
     return client
 
 
@@ -400,6 +408,7 @@ def test_replay_check_fails_open_when_redis_is_down(
 # --------------------------------------------------------------------------- #
 # The paid listing path
 # --------------------------------------------------------------------------- #
+@pytest.mark.usefixtures("fake_redis")
 def test_a_settled_payment_stores_the_listing_and_returns_its_txid(
     store: InMemoryListingStore, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -436,6 +445,89 @@ def test_a_settled_payment_stores_the_listing_and_returns_its_txid(
     assert listing["term_end_epoch"] > listing["created_at_epoch"]
     # And it is durably stored under the normalized URL's hash, not just echoed.
     assert store.get(url_hash("https://api.example.com/v1/Quote")) is not None
+
+
+# --------------------------------------------------------------------------- #
+# Auto-refund + circuit breaker retrofit (2026-09-02)
+# --------------------------------------------------------------------------- #
+@pytest.mark.usefixtures("fake_redis")
+def test_list_unexpected_product_write_failure_attempts_a_refund_not_a_500(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A genuine unexpected failure (not a DirectoryError -- e.g. a store write bug) on x402_list goes through run_with_refund, never a bare 500, and is never marked fulfilled."""
+
+    class _BrokenStore(InMemoryListingStore):
+        def insert_if_absent(self, *_a: object, **_kw: object) -> bool:
+            raise RuntimeError("simulated store write failure")
+
+    monkeypatch.setattr(directory_routes, "listing_service", ListingService(_BrokenStore()))
+    monkeypatch.setattr(
+        directory_routes, "require_paid_request", lambda *_a, **_kw: _settled_result()
+    )
+    fulfilled: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        directory_routes,
+        "mark_fulfilled",
+        lambda txid, *, resource: fulfilled.append((txid, resource)),
+    )
+
+    response = directory_routes.x402_list(
+        _request(
+            body=json.dumps({"url": "https://api.example.com/v1/quote", "price": "$0.01"}).encode()
+        )
+    )
+
+    assert response.status_code == 503
+    assert json.loads(response.description)["error"]["code"] == "product_failed_refund_pending"
+    assert fulfilled == []
+
+
+@pytest.mark.usefixtures("fake_redis")
+def test_list_is_refused_before_the_gate_once_its_circuit_breaker_is_tripped(
+    monkeypatch: pytest.MonkeyPatch, fake_redis: _FakeRedis
+) -> None:
+    """Once x402-directory-list's breaker is tripped, the route refuses BEFORE require_paid_request -- no further money is ever at risk."""
+    fake_redis.store[f"algorand:x402:refund_breaker:{directory_routes._LIST_RESOURCE}"] = str(
+        settings.x402_refund_breaker_max_failures
+    )
+    gate_called = False
+
+    def _must_not_be_called(*_a: object, **_kw: object) -> Never:
+        nonlocal gate_called
+        gate_called = True
+        raise AssertionError("require_paid_request must not run while the breaker is tripped")
+
+    monkeypatch.setattr(directory_routes, "require_paid_request", _must_not_be_called)
+
+    response = directory_routes.x402_list(
+        _request(
+            body=json.dumps({"url": "https://api.example.com/v1/quote", "price": "$0.01"}).encode()
+        )
+    )
+
+    assert response.status_code == 503
+    assert json.loads(response.description)["error"]["code"] == "temporarily_disabled"
+    assert gate_called is False
+
+
+@pytest.mark.usefixtures("fake_redis")
+def test_renew_is_refused_before_the_gate_once_its_circuit_breaker_is_tripped(
+    monkeypatch: pytest.MonkeyPatch, fake_redis: _FakeRedis
+) -> None:
+    """Same guard as x402_list, for x402_renew's own (separate) resource id."""
+    fake_redis.store[f"algorand:x402:refund_breaker:{directory_routes._RENEW_RESOURCE}"] = str(
+        settings.x402_refund_breaker_max_failures
+    )
+
+    def _must_not_be_called(*_a: object, **_kw: object) -> Never:
+        raise AssertionError("require_paid_request must not run while the breaker is tripped")
+
+    monkeypatch.setattr(directory_routes, "require_paid_request", _must_not_be_called)
+
+    response = directory_routes.x402_renew(_renew_request("https://api.example.com/q"))
+
+    assert response.status_code == 503
+    assert json.loads(response.description)["error"]["code"] == "temporarily_disabled"
 
 
 def test_relisting_the_same_url_replaces_it_rather_than_duplicating(
@@ -724,6 +816,7 @@ def test_a_schema_within_the_cap_is_still_accepted(
     assert listing["schema"] == {"type": "object", "properties": {"pair": {"type": "string"}}}
 
 
+@pytest.mark.usefixtures("fake_redis")
 def test_a_promo_redemption_lists_the_endpoint_attributed_to_the_promo_wallet(
     store: InMemoryListingStore, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1336,6 +1429,7 @@ def test_search_route_accepts_a_tag_query_param(
     assert bad.status_code == 400
 
 
+@pytest.mark.usefixtures("fake_redis")
 def test_the_listing_offer_advertises_the_tag_filter(
     store: InMemoryListingStore, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1800,6 +1894,7 @@ def test_create_rejects_a_reserved_tag_as_the_durable_guard(store: InMemoryListi
     assert store.get(url_hash("https://api.example.com/v1/quote")) is None
 
 
+@pytest.mark.usefixtures("fake_redis")
 def test_a_listed_category_is_stored_served_and_defaults_to_other(
     store: InMemoryListingStore, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1934,6 +2029,7 @@ def test_admin_delist_removes_the_category_row(
     assert service.search(limit=50, category="identity") == []
 
 
+@pytest.mark.usefixtures("fake_redis")
 def test_the_listing_offer_advertises_category_and_the_category_filter(
     store: InMemoryListingStore, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2220,7 +2316,13 @@ def test_renew_of_an_expired_or_unowned_listing_by_another_wallet_is_refused_wit
 def test_renew_route_serves_409_with_receipt_headers_for_an_expired_listing_of_another_wallet(
     store: InMemoryListingStore, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The 409 refusal reaches the wire with the settlement headers and is NOT marked fulfilled."""
+    """A real (non-promo) renew's ownership refusal goes through run_with_refund (2026-09-02 retrofit), but DirectoryError is a PlatformError -- run_with_refund's own PlatformError exemption (found-in-audit fix, 2026-09-02) means this is STILL the direct 403/409 with payment kept, NEVER a refund, and mark_fulfilled is still never called.
+
+    See run_with_refund's own docstring for why: this rejection is fully
+    caller-controlled (pay to renew a url you know you don't own), so
+    refunding it would make it a free, repeatable way to pump the circuit
+    breaker -- exactly the bug this exemption exists to close.
+    """
     monkeypatch.setattr(settings, "x402_listing_term_days", 30)
     service = ListingService(store)
     original = _listed(store, "https://api.example.com/q", payer="AGENT-OTHER")
@@ -2239,8 +2341,8 @@ def test_renew_route_serves_409_with_receipt_headers_for_an_expired_listing_of_a
     refused = directory_routes.x402_renew(_renew_request("https://api.example.com/q"))
 
     assert refused.status_code == 409
-    assert refused.headers["PAYMENT-RESPONSE"] == "ok"
     assert json.loads(refused.description)["error"]["code"] == "renew_requires_relist"
+    assert refused.headers["PAYMENT-RESPONSE"] == "ok"
     assert fulfilled == []
     assert store.get(original.url_hash).payer == "AGENT-OTHER"
 
@@ -2360,7 +2462,9 @@ def test_cassandra_store_writes_the_badge_columns_on_every_listing_insert(
     for stmt, params in inserts:
         assert "verified_wallet, verified_at" in stmt
         assert stmt.count("?") == len(params)
-        assert params[-2:] == ("AGENT1", now)
+        # Badge params sit before the trailing reimburses/contact pair (104).
+        assert params[-4:-2] == ("AGENT1", now)
+        assert params[-2:] == (False, "")
 
     executed.clear()
     assert cass.insert_if_absent(replace(listing, verified_wallet="", verified_at_epoch=0)) is True
@@ -2368,14 +2472,15 @@ def test_cassandra_store_writes_the_badge_columns_on_every_listing_insert(
     assert "IF NOT EXISTS" in inserts[0][0]
     for stmt, params in inserts:
         assert "verified_wallet, verified_at" in stmt
-        assert params[-2:] == ("", None)
+        assert params[-4:-2] == ("", None)
+        assert params[-2:] == (False, "")
 
 
 @pytest.mark.usefixtures("fake_redis")
 def test_renew_route_stores_marks_fulfilled_and_serves_receipt_headers_on_refusal(
     store: InMemoryListingStore, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A settled renewal is stored then marked fulfilled; a refused one is a 403 that still carries the settlement headers and is NOT marked fulfilled."""
+    """A settled renewal is stored then marked fulfilled; a refused one goes through run_with_refund too, but DirectoryError's PlatformError exemption (2026-09-02) means it is still the direct 403 with payment kept, never a refund, and is NOT marked fulfilled."""
     monkeypatch.setattr(settings, "x402_listing_term_days", 30)
     service = ListingService(store)
     original = _listed(store, "https://api.example.com/q", payer="P" * 58)
@@ -2405,8 +2510,8 @@ def test_renew_route_stores_marks_fulfilled_and_serves_receipt_headers_on_refusa
     store.upsert(replace(store.get(original.url_hash), payer="AGENT-OTHER"))
     refused = directory_routes.x402_renew(_renew_request("https://api.example.com/q"))
     assert refused.status_code == 403
-    assert refused.headers["PAYMENT-RESPONSE"] == "ok"
     assert json.loads(refused.description)["error"]["code"] == "listing_owned_by_another_payer"
+    assert refused.headers["PAYMENT-RESPONSE"] == "ok"
     assert fulfilled == [("TX123", "x402-directory-renew")]
     assert store.get(original.url_hash).payer == "AGENT-OTHER"
 
@@ -2484,3 +2589,163 @@ def test_listing_detail_is_rate_limited_per_ip(
     assert "listing" in _detail("https://api.example.com/q", ip="203.0.113.7")
     assert _detail("https://api.example.com/q", ip="203.0.113.7").status_code == 429
     assert "listing" in _detail("https://api.example.com/q", ip="203.0.113.9")
+
+
+# --------------------------------------------------------------------------- #
+# Self-declared reimburses/contact flags (104)
+# --------------------------------------------------------------------------- #
+def test_a_listing_with_both_flags_set_stores_and_serves_them(
+    store: InMemoryListingStore,
+) -> None:
+    """Reimburses and contact round-trip through create() exactly as given."""
+    listing = ListingService(store).create(
+        normalized_url="https://api.example.com/q",
+        price="$0.01",
+        description="mine",
+        assets=[],
+        tags=["fx"],
+        schema_json="",
+        settlement_tx_id="TX1",
+        payer="AGENT1",
+        reimburses=True,
+        contact="support@example.com",
+    )
+
+    assert listing.reimburses is True
+    assert listing.contact == "support@example.com"
+    assert store.get(listing.url_hash).reimburses is True
+    assert store.get(listing.url_hash).contact == "support@example.com"
+
+
+def test_a_listing_with_neither_flag_behaves_exactly_as_before(
+    store: InMemoryListingStore,
+) -> None:
+    """Omitting both flags is unchanged behavior: unset, never a fabricated claim."""
+    listing = ListingService(store).create(
+        normalized_url="https://api.example.com/q",
+        price="$0.01",
+        description="mine",
+        assets=[],
+        tags=["fx"],
+        schema_json="",
+        settlement_tx_id="TX1",
+        payer="AGENT1",
+    )
+
+    assert listing.reimburses is False
+    assert listing.contact == ""
+
+
+@pytest.mark.parametrize("raw", ["x" * 257, "x" * 500])
+def test_an_overlong_contact_is_rejected_at_decode(raw: str) -> None:
+    """Contact is length-bounded like every other free-text field here -- rejected before the gate, never charged for.
+
+    Same convention as test_an_overlong_asset_or_tag_item_is_rejected_at_decode:
+    decoding is the pre-gate step, so an oversized contact never reaches
+    x402_list's normalize_url/create() at all.
+    """
+    body = json.dumps(
+        {"url": "https://api.example.com/v1/quote", "price": "$0.01", "contact": raw}
+    ).encode()
+
+    with pytest.raises(serialization.DecodeError):
+        serialization.decode(body, X402ListingRequest)
+
+    # ... and at the exact bound it decodes fine.
+    ok = json.dumps(
+        {"url": "https://api.example.com/v1/quote", "price": "$0.01", "contact": "x" * 256}
+    ).encode()
+    assert serialization.decode(ok, X402ListingRequest).contact == "x" * 256
+
+
+@pytest.mark.usefixtures("testnet_settings", "fake_redis")
+def test_an_overlong_contact_never_reaches_the_payment_gate_via_the_route(
+    store: InMemoryListingStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """End-to-end: the route's own decode step rejects an oversized contact as a 400, gate never runs, nothing stored."""
+    gate_calls: list[str] = []
+
+    def _record_gate(*_args: object, **_kwargs: object) -> Never:
+        gate_calls.append("gate")
+        raise AssertionError("the payment gate must not run for an oversized contact")
+
+    monkeypatch.setattr(directory_routes, "listing_service", ListingService(store))
+    monkeypatch.setattr(directory_routes, "require_paid_request", _record_gate)
+
+    response = directory_routes.x402_list(
+        _request(
+            body=json.dumps(
+                {
+                    "url": "https://api.example.com/v1/quote",
+                    "price": "$0.01",
+                    "contact": "x" * 257,
+                }
+            ).encode()
+        )
+    )
+
+    assert response.status_code == 400
+    assert "invalid_request" in response.description
+    assert gate_calls == []
+    assert store.list_recent(limit=50) == []
+
+
+def test_renew_does_not_change_reimburses_or_contact(
+    store: InMemoryListingStore,
+) -> None:
+    """Renewal buys time only -- reimburses/contact follow every other descriptive field (price, description, tags, category): unchanged by renew, only settable via list/relist."""
+    service = ListingService(store)
+    base = datetime(2026, 8, 1, tzinfo=UTC)
+    service.create(
+        normalized_url="https://api.example.com/q",
+        price="$0.01",
+        description="mine",
+        assets=[],
+        tags=["fx"],
+        schema_json="",
+        settlement_tx_id="TX1",
+        payer="AGENT1",
+        reimburses=True,
+        contact="support@example.com",
+        now=base,
+    )
+
+    renewed = service.renew(
+        normalized_url="https://api.example.com/q",
+        payer="AGENT1",
+        settlement_tx_id="TX2",
+        now=base + timedelta(days=10),
+    )
+
+    assert renewed.reimburses is True
+    assert renewed.contact == "support@example.com"
+
+
+@pytest.mark.usefixtures("fake_redis")
+def test_search_and_listing_detail_both_serve_the_new_flags(
+    store: InMemoryListingStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Both free read paths (search, listing detail) carry reimburses/contact -- an agent can see them without paying."""
+    monkeypatch.setattr(directory_routes, "listing_service", ListingService(store))
+    ListingService(store).create(
+        normalized_url="https://api.example.com/q",
+        price="$0.01",
+        description="mine",
+        assets=[],
+        tags=["fx"],
+        schema_json="",
+        settlement_tx_id="TX1",
+        payer="AGENT1",
+        reimburses=True,
+        contact="support@example.com",
+    )
+
+    search_item = directory_routes.x402_search(_request(method="GET", path="/api/v1/x402/search"))[
+        "items"
+    ][0]
+    assert search_item["reimburses"] is True
+    assert search_item["contact"] == "support@example.com"
+
+    detail = _detail("https://api.example.com/q")
+    assert detail["listing"]["reimburses"] is True
+    assert detail["listing"]["contact"] == "support@example.com"

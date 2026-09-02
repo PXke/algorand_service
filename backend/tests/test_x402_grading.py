@@ -47,10 +47,13 @@ from app.core import cassandra as cassandra_core
 from app.core import rate_limit as rate_limit_core
 from app.core.config import settings
 from app.core.http import QueryParams, Request, Response
+from app.modules.x402 import circuit_breaker
 from app.modules.x402 import client as x402_client
 from app.modules.x402 import guard as x402_guard
+from app.modules.x402 import paid_request as paid_request_module
 from app.modules.x402 import replay as replay_module
 from app.modules.x402.assets import EURQ
+from app.modules.x402.refund import RefundResult
 from app.modules.x402.settlement import (
     InMemorySettlementStore,
     SettlementRecord,
@@ -91,7 +94,7 @@ _EURQ_MAINNET_ASSET_ID = str(EURQ.asa_ids[ALGORAND_MAINNET_CAIP2])
 # Fakes
 # --------------------------------------------------------------------------- #
 class _FakeRedis:
-    """Enough of the Redis API for the replay claim and the rate-limit counter."""
+    """Enough of the Redis API for the replay claim, the rate-limit counter, and the refund circuit breaker."""
 
     def __init__(self) -> None:
         self.store: dict[str, str] = {}
@@ -116,6 +119,9 @@ class _FakeRedis:
     def expire(self, key: str, seconds: int) -> bool:
         self.expires[key] = seconds
         return True
+
+    def get(self, key: str) -> str | None:
+        return self.store.get(key)
 
 
 class _BrokenRedis:
@@ -277,9 +283,17 @@ def _grade(
     url: str = _URL,
     comment: str = "",
     settlement_tx_id: str = "TX",
+    usage_verified: bool = True,
     now: datetime | None = None,
 ) -> StoredGrade:
-    """Submit one grade through the service, resolving the URL the way a route does."""
+    """Submit one grade through the service, resolving the URL the way a route does.
+
+    usage_verified defaults to True: every OTHER test in this file that goes
+    through this helper predates the mandatory-usage-proof requirement and is
+    testing something else entirely (credibility weighting, the leaderboard,
+    the free index, ...) -- defaulting True keeps them all exercising exactly
+    what they always exercised.
+    """
     normalized, hashed = service.resolve_url(url)
     return service.submit(
         url=normalized,
@@ -288,6 +302,7 @@ def _grade(
         score=score,
         comment=comment,
         settlement_tx_id=settlement_tx_id,
+        usage_verified=usage_verified,
         now=now,
     )
 
@@ -310,10 +325,14 @@ def testnet_settings(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.fixture
 def fake_redis(monkeypatch: pytest.MonkeyPatch) -> _FakeRedis:
-    """Swap both Redis seams for one in-process fake shared by replay and rate limiting."""
+    """Swap every Redis seam for one in-process fake shared by replay, rate limiting and the refund circuit breaker."""
     client = _FakeRedis()
     monkeypatch.setattr(replay_module, "get_redis", lambda **_kw: client)
     monkeypatch.setattr(rate_limit_core, "get_redis", lambda **_kw: client)
+    # circuit_breaker.is_tripped reads app.core.redis_client's get_redis,
+    # imported into circuit_breaker's own namespace -- patch it there, same
+    # seam test_x402_preview.py already patches for ping's retrofit.
+    monkeypatch.setattr(circuit_breaker, "get_redis", lambda **_kw: client)
     return client
 
 
@@ -325,10 +344,33 @@ def weights(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(settings, "x402_grading_max_weight_atomic", 1_000_000)
 
 
+_TX_ID = "A" * 52
+
+
 def _grade_body(**overrides: object) -> bytes:
-    body: dict[str, object] = {"url": _URL, "score": 4, "comment": "solid"}
+    body: dict[str, object] = {"url": _URL, "score": 4, "comment": "solid", "tx_id": _TX_ID}
     body.update(overrides)
     return json.dumps(body).encode()
+
+
+def _mock_verified_proof(
+    monkeypatch: pytest.MonkeyPatch, *, sender: str = _PAYER, verified: bool = True
+) -> None:
+    """Bypass the real usage-proof network/indexer work with a canned outcome.
+
+    Every existing submit test predates the mandatory-usage-proof
+    requirement and is not itself testing that mechanism (see
+    test_x402_grading_usage_proof.py for that) -- this keeps them exercising
+    what they always exercised without hitting the process-wide no-network
+    guard (CLAUDE.md section 6).
+    """
+    monkeypatch.setattr(
+        grading_routes,
+        "_resolve_usage_proof",
+        lambda *_a, **_kw: grading_routes._UsageProofOutcome(
+            error=None, verified=verified, sender=sender
+        ),
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -344,6 +386,7 @@ def test_grading_any_url_without_payment_returns_402_with_the_grading_price_and_
 
     monkeypatch.setattr(settings, "x402_grading_grade_price", "$0.02")
     monkeypatch.setattr(grading_routes, "grading_service", _service(store))
+    _mock_verified_proof(monkeypatch)
 
     response = grading_routes.x402_grade_submit(_request(body=_grade_body()))
 
@@ -366,6 +409,7 @@ def test_the_402_declares_body_discovery_and_the_overwrite_and_weighting_rules(
     from x402.http.utils import decode_payment_required_header
 
     monkeypatch.setattr(grading_routes, "grading_service", _service(store))
+    _mock_verified_proof(monkeypatch)
 
     response = grading_routes.x402_grade_submit(_request(body=_grade_body()))
 
@@ -428,13 +472,14 @@ def test_an_over_long_comment_is_rejected_before_the_payment_gate(
 def test_grading_an_arbitrary_unlisted_url_succeeds_on_payment_alone(
     store: InMemoryGradeStore, ledger: InMemorySettlementStore, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A wallet with no history whatsoever, grading a URL nobody has listed, is stored on the strength of the payment alone — there is no eligibility check left to fail."""
+    """A wallet with no history whatsoever, grading a URL nobody has listed, is stored on the strength of the payment plus a verified usage proof — there is no ELIGIBILITY check left to fail (only the mandatory proof)."""
     assert ledger.settlements == []  # nobody has ever paid us for anything
     service = _service(store)
     monkeypatch.setattr(grading_routes, "grading_service", service)
     monkeypatch.setattr(
         grading_routes, "require_paid_request", lambda *_a, **_kw: _settled_result()
     )
+    _mock_verified_proof(monkeypatch)
 
     response = grading_routes.x402_grade_submit(
         _request(body=_grade_body(url="https://totally.unknown.example/api", score=5))
@@ -445,10 +490,12 @@ def test_grading_an_arbitrary_unlisted_url_succeeds_on_payment_alone(
     assert payload["url"] == "https://totally.unknown.example/api"
     assert payload["grade"]["grader"] == _PAYER
     assert payload["grade"]["score"] == 5
+    assert payload["grade"]["usage_verified"] is True
     assert payload["settlement_tx_id"] == "TX123"
     stored = store.get(url_hash("https://totally.unknown.example/api"), _PAYER)
     assert stored is not None
     assert stored.score == 5
+    assert stored.usage_verified is True
 
 
 def test_the_grading_module_does_not_import_the_directory_outside_its_routes() -> None:
@@ -548,6 +595,7 @@ def test_an_unattributable_payment_cannot_be_stored_as_a_grade(
     monkeypatch.setattr(
         grading_routes, "require_paid_request", lambda *_a, **_kw: _settled_result(payer="")
     )
+    _mock_verified_proof(monkeypatch)
 
     response = grading_routes.x402_grade_submit(_request(body=_grade_body()))
 
@@ -557,7 +605,7 @@ def test_an_unattributable_payment_cannot_be_stored_as_a_grade(
     assert store.list_graded_endpoints(limit=10) == []
 
 
-@pytest.mark.usefixtures("ledger")
+@pytest.mark.usefixtures("ledger", "fake_redis")
 def test_a_promo_redemption_stores_the_grade_attributed_to_the_promo_wallet(
     store: InMemoryGradeStore, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -579,6 +627,7 @@ def test_a_promo_redemption_stores_the_grade_attributed_to_the_promo_wallet(
         "mark_fulfilled",
         lambda txid, *, resource: fulfilled.append((txid, resource)),
     )
+    _mock_verified_proof(monkeypatch)
 
     response = grading_routes.x402_grade_submit(
         _request(query={"promo": "LAUNCH50", "promo_wallet": _PAYER}, body=_grade_body())
@@ -1018,7 +1067,35 @@ def test_a_graded_url_still_costs_a_payment_to_score(
     assert response.status_code == 402
 
 
-@pytest.mark.usefixtures("ledger")
+@pytest.mark.usefixtures("testnet_settings", "fake_redis", "weights", "ledger")
+def test_grade_score_preview_serves_a_redacted_response_with_no_facilitator_call(
+    store: InMemoryGradeStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """?preview=true on a graded url gets the redacted shape, never the real aggregate."""
+    service = _service(store)
+    _grade(service, grader=_PAYER, score=5)
+    _grade(service, grader=_OTHER_PAYER, score=1)
+    monkeypatch.setattr(grading_routes, "grading_service", service)
+
+    response = grading_routes.x402_grade_score(
+        _request(
+            method="GET",
+            query={"url": _URL, "preview": "true"},
+            path="/api/v1/x402/grades/score",
+        )
+    )
+
+    assert response.status_code == 200
+    payload = json.loads(response.description)
+    assert payload["url"] == _URL
+    assert payload["url_hash"] == url_hash(_URL)
+    assert payload["count"] == -1
+    assert payload["weighted_mean"] == 0.0
+    assert payload["grades"] == []
+    assert payload["settlement_tx_id"] == "<preview>"
+
+
+@pytest.mark.usefixtures("ledger", "fake_redis")
 def test_a_promo_redemption_reads_the_score_with_no_settlement(
     store: InMemoryGradeStore, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1318,6 +1395,43 @@ def test_a_graded_tag_costs_the_score_price_and_declares_discovery(
     bazaar = (payment_required.extensions or {}).get("bazaar")
     assert bazaar is not None
     assert "body" not in json.dumps(bazaar)
+
+
+@pytest.mark.usefixtures("testnet_settings", "fake_redis", "ledger")
+def test_grade_top_preview_serves_a_redacted_response_never_ranking_the_real_candidates(
+    store: InMemoryGradeStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """?preview=true on a rankable tag gets a redacted exemplar row, never the real leaderboard order."""
+    service = _leaderboard_service(store, _directory_with(_TAGGED))
+    _grade(service, grader=_PAYER, score=4, url=_TAGGED[0])
+    _grade(service, grader=_OTHER_PAYER, score=4, url=_TAGGED[0])
+    monkeypatch.setattr(grading_routes, "grading_service", service)
+
+    response = grading_routes.x402_grade_top(
+        _request(
+            method="GET",
+            query={"tag": "pricing", "preview": "true"},
+            path="/api/v1/x402/grades/top",
+        )
+    )
+
+    assert response.status_code == 200
+    payload = json.loads(response.description)
+    assert payload["tag"] == "pricing"
+    assert payload["candidates_considered"] == -1
+    assert payload["items"] == [
+        {
+            "rank": 1,
+            "url_hash": "<preview>",
+            "url": "<preview>",
+            "count": -1,
+            "weighted_mean": 0.0,
+            "mean": 0.0,
+            "total_weight": 0,
+            "truncated": False,
+        }
+    ]
+    assert payload["settlement_tx_id"] == "<preview>"
 
 
 @pytest.mark.usefixtures("testnet_settings", "fake_redis", "weights")
@@ -1633,3 +1747,126 @@ def test_admin_grade_delete_of_a_missing_grade_or_bad_input_is_a_4xx(
         grading_routes.x402_admin_delete_grade(_delete_request("ftp://x", _PAYER)).status_code
         == 400
     )
+
+
+# --------------------------------------------------------------------------- #
+# Auto-refund + circuit breaker retrofit (grade submit, score, top)
+# --------------------------------------------------------------------------- #
+@pytest.mark.usefixtures("testnet_settings", "fake_redis", "ledger")
+def test_a_tripped_breaker_blocks_every_paid_grading_route_before_the_gate(
+    store: InMemoryGradeStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Once tripped, submit/score/top all refuse with a 503 before require_paid_request ever runs."""
+    service = _leaderboard_service(store, _directory_with(_TAGGED))
+    _grade(service, grader=_PAYER, score=4, url=_TAGGED[0])
+    _grade(service, grader=_OTHER_PAYER, score=4, url=_TAGGED[0])
+    monkeypatch.setattr(grading_routes, "grading_service", service)
+    monkeypatch.setattr(grading_routes, "require_paid_request", _must_not_charge)
+    for resource in ("x402-grading-submit", "x402-grading-score", "x402-grading-top"):
+        for _ in range(settings.x402_refund_breaker_max_failures):
+            circuit_breaker.record_refund_failure(resource)
+
+    submit_response = grading_routes.x402_grade_submit(
+        _request(method="POST", body=_grade_body(url=_TAGGED[0]), path="/api/v1/x402/grades")
+    )
+    score_response = grading_routes.x402_grade_score(
+        _request(method="GET", query={"url": _TAGGED[0]}, path="/api/v1/x402/grades/score")
+    )
+    top_response = grading_routes.x402_grade_top(
+        _request(method="GET", query={"tag": "pricing"}, path="/api/v1/x402/grades/top")
+    )
+
+    for response in (submit_response, score_response, top_response):
+        assert response.status_code == 503
+        assert "temporarily_disabled" in response.description
+
+
+@pytest.mark.usefixtures("testnet_settings", "fake_redis", "ledger")
+def test_grade_submit_write_failure_after_payment_triggers_a_refund(
+    store: InMemoryGradeStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A storage failure AFTER the gate settles refunds the payer instead of a bare 500 -- the sender-mismatch/unattributable-payer rejections above the write are unaffected (checked pre-write, not wrapped)."""
+    monkeypatch.setattr(grading_routes, "grading_service", _service(store))
+    monkeypatch.setattr(
+        grading_routes, "require_paid_request", lambda *_a, **_kw: _settled_result(txid="TXF1")
+    )
+    _mock_verified_proof(monkeypatch)
+    monkeypatch.setattr(
+        grading_routes.grading_service,
+        "submit",
+        lambda **_kw: (_ for _ in ()).throw(RuntimeError("cassandra write blew up")),
+    )
+    monkeypatch.setattr(
+        paid_request_module,
+        "send_refund",
+        lambda **_kw: RefundResult(status="sent", txid="REFUND1"),
+    )
+
+    response = grading_routes.x402_grade_submit(
+        _request(method="POST", body=_grade_body(), path="/api/v1/x402/grades")
+    )
+
+    assert response.status_code == 503
+    assert "refunded" in response.description.lower()
+    assert circuit_breaker.is_tripped("x402-grading-submit") is False  # one failure, below default
+
+
+@pytest.mark.usefixtures("testnet_settings", "fake_redis", "weights", "ledger")
+def test_grade_score_compute_failure_after_payment_triggers_a_refund(
+    store: InMemoryGradeStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An aggregation failure AFTER the gate settles refunds the payer instead of a bare 500."""
+    service = _service(store)
+    _grade(service, grader=_PAYER, score=5)
+    monkeypatch.setattr(grading_routes, "grading_service", service)
+    monkeypatch.setattr(
+        grading_routes, "require_paid_request", lambda *_a, **_kw: _settled_result(txid="TXF2")
+    )
+    monkeypatch.setattr(
+        grading_routes.grading_service,
+        "aggregate",
+        lambda _endpoint: (_ for _ in ()).throw(RuntimeError("aggregation blew up")),
+    )
+    monkeypatch.setattr(
+        paid_request_module,
+        "send_refund",
+        lambda **_kw: RefundResult(status="sent", txid="REFUND2"),
+    )
+
+    response = grading_routes.x402_grade_score(
+        _request(method="GET", query={"url": _URL}, path="/api/v1/x402/grades/score")
+    )
+
+    assert response.status_code == 503
+    assert "refunded" in response.description.lower()
+
+
+@pytest.mark.usefixtures("testnet_settings", "fake_redis", "weights", "ledger")
+def test_grade_top_rank_failure_after_payment_triggers_a_refund(
+    store: InMemoryGradeStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A leaderboard-ranking failure AFTER the gate settles refunds the payer instead of a bare 500."""
+    service = _leaderboard_service(store, _directory_with(_TAGGED))
+    _grade(service, grader=_PAYER, score=4, url=_TAGGED[0])
+    _grade(service, grader=_OTHER_PAYER, score=4, url=_TAGGED[0])
+    monkeypatch.setattr(grading_routes, "grading_service", service)
+    monkeypatch.setattr(
+        grading_routes, "require_paid_request", lambda *_a, **_kw: _settled_result(txid="TXF3")
+    )
+    monkeypatch.setattr(
+        grading_routes.grading_service,
+        "rank_leaderboard",
+        lambda _candidates: (_ for _ in ()).throw(RuntimeError("ranking blew up")),
+    )
+    monkeypatch.setattr(
+        paid_request_module,
+        "send_refund",
+        lambda **_kw: RefundResult(status="sent", txid="REFUND3"),
+    )
+
+    response = grading_routes.x402_grade_top(
+        _request(method="GET", query={"tag": "pricing"}, path="/api/v1/x402/grades/top")
+    )
+
+    assert response.status_code == 503
+    assert "refunded" in response.description.lower()

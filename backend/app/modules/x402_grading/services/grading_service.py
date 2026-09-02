@@ -208,6 +208,7 @@ class GradingService:
         score: int,
         comment: str,
         settlement_tx_id: str,
+        usage_verified: bool,
         now: datetime | None = None,
     ) -> StoredGrade:
         """Store one grader's grade of one URL, replacing their previous one.
@@ -257,6 +258,7 @@ class GradingService:
             comment=comment.strip()[:MAX_COMMENT_LENGTH],
             settlement_tx_id=settlement_tx_id,
             created_at_epoch=int(moment.timestamp()),
+            usage_verified=usage_verified,
         )
         self.store.upsert(grade)
         return grade

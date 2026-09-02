@@ -150,6 +150,46 @@ _NAME_STOPWORDS = {
     "dao",
 }
 
+# Pure adjectives/quantifiers that may sit between a number and the noun it
+# actually modifies without breaking the association ("42 verified users",
+# "1,000+ active monthly users"). Scanning outward from a number stops at the
+# first word NOT in this set (see _noun_near) -- so a number is only matched
+# to a traction/funding noun that's really its own head noun, never one that
+# merely appears further along in the same sentence.
+_NOUN_MODIFIERS = {
+    "verified",
+    "active",
+    "total",
+    "new",
+    "additional",
+    "unique",
+    "monthly",
+    "daily",
+    "weekly",
+    "registered",
+    "individual",
+    "potential",
+    "real",
+    "genuine",
+    "current",
+    "existing",
+    "distinct",
+    "known",
+}
+# Bare determiners/conjunctions, safe to cross in either direction — they
+# never carry independent noun-hood themselves.
+_DETERMINERS = {"the", "a", "an", "and", "&"}
+# Forward (after the number) may additionally cross "of" — the standard
+# percentage/share construction ("60% OF users", "70% OF holders"). Backward
+# must NOT cross a phrase-introducing preposition ("with", "for", "in", "of",
+# ...) -- doing so steps past the boundary of the number's own phrase into a
+# different clause entirely, misattributing the number to an unrelated noun
+# in that clause (root-caused: "...320 members, with 15 online..."
+# backward-skipped over "with" into "members", attributing the ONLINE count
+# to the unrelated MEMBER count three words earlier in the sentence).
+_FORWARD_NOUN_LINKERS = _NOUN_MODIFIERS | _DETERMINERS | {"of"}
+_BACKWARD_NOUN_LINKERS = _NOUN_MODIFIERS | _DETERMINERS
+
 _FOLD_RE = re.compile(r"[^a-z0-9]+")
 
 
@@ -252,15 +292,35 @@ def _numeric_findings(body: str, corpus_ctx: str) -> list[dict[str, str]]:
 
 
 def _noun_near(lowered: list[str], i: int, noun_set: set[str]) -> str:
-    """First noun from noun_set within ±3 tokens of position i (after-side first).
+    """The noun the number token at position i actually modifies, scanned outward from the number and stopped at the first word that isn't a recognised modifier -- not just any noun_set word floating within a fixed window.
 
-    A proximity window, not a next-token check, so an adjective or a compound
-    ('1,000 verified issuers', '70+ events and hackathons') doesn't break the
-    association.
+    Root cause of two production false positives this was rewritten to fix:
+    the old version treated ±3 tokens as one flat bag and returned the first
+    noun_set word found anywhere in it, with no notion of a phrase boundary.
+    That let it walk straight past the number's REAL (non-traction) head noun
+    to grab an unrelated traction word further down the sentence ("...42
+    regions... for users..." reported "42 users", when 42 modifies "regions" —
+    not a traction noun at all, so 42 shouldn't be flagged as a traction claim
+    in the first place), and, on the before-side, walk backward across a
+    preposition into an entirely different clause's subject ("...320 members,
+    with 15 online..." reported "15 members", when 15 modifies "online" and
+    "members" belongs to the earlier, unrelated "320").
+
+    An adjective/quantifier ('1,000 verified issuers') or, forward only, an
+    "and" compound ('70+ events and hackathons') doesn't break the
+    association and is skipped over; any other word is treated as the
+    number's real head noun/phrase and stops the scan right there.
     """
-    for w in list(lowered[i + 1 : i + 4]) + list(lowered[max(0, i - 3) : i]):
+    for w in lowered[i + 1 : i + 4]:
         if w in noun_set:
             return w
+        if w not in _FORWARD_NOUN_LINKERS:
+            break
+    for w in reversed(lowered[max(0, i - 3) : i]):
+        if w in noun_set:
+            return w
+        if w not in _BACKWARD_NOUN_LINKERS:
+            break
     return ""
 
 

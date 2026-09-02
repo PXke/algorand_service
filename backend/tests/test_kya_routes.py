@@ -33,10 +33,12 @@ from algosdk.encoding import encode_address
 from x402.mechanisms.avm.constants import ALGORAND_TESTNET_CAIP2
 
 from app.core import rate_limit as rate_limit_core
+from app.core import serialization
 from app.core.config import settings
 from app.core.http import QueryParams, Request, Response
 from app.modules.kya.api import routes as kyc_routes
 from app.modules.kya.models.domain import StoredEnrollment
+from app.modules.kya.services import consent_challenge as consent_challenge_store
 from app.modules.kya.services import rate_limit as kyc_rate_limit
 from app.modules.kya.services.enrollment_service import EnrollmentService
 from app.modules.kya.services.indexer_client import WalletSignals
@@ -74,6 +76,14 @@ class _FakeRedis:
             self.expires[key] = ex
         return True
 
+    def setex(self, key: str, time: int, value: str) -> bool:
+        self.store[key] = value
+        self.expires[key] = time
+        return True
+
+    def getdel(self, key: str) -> str | None:
+        return self.store.pop(key, None)
+
     def delete(self, key: str) -> int:
         return 1 if self.store.pop(key, None) is not None else 0
 
@@ -91,6 +101,12 @@ class _BrokenRedis:
     """Every operation fails, to exercise the fail-open paths."""
 
     def set(self, *_args: object, **_kwargs: object) -> Never:
+        raise ConnectionError("redis down")
+
+    def setex(self, *_args: object, **_kwargs: object) -> Never:
+        raise ConnectionError("redis down")
+
+    def getdel(self, *_args: object, **_kwargs: object) -> Never:
         raise ConnectionError("redis down")
 
     def delete(self, *_args: object, **_kwargs: object) -> Never:
@@ -142,6 +158,7 @@ def fake_redis(monkeypatch: pytest.MonkeyPatch) -> _FakeRedis:
     client = _FakeRedis()
     monkeypatch.setattr(replay_module, "get_redis", lambda **_kw: client)
     monkeypatch.setattr(rate_limit_core, "get_redis", lambda **_kw: client)
+    monkeypatch.setattr(consent_challenge_store, "get_redis", lambda **_kw: client)
     return client
 
 
@@ -381,6 +398,15 @@ def _enroll_body(wallet: str = _WALLET) -> bytes:
     ).encode("utf-8")
 
 
+def _issue_consent(wallet: str = _WALLET) -> dict:
+    result = kyc_routes.kyc_consent_message(
+        _request(query={"wallet_address": wallet}, path="/api/v1/kyc/consent-message")
+    )
+    assert isinstance(result, dict)
+    assert "message" in result
+    return result
+
+
 @pytest.mark.usefixtures("fake_redis", "free_enroll")
 def test_the_consent_message_endpoint_is_rate_limited_per_ip(
     monkeypatch: pytest.MonkeyPatch,
@@ -419,6 +445,7 @@ def test_enroll_is_rate_limited_per_ip_before_the_indexer_is_called(
     monkeypatch.setattr(settings, "kyc_enroll_wallet_rate_limit_per_day", 1000)
 
     def _post(wallet: str) -> Response | dict:
+        _issue_consent(wallet)
         return kyc_routes.kyc_enroll(
             _request(
                 method="POST",
@@ -445,6 +472,7 @@ def test_enroll_is_rate_limited_per_wallet_independently_of_the_ip(
     monkeypatch.setattr(settings, "kyc_enroll_wallet_rate_limit_per_day", 2)
 
     def _post(ip: str) -> Response | dict:
+        _issue_consent(_WALLET)
         return kyc_routes.kyc_enroll(
             _request(
                 method="POST",
@@ -465,6 +493,7 @@ def test_enroll_is_rate_limited_per_wallet_independently_of_the_ip(
     assert free_enroll == [_WALLET, _WALLET]
 
     # A different wallet has its own bucket, even from an IP already used.
+    _issue_consent(_PAYER)
     other = kyc_routes.kyc_enroll(
         _request(
             method="POST",
@@ -496,6 +525,49 @@ def test_a_malformed_enroll_body_is_still_a_400_not_a_429(
     assert "invalid_request" in response.description
 
 
+@pytest.mark.usefixtures("fake_redis", "free_enroll")
+def test_enroll_without_a_consent_challenge_is_rejected() -> None:
+    """A signature alone is not enough: enroll consumes a nonce issued by consent-message."""
+    response = kyc_routes.kyc_enroll(
+        _request(
+            method="POST",
+            body=_enroll_body(),
+            path="/api/v1/kyc/enroll",
+        )
+    )
+    assert response.status_code == 401
+    assert "invalid_or_expired_consent" in response.description
+
+
+@pytest.mark.usefixtures("fake_redis", "free_enroll")
+def test_a_consent_challenge_cannot_be_replayed() -> None:
+    """GETDEL: a second enroll with the same signed payload has no challenge left."""
+    _issue_consent()
+    first = kyc_routes.kyc_enroll(
+        _request(method="POST", body=_enroll_body(), path="/api/v1/kyc/enroll")
+    )
+    assert first["wallet_address"] == _WALLET
+    second = kyc_routes.kyc_enroll(
+        _request(method="POST", body=_enroll_body(), path="/api/v1/kyc/enroll")
+    )
+    assert second.status_code == 401
+    assert "invalid_or_expired_consent" in second.description
+
+
+@pytest.mark.usefixtures("fake_redis", "free_enroll")
+def test_an_expired_consent_challenge_is_rejected(fake_redis: _FakeRedis) -> None:
+    """A challenge whose embedded expiry is in the past is refused even if Redis still holds it."""
+    _issue_consent()
+    fake_redis.store[consent_challenge_store._key(_WALLET)] = serialization.dumps(
+        {"nonce": "n", "expires_at": 1}
+    )
+    response = kyc_routes.kyc_enroll(
+        _request(method="POST", body=_enroll_body(), path="/api/v1/kyc/enroll")
+    )
+    assert response.status_code == 401
+    assert "invalid_or_expired_consent" in response.description
+
+
 # --------------------------------------------------------------------------- #
 # K-2: fail-open on a Redis outage
 # --------------------------------------------------------------------------- #
@@ -518,11 +590,13 @@ def test_every_kyc_rate_limit_fails_open_when_redis_is_down(
 
 
 @pytest.mark.usefixtures("free_enroll")
-def test_enrollment_still_succeeds_end_to_end_with_redis_down(
+def test_enrollment_fails_closed_when_the_consent_store_is_down(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The fail-open is wired all the way through the route, not just the limiter helpers."""
-    monkeypatch.setattr(rate_limit_core, "get_redis", lambda **_kw: _BrokenRedis())
+    """Rate limits fail open, but enroll must not proceed without a consumed nonce."""
+    down = _BrokenRedis()
+    monkeypatch.setattr(rate_limit_core, "get_redis", lambda **_kw: down)
+    monkeypatch.setattr(consent_challenge_store, "get_redis", lambda **_kw: down)
     monkeypatch.setattr(settings, "kyc_enroll_rate_limit_per_hour", 0)
     monkeypatch.setattr(settings, "kyc_enroll_wallet_rate_limit_per_day", 0)
 
@@ -535,7 +609,8 @@ def test_enrollment_still_succeeds_end_to_end_with_redis_down(
         )
     )
 
-    assert response["wallet_address"] == _WALLET
+    assert response.status_code == 503
+    assert "consent_store_unavailable" in response.description
 
 
 def test_an_unattributable_caller_is_not_rate_limited(monkeypatch: pytest.MonkeyPatch) -> None:

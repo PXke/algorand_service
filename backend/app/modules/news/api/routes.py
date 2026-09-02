@@ -10,6 +10,7 @@ from app.core.config import settings
 from app.core.http import Request, Response, Router
 from app.core.http_errors import json_error_response
 from app.core.query_params import query_param
+from app.core.request_headers import client_ip as request_client_ip
 from app.core.tracking import tracking_opted_out_from_headers
 from app.modules.news.services.news_service import NewsService
 
@@ -159,7 +160,7 @@ def article_detail(request: Request) -> Response:
     def _prep_view_gate() -> None:
         nonlocal should_count
         user_agent = request.headers.get("user-agent") or request.headers.get("User-Agent") or ""
-        client_ip = request.headers.get("x-forwarded-for") or request.headers.get("x-real-ip")
+        client_ip = request_client_ip(request.headers)
         should_count = (
             not is_bot(user_agent)
             and not is_malformed_ua(user_agent)

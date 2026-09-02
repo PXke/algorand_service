@@ -89,6 +89,16 @@ class StoredListing:
     # DEFAULT_CATEGORY. Not part of `tags`, but projected next to them, see
     # projection_tags().
     category: str = DEFAULT_CATEGORY
+    # Self-declared flags (migration 104), set only at list/relist time (same
+    # as price/description/tags/category -- renew() changes nothing about a
+    # listing but its term, see renew()'s own docstring). reimburses is the
+    # owner's own unverified claim that they refund a payer on failed
+    # delivery -- never checked against anything for a third-party listing.
+    # contact is a bounded free-text point of contact, not shape-validated.
+    # A pre-104 row reads back as unset either way (False / ""), never a
+    # fabricated claim.
+    reimburses: bool = False
+    contact: str = ""
 
     @property
     def is_verified(self) -> bool:

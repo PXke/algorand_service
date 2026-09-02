@@ -405,6 +405,11 @@ class X402ListingRequest(msgspec.Struct, kw_only=True):
     # gate, this bound only stops an oversized string reaching it. Omitted
     # means "other".
     category: Annotated[str, Meta(max_length=32)] = "other"
+    # Self-declared flags (migration 104) -- never verified by us for a
+    # third-party listing, see StoredListing's own field comments. Set only
+    # at list/relist time, same as every other descriptive field here.
+    reimburses: bool = False
+    contact: Annotated[str, Meta(max_length=256)] = ""
 
 
 class X402ListingRenewRequest(msgspec.Struct, kw_only=True):
@@ -501,6 +506,14 @@ class X402GradeSubmission(msgspec.Struct, kw_only=True):
     `comment` is the grader's optional one-line opinion, capped so a paid write
     is never an unbounded text column (CLAUDE.md section 4).
 
+    `tx_id` is MANDATORY (owner ask 2026-09-02) -- the base32 Algorand
+    transaction id of a real payment the grader made to the endpoint being
+    graded, independently verified on-chain before the payment gate (see
+    x402_grading/services/usage_proof.py). No txid, no grade -- this is
+    Amazon's "verified purchase" bar applied to grading. Bounded to the
+    known Algorand txid length (52 base32 characters); the route validates
+    the value on-chain, this only bounds its shape.
+
     There is deliberately no payer field of any kind: the grader of record is
     always the wallet that settled the payment, so nobody can grade in another
     wallet's name.
@@ -509,6 +522,19 @@ class X402GradeSubmission(msgspec.Struct, kw_only=True):
     url: Annotated[str, Meta(min_length=8, max_length=2048)]
     score: Annotated[int, Meta(ge=1, le=5)]
     comment: Annotated[str, Meta(max_length=280)] = ""
+    tx_id: Annotated[str, Meta(min_length=52, max_length=52)]
+
+
+# ── x402 sandboxed file/tarball scan (roadmap 18b) ────────────────────────────
+class X402ScanUrlRequest(msgspec.Struct, kw_only=True):
+    """Request body for POST /api/v1/x402/scan/url — one paid static security scan.
+
+    `url` is fetched server-side (bounded, streamed, SSRF-pinned — see
+    modules/x402_scan/services/scan_service.py); scheme (http/https only) is
+    validated at the route, not here, since Meta has no scheme constraint.
+    """
+
+    url: Annotated[str, Meta(min_length=8, max_length=2048)]
 
 
 class X402PromoCreateRequest(msgspec.Struct, kw_only=True):
@@ -526,6 +552,11 @@ class X402PromoCreateRequest(msgspec.Struct, kw_only=True):
     code: Annotated[str, Meta(min_length=1, max_length=64)]
     resource: Annotated[str, Meta(min_length=1, max_length=128)]
     starting_count: Annotated[int, Meta(ge=1)]
+    # How many times ONE wallet may redeem this code. Defaults to 1 (byte-
+    # for-byte the pre-101 behavior for a caller that never passes it) --
+    # see app/modules/x402/promo.py's MAX_REDEMPTIONS_PER_WALLET_LIMIT for
+    # the upper bound.
+    max_redemptions_per_wallet: Annotated[int, Meta(ge=1, le=100)] = 1
     expires_at_epoch: Annotated[int, Meta(ge=0)] = 0
 
 

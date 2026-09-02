@@ -28,7 +28,16 @@ def get_stored_scale_signal(service_id: str) -> tuple[float | None, datetime | N
     row = session.execute(ServiceProfileStmts.GET_SCALE, (service_id,)).one()
     if row is None or row.scale_score is None:
         return None, None
-    return float(row.scale_score), row.scale_updated_at
+    updated_at = row.scale_updated_at
+    # The driver returns a naive (UTC-valued) datetime for a `timestamp`
+    # column -- callers compare this against datetime.now(tz=UTC)
+    # (ingest_signal._resolve_stale_scale_signal), which raises TypeError on
+    # naive-vs-aware subtraction. Root-caused 2026-09-01: crashed every
+    # poll_forum_topics run that hit a service with a prior scale signal,
+    # since at least 2026-08-31.
+    if updated_at is not None and updated_at.tzinfo is None:
+        updated_at = updated_at.replace(tzinfo=UTC)
+    return float(row.scale_score), updated_at
 
 
 def upsert_service_scale(*, service_id: str, scale_score: float, scale_source: str) -> None:

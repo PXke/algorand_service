@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from app.modules.distribution.base import (
     ArticleShare,
     DistributionResult,
@@ -97,31 +99,47 @@ def test_bluesky_disabled_without_credentials() -> None:
     assert BlueskyDistributor(handle="x.bsky.social", app_password="app-pw").enabled
 
 
-def test_bluesky_post_success() -> None:
+def _bluesky_api_client() -> MagicMock:
+    """Mock the Bluesky-origin httpx client (session + blob + createRecord)."""
+    client = MagicMock()
+
+    def post_side_effect(path: str, **_kwargs: object) -> MagicMock:
+        resp = MagicMock()
+        resp.raise_for_status = lambda: None
+        if path == "/xrpc/com.atproto.server.createSession":
+            resp.json.return_value = {"did": "did:plc:abc", "accessJwt": "jwt-token"}
+        elif path == "/xrpc/com.atproto.repo.uploadBlob":
+            resp.json.return_value = {"blob": {"$type": "blob", "ref": {"$link": "cid"}}}
+        elif path == "/xrpc/com.atproto.repo.createRecord":
+            resp.json.return_value = {"uri": "at://did:plc:abc/app.bsky.feed.post/xyz"}
+        return resp
+
+    client.post.side_effect = post_side_effect
+    return client
+
+
+def _patch_bluesky_http(
+    monkeypatch: pytest.MonkeyPatch, client: MagicMock, *, thumb: object
+) -> None:
+    monkeypatch.setattr("app.core.http_client.get_http_client", lambda **_k: client)
+    monkeypatch.setattr("app.core.net_guard.guarded_get", thumb)
+
+
+def test_bluesky_post_success(monkeypatch: pytest.MonkeyPatch) -> None:
     """Posts to Bluesky via session, blob upload, and record creation, embedding the article as an external link card."""
-    with patch("app.modules.distribution.bluesky.httpx.Client") as client_cls:
-        client = client_cls.return_value
+    client = _bluesky_api_client()
+    thumb = MagicMock()
+    thumb.raise_for_status = lambda: None
+    thumb.content = b"fake-image-bytes"
+    thumb.headers = {"content-type": "image/png"}
+    _patch_bluesky_http(monkeypatch, client, thumb=lambda *_a, **_k: thumb)
 
-        def post_side_effect(path: str, **_kwargs: object) -> MagicMock:
-            resp = MagicMock()
-            resp.raise_for_status = lambda: None
-            if path == "/xrpc/com.atproto.server.createSession":
-                resp.json.return_value = {"did": "did:plc:abc", "accessJwt": "jwt-token"}
-            elif path == "/xrpc/com.atproto.repo.uploadBlob":
-                resp.json.return_value = {"blob": {"$type": "blob", "ref": {"$link": "cid"}}}
-            elif path == "/xrpc/com.atproto.repo.createRecord":
-                resp.json.return_value = {"uri": "at://did:plc:abc/app.bsky.feed.post/xyz"}
-            return resp
-
-        client.post.side_effect = post_side_effect
-        client.get.return_value.raise_for_status = lambda: None
-        client.get.return_value.content = b"fake-image-bytes"
-        client.get.return_value.headers = {"content-type": "image/png"}
-
-        result = BlueskyDistributor(handle="x.bsky.social", app_password="pw").post_article(_SHARE)
+    result = BlueskyDistributor(handle="x.bsky.social", app_password="pw").post_article(_SHARE)
 
     assert result.ok
     assert result.channel == "bluesky"
+    # Share-art fetch must not go through the Bluesky-origin client (SSRF).
+    client.get.assert_not_called()
     # 3 calls: createSession, uploadBlob (via GET+POST -> 1 post call), createRecord
     post_paths = [c.args[0] for c in client.post.call_args_list]
     assert "/xrpc/com.atproto.server.createSession" in post_paths
@@ -140,26 +158,18 @@ def test_bluesky_post_success() -> None:
     )
 
 
-def test_bluesky_post_survives_thumb_upload_failure() -> None:
+def test_bluesky_post_survives_thumb_upload_failure(monkeypatch: pytest.MonkeyPatch) -> None:
     # A share-card image is a nice-to-have; the post should still go out
     # text/link-only if the image fetch or blob upload fails.
     """A failed thumbnail upload still lets the post go out, link-only."""
-    with patch("app.modules.distribution.bluesky.httpx.Client") as client_cls:
-        client = client_cls.return_value
+    client = _bluesky_api_client()
 
-        def post_side_effect(path: str, **_kwargs: object) -> MagicMock:
-            resp = MagicMock()
-            resp.raise_for_status = lambda: None
-            if path == "/xrpc/com.atproto.server.createSession":
-                resp.json.return_value = {"did": "did:plc:abc", "accessJwt": "jwt-token"}
-            elif path == "/xrpc/com.atproto.repo.createRecord":
-                resp.json.return_value = {"uri": "at://did:plc:abc/app.bsky.feed.post/xyz"}
-            return resp
+    def _boom(_url: str, **_k: object) -> object:
+        raise ConnectionError("image host down")
 
-        client.post.side_effect = post_side_effect
-        client.get.side_effect = ConnectionError("image host down")
+    _patch_bluesky_http(monkeypatch, client, thumb=_boom)
 
-        result = BlueskyDistributor(handle="x.bsky.social", app_password="pw").post_article(_SHARE)
+    result = BlueskyDistributor(handle="x.bsky.social", app_password="pw").post_article(_SHARE)
 
     assert result.ok
     create_record_call = next(
@@ -168,13 +178,34 @@ def test_bluesky_post_survives_thumb_upload_failure() -> None:
     assert "thumb" not in create_record_call.kwargs["json"]["record"]["embed"]["external"]
 
 
-def test_bluesky_post_failure_does_not_raise() -> None:
-    """A post failure is caught and returned as a failed DistributionResult, never raised."""
-    with patch("app.modules.distribution.bluesky.httpx.Client") as client_cls:
-        client = client_cls.return_value
-        client.post.side_effect = ConnectionError("auth service down")
+def test_bluesky_thumb_rejects_internal_redirect(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A share-image URL that 302s to an internal host must not be fetched; post still goes out."""
+    from app.core.net_guard import UnsafeUrlError
 
-        result = BlueskyDistributor(handle="x.bsky.social", app_password="pw").post_article(_SHARE)
+    client = _bluesky_api_client()
+
+    def _blocked(_url: str, **_k: object) -> object:
+        raise UnsafeUrlError("host 169.254.169.254 resolves to non-public IP")
+
+    _patch_bluesky_http(monkeypatch, client, thumb=_blocked)
+
+    result = BlueskyDistributor(handle="x.bsky.social", app_password="pw").post_article(_SHARE)
+
+    assert result.ok
+    client.get.assert_not_called()
+    create_record_call = next(
+        c for c in client.post.call_args_list if c.args[0] == "/xrpc/com.atproto.repo.createRecord"
+    )
+    assert "thumb" not in create_record_call.kwargs["json"]["record"]["embed"]["external"]
+
+
+def test_bluesky_post_failure_does_not_raise(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A post failure is caught and returned as a failed DistributionResult, never raised."""
+    client = MagicMock()
+    client.post.side_effect = ConnectionError("auth service down")
+    monkeypatch.setattr("app.core.http_client.get_http_client", lambda **_k: client)
+
+    result = BlueskyDistributor(handle="x.bsky.social", app_password="pw").post_article(_SHARE)
 
     assert not result.ok
     assert result.channel == "bluesky"

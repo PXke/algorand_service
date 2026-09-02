@@ -12,7 +12,11 @@ from urllib.parse import unquote, urljoin, urlparse, urlunparse
 
 import httpx
 
+from app.core.config import settings
 from app.core.http import Request, Response, Router
+from app.core.http_errors import json_error_response
+from app.core.rate_limit import incr_with_expiry
+from app.core.request_headers import client_ip
 
 if TYPE_CHECKING:
     import redis
@@ -49,6 +53,26 @@ _PLACEHOLDER_WEBP = (
     b"\x00\x00ALPH\x02\x00\x00\x00\x00\x00VP8 \x18\x00\x00\x000\x01\x00\x9d"
     b"\x01*\x01\x00\x01\x00\x01@&%\xa4\x00\x03p\x00\xfe\xfd6h\x00"
 )
+_RATE_KEY_PREFIX = "algorand:imgproxy_rl:"
+_RATE_WINDOW_SECONDS = 3600
+
+
+def _image_proxy_rate_limited(request: Request) -> bool:
+    """Return True when this IP has exceeded the hourly image-proxy budget.
+
+    Fails OPEN (a Redis failure -- incr_with_expiry returning None -- reads as
+    "not limited"): a Redis hiccup must not blank every hero image on the
+    newspaper. An unattributable request (no X-Real-IP / X-Forwarded-For) is
+    not limited: with no key to bucket on, every such caller would share one
+    counter and starve each other.
+    """
+    ip = client_ip(request.headers)
+    if not ip:
+        return False
+    count = incr_with_expiry(f"{_RATE_KEY_PREFIX}{ip}", window_seconds=_RATE_WINDOW_SECONDS)
+    if count is None:
+        return False
+    return count > settings.img_proxy_rate_limit_per_hour
 
 
 def _cache_key(url: str) -> str:
@@ -60,8 +84,6 @@ def _cache_key(url: str) -> str:
 @lru_cache(maxsize=1)
 def _redis() -> redis.Redis:
     import redis
-
-    from app.core.config import settings
 
     return redis.from_url(settings.redis_url, decode_responses=False)
 
@@ -122,6 +144,7 @@ def _resolve_public_ip(host: str) -> str | None:
             or addr.is_reserved
             or addr.is_multicast
             or addr.is_unspecified
+            or not addr.is_global
         ):
             return None
         ips.append(f"[{addr}]" if addr.version == 6 else str(addr))
@@ -248,6 +271,10 @@ def register_media_routes(app: Router) -> None:
     @app.get("/api/v1/img")
     def proxy_image(request: Request) -> Response:
         # Query params may arrive percent-encoded — decode before parsing.
+        if _image_proxy_rate_limited(request):
+            return json_error_response(
+                429, "rate_limited", "Too many image requests — please try again later"
+            )
         url = unquote((request.query_params.get("url", "") or "").strip())
         if not url:
             return Response(status_code=400, headers={}, description="missing url")

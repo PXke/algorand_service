@@ -120,6 +120,11 @@ class Settings(msgspec.Struct, kw_only=True):
     )
     # None = permissive in APP_ENV dev/test (any Origin). Set false for strict local CORS tests.
     cors_permissive: bool | None = None
+    # Unauthenticated image proxy (GET /api/v1/img). A homepage of cards can
+    # fire dozens of requests, so this is higher than the 120/hour x402 free
+    # reads; still a hard per-IP cap so the SSRF-guarded fetch path cannot be
+    # used as an open relay.
+    img_proxy_rate_limit_per_hour: int = 600
 
     platform_treasury_address: str = ""
     # Suggestions product (P2) is paused; routes are not registered while false.
@@ -183,6 +188,44 @@ class Settings(msgspec.Struct, kw_only=True):
     x402_probe_payers: str = ""
     # ── end probe / self wallets ────────────────────────────────────────────
 
+    # ── Auto-refund on our own product-write failure ────────────────────────
+    # A route can opt into modules/x402/paid_request.run_with_refund: if the
+    # product write raises after payment already settled, the full amount is
+    # sent back to the payer from THIS dedicated wallet, never from
+    # x402_pay_to_address (receive-only, no key held — see above) and never
+    # from kyc_payout_mnemonic (a different fund, a revenue-share payout, not
+    # a refund). Empty = refunds are skipped (logged, the route still returns
+    # an honest "failed, refund pending" response) until configured — same
+    # "empty is inert" convention as kyc_payout_mnemonic.
+    x402_refund_mnemonic: str = ""
+    # Circuit breaker (owner requirement 2026-09-02): every refund costs a
+    # real Algorand transaction fee on top of the refunded amount, so a bug
+    # or an adversary deliberately triggering failures could cheaply drain
+    # this wallet one failed call + one refund-tx-fee at a time. A resource
+    # that crosses this many refund-triggering failures within the window
+    # trips and is refused BEFORE the payment gate (modules/x402/
+    # circuit_breaker.py) until an admin resets it. 5 failures / 10 minutes:
+    # comfortably above a real transient blip (a single flaky downstream
+    # call) but low enough that a drain attempt costs an attacker very
+    # little before being cut off.
+    x402_refund_breaker_max_failures: int = 5
+    x402_refund_breaker_window_seconds: int = 600
+    # Marketplace-wide daily refund ceiling, tracked PER ASSET (asset_id) in
+    # that asset's own atomic units -- not a cross-asset sum, since summing
+    # e.g. USDC and EURQ atomic units directly would be meaningless without
+    # a shared price oracle at refund time, which this path deliberately
+    # does not add (found-in-audit gap 2026-09-02: the per-resource breaker
+    # alone has no ceiling on TOTAL exposure across every refund-wired
+    # resource combined). 100 USDC/day (100_000_000 atomic, 6 decimals) is a
+    # generous multiple of any single resource's own per-window cap at
+    # current prices -- tune down once real refund volume is observed. Past
+    # this, a refund is skipped (not sent, no funds move) and the route
+    # falls into the same honest "refund pending, reconcile by hand"
+    # response an actual send failure produces -- fails CLOSED, same as the
+    # circuit breaker, because this guards money leaving the wallet.
+    x402_refund_daily_budget_atomic: int = 100_000_000
+    # ── end auto-refund ──────────────────────────────────────────────────────
+
     # Know Your Agent (KYA, the x402 challenge's actual product): free wallet
     # enrollment + trust-signal computation, then a paid x402 lookup that
     # splits its fee with the enrolled wallet. The module lives in
@@ -211,8 +254,9 @@ class Settings(msgspec.Struct, kw_only=True):
     # endpoint per wallet and per IP), same Redis incr/expire shape as the
     # other x402 modules, under its own key prefix. Three separate budgets
     # because the two free KYC endpoints cost wildly different things:
-    #   - consent-message is a pure string build, so it gets the same generous
-    #     hourly allowance the other modules' free reads get;
+    #   - consent-message issues a single-use nonce (cheap Redis write) and
+    #     gets the same generous hourly allowance the other modules' free
+    #     reads get;
     #   - enroll fires two outbound indexer requests and a Cassandra write per
     #     hit, so its per-IP allowance is much tighter;
     #   - enroll is additionally limited per WALLET, because the cost that
@@ -220,6 +264,10 @@ class Settings(msgspec.Struct, kw_only=True):
     #     wallet addresses are free to generate. Re-enrolling only refreshes
     #     an existing row's signals, so a handful a day is plenty.
     kyc_consent_rate_limit_per_hour: int = 120
+    # How long a fetched consent-message stays signable. Stored in Redis and
+    # embedded in the signed payload so a captured signature cannot be replayed
+    # indefinitely (the previous message was a static string of wallet + version).
+    kyc_consent_ttl_seconds: int = 300
     kyc_enroll_rate_limit_per_hour: int = 20
     kyc_enroll_wallet_rate_limit_per_day: int = 5
 
@@ -387,6 +435,24 @@ class Settings(msgspec.Struct, kw_only=True):
     # building the by-payer ledger projection credibility.py flags rather than
     # raising this.
     x402_grading_spend_scan_limit: int = 500
+    # Usage-proof-of-payment (owner ask 2026-09-02): every grade submission
+    # must name a payment txid proving the grader actually transacted with
+    # the endpoint being graded, verified independently on-chain via the
+    # public indexer (and, for a URL not listed with us, a live SSRF-guarded
+    # fetch of its own 402 offer to learn its payTo -- see
+    # services/usage_proof.py). This does NOT change credibility weighting
+    # (services/credibility.py is untouched); it is a visible per-grade flag
+    # only. Timeout for the indexer HTTP call.
+    x402_grading_usage_proof_timeout_s: float = 8.0
+    # Policy for when the indexer itself cannot be reached (not "the proof
+    # was wrong" -- that is always a hard 400, this setting cannot soften
+    # it). True (default, matches "no txid, no grade, full stop"): the grade
+    # submission is rejected until the indexer is reachable again, coupling
+    # grading uptime to indexer uptime on purpose -- a grade this module
+    # cannot verify is not stored as if it were. False: an operator escape
+    # hatch for a known indexer outage -- the grade still submits with
+    # usage_verified=False rather than blocking the product outright.
+    x402_grading_usage_proof_required: bool = True
 
     # ── x402 News Engine pay-per-call (GET /x402/news and GET
     # /x402/news/articles/:id both free, GET /x402/news/search paid). See
@@ -408,6 +474,33 @@ class Settings(msgspec.Struct, kw_only=True):
     # listings (CLAUDE.md section 4).
     x402_news_max_results: int = 50
     # ── end x402 News Engine ──
+
+    # ── x402 sandboxed file/tarball scan (roadmap item 18b). See
+    # app/modules/x402_scan/. Prototype/v0: static analysis only (ClamAV,
+    # file-type, entropy, indicator extraction, zip/tar-bomb-safe listing) in
+    # a hardened --network none Docker container, never executes the input.
+    # Disabled by default -- this is a design prototype, not a live product;
+    # flip on only after the host-isolation decision in the module docstring
+    # is made explicitly (which box this container engine runs on).
+    x402_scan_enabled: bool = False
+    x402_scan_price: str = "$0.01"
+    # Hard cap on the bounded download, now streamed straight to disk rather
+    # than buffered in memory (CLAUDE.md section 4: stream remote fetches,
+    # abort past the cap) -- see scan_service._fetch_bounded_to_disk. 1GB,
+    # not "a few GB" as first asked for: going further needs real design
+    # work this prototype hasn't done yet -- per-request disk-quota
+    # accounting under concurrent paid traffic, and benchmarking how
+    # ClamAV's own scan time scales at that size against
+    # x402_scan_sandbox_timeout_s below. Flagged as a follow-up, not
+    # guessed at. Deliberately above the sandbox's own archive
+    # MAX_EXTRACT_BYTES (200MB) -- a bigger download whose declared archive
+    # contents exceed that just trips the zip/tar-bomb guard and reports
+    # unverified, which is the safe default, not a bug.
+    x402_scan_max_download_bytes: int = 1024 * 1024 * 1024
+    x402_scan_download_timeout_s: int = 60
+    x402_scan_sandbox_timeout_s: int = 90
+    x402_scan_rate_limit_per_hour: int = 30
+    # ── end x402 file/tarball scan ──
 
     # x402 catalog (GET /x402, free): the machine-readable index of every
     # x402 product route currently registered. See app/modules/x402_catalog/.

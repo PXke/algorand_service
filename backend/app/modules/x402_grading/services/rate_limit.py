@@ -10,6 +10,7 @@ from app.core.request_headers import client_ip
 _KEY_PREFIX = "algorand:x402:grading_rl:"
 _SUMMARY_KEY_PREFIX = "algorand:x402:grading_summary_rl:"
 _TOP_KEY_PREFIX = "algorand:x402:grading_top_rl:"
+_USAGE_PROOF_KEY_PREFIX = "algorand:x402:grading_usage_proof_rl:"
 _WINDOW_SECONDS = 3600
 
 
@@ -46,6 +47,21 @@ def grading_top_rate_limited(request: Request) -> bool:
     buys 120 leaderboards an hour is not the case this exists for.
     """
     return _over_budget(request, prefix=_TOP_KEY_PREFIX)
+
+
+def grading_usage_proof_rate_limited(request: Request) -> bool:
+    """Return True when this IP has exceeded the hourly usage-proof-check budget.
+
+    The proof check (indexer call, or for an unlisted URL a live SSRF-guarded
+    fetch of the target) runs BEFORE the grade-submission payment gate, same
+    as the leaderboard's pre-gate directory/grade scans -- a malformed or
+    unverifiable txid must be a free 400, not a paid failure, which makes
+    this pre-gate work a free-to-trigger outbound-network surface unless it
+    is budgeted like every other free read. Own key prefix, same hourly
+    budget setting as the rest of grading's free reads, fails open like the
+    others (a Redis hiccup must not block a paid write path entirely).
+    """
+    return _over_budget(request, prefix=_USAGE_PROOF_KEY_PREFIX)
 
 
 def grading_index_rate_limited(request: Request) -> bool:

@@ -15,8 +15,10 @@ from app.core.http import Request, Response, Router
 from app.core.http_errors import json_error_from_platform, json_error_response
 from app.core.query_params import query_param
 from app.modules.admin.auth import require_admin_wallet
+from app.modules.x402 import circuit_breaker
 from app.modules.x402.discovery import describe_json_endpoint
-from app.modules.x402.paid_request import mark_fulfilled, require_paid_request
+from app.modules.x402.guard import PaymentResult
+from app.modules.x402.paid_request import mark_fulfilled, require_paid_request, run_with_refund
 from app.modules.x402.promo import promo_request_params
 from app.modules.x402_directory.models.domain import (
     CATEGORY_TAG_PREFIX,
@@ -26,6 +28,7 @@ from app.modules.x402_directory.models.domain import (
     StoredProbe,
 )
 from app.modules.x402_directory.services.listing_service import (
+    MAX_CONTACT_LENGTH,
     MAX_SCHEMA_JSON_BYTES,
     MAX_TAG_LENGTH,
     ListingService,
@@ -41,6 +44,9 @@ from app.schemas import X402ListingRenewRequest, X402ListingRequest
 # singleton shared by every route.
 listing_service = ListingService()
 
+_LIST_RESOURCE = "x402-directory-list"
+_RENEW_RESOURCE = "x402-directory-renew"
+
 _LISTING_EXAMPLE = {
     "url": "https://api.example.com/v1/quote",
     "price": "$0.01",
@@ -48,6 +54,8 @@ _LISTING_EXAMPLE = {
     "assets": ["USDC"],
     "tags": ["fx", "market-data"],
     "category": "finance",
+    "reimburses": False,
+    "contact": "support@example.com",
 }
 
 # What a listing looks like on the wire, for the discovery output examples
@@ -73,6 +81,10 @@ def _listing_json(item: StoredListing) -> dict:
         "assets": item.assets,
         "tags": item.tags,
         "category": item.category,
+        # Self-declared (104), never verified by us for a third-party
+        # listing -- see StoredListing's own field comments.
+        "reimburses": item.reimburses,
+        "contact": item.contact,
         "schema": serialization.decode(item.schema_json, dict) if item.schema_json else None,
         "term_end_epoch": item.term_end_epoch,
         "created_at_epoch": item.created_at_epoch,
@@ -112,10 +124,27 @@ def x402_list(request: Request) -> Response:
     After the gate, the one remaining way to fail is the ownership check in
     listing_service.create() — a relist attempt against a URL another payer
     owns, which cannot be evaluated before the gate because the payer's
-    identity does not exist until the payment settles. That is the only
-    settled-payment-yields-a-4xx path on this route, and it is deliberate; see
-    create()'s docstring.
+    identity does not exist until the payment settles. This raises
+    DirectoryError, a PlatformError subclass, so run_with_refund's own
+    contract (2026-09-02 retrofit; see its docstring) treats it as
+    "payment settles but is refused" and returns the 403/409 directly --
+    NEVER a refund, and never counted against the circuit breaker. That is
+    deliberate: the payer fully controls whether they trigger this (paying
+    to relist a URL they know they don't own), so refunding it would make
+    it a free, repeatable way to pump the breaker -- exactly the
+    found-in-audit gap (2026-09-02) this route briefly had before
+    run_with_refund grew its PlatformError exemption. The promo branch
+    below settles nothing either way, so it keeps its own direct-4xx path
+    regardless.
     """
+    if circuit_breaker.is_tripped(_LIST_RESOURCE):
+        return json_error_response(
+            503,
+            "temporarily_disabled",
+            "This endpoint is temporarily disabled after an elevated failure rate. "
+            "Try again later.",
+        )
+
     try:
         payload = serialization.decode(request.body, X402ListingRequest)
     except serialization.DecodeError as exc:
@@ -134,7 +163,7 @@ def x402_list(request: Request) -> Response:
     result = require_paid_request(
         request,
         price=settings.x402_listing_price,
-        resource="x402-directory-list",
+        resource=_LIST_RESOURCE,
         promo_code=promo_code,
         promo_wallet=promo_wallet,
         # Reaches the payer as the 402's resource.description, before they
@@ -150,7 +179,13 @@ def x402_list(request: Request) -> Response:
             f"lowercased and are what `?tag=` matches on; tags starting with "
             f"`{CATEGORY_TAG_PREFIX}` are reserved. Optional `category` is one of "
             f"{', '.join(LISTING_CATEGORIES)} (default other). Optional `schema` must "
-            f"serialize to at most {MAX_SCHEMA_JSON_BYTES} bytes."
+            f"serialize to at most {MAX_SCHEMA_JSON_BYTES} bytes. Optional `reimburses` "
+            f"(default false) is your own SELF-DECLARED, UNVERIFIED claim that you refund "
+            f"a payer when your endpoint fails to deliver -- we do not check this for a "
+            f"third-party listing, it is exactly as trustworthy as you are. Optional "
+            f"`contact` (at most {MAX_CONTACT_LENGTH} characters) is a point of contact "
+            f"for issues. Both are set only when you list or relist -- POST "
+            f"/api/v1/x402/list/renew changes nothing about the listing but its term."
         ),
         extensions=describe_json_endpoint(
             # POST carries its input as a JSON body, so this must declare a
@@ -193,6 +228,16 @@ def x402_list(request: Request) -> Response:
                     # 4 KiB cap enforced by encode_schema() above cannot be
                     # declared here; it is stated in the description instead.
                     "schema": {"type": "object"},
+                    "reimburses": {
+                        "type": "boolean",
+                        "default": False,
+                        "description": (
+                            "Self-declared, unverified: do you refund a payer when your "
+                            "endpoint fails to deliver? Not checked by us for a "
+                            "third-party listing."
+                        ),
+                    },
+                    "contact": {"type": "string", "maxLength": MAX_CONTACT_LENGTH},
                 },
                 "required": ["url", "price"],
             },
@@ -206,44 +251,94 @@ def x402_list(request: Request) -> Response:
     if result.error:
         return result.error
 
-    try:
-        listing = listing_service.create(
+    if result.is_promo:
+        # Nothing settled, so there is nothing for run_with_refund to
+        # refund -- keep the original direct-4xx-no-refund behavior for the
+        # one reachable failure (an ownership conflict on the relisted url).
+        try:
+            outcome = _list_product_write(
+                normalized_url=normalized_url,
+                payload=payload,
+                tags=tags,
+                schema_json=schema_json,
+                result=result,
+                promo_wallet=promo_wallet,
+                category=category,
+            )
+        except DirectoryError as exc:
+            return json_error_from_platform(exc)
+        return Response(
+            status_code=200,
+            headers={"Content-Type": "application/json", **result.settlement_headers},
+            description=serialization.dumps(
+                {**outcome, "settlement_tx_id": "", "term_days": term_days, "via": "promo"}
+            ),
+        )
+
+    outcome = run_with_refund(
+        result,
+        resource=_LIST_RESOURCE,
+        product_write=lambda: _list_product_write(
             normalized_url=normalized_url,
-            price=payload.price,
-            description=payload.description,
-            assets=payload.assets,
+            payload=payload,
             tags=tags,
             schema_json=schema_json,
-            settlement_tx_id=result.payment_txid or "",
-            # A promo redemption settles nothing, so result.payer is empty —
-            # attribute the listing to the caller's own claimed wallet
-            # instead (already validated in promo.attempt_promo_redemption).
-            payer=result.payer or promo_wallet,
+            result=result,
+            promo_wallet=promo_wallet,
             category=category,
-        )
-    except DirectoryError as exc:
-        # Reachable now (migration 094): a relist attempt by a different
-        # payer than the current owner is refused here, payment already
-        # taken — see listing_service.create()'s ownership check. That check
-        # is the ONLY reachable raiser on this side of the gate: the URL,
-        # the schema, the category and the tags were all validated above,
-        # before it. A new validation rule belongs there too, never here.
-        return json_error_from_platform(exc)
+        ),
+    )
+    if isinstance(outcome, Response):
+        return outcome
 
-    if not result.is_promo:
-        mark_fulfilled(result.payment_txid, resource="x402-directory-list")
+    mark_fulfilled(result.payment_txid, resource=_LIST_RESOURCE)
     return Response(
         status_code=200,
         headers={"Content-Type": "application/json", **result.settlement_headers},
         description=serialization.dumps(
-            {
-                "listing": _listing_json(listing),
-                "settlement_tx_id": result.payment_txid or "",
-                "term_days": term_days,
-                **({"via": "promo"} if result.is_promo else {}),
-            }
+            {**outcome, "settlement_tx_id": result.payment_txid or "", "term_days": term_days}
         ),
     )
+
+
+def _list_product_write(
+    *,
+    normalized_url: str,
+    payload: X402ListingRequest,
+    tags: list[str],
+    schema_json: str,
+    result: PaymentResult,
+    promo_wallet: str,
+    category: str,
+) -> dict:
+    """The product write x402_list protects (via run_with_refund for a real payment, direct for promo): create the listing.
+
+    Returns a plain dict, never a Response -- see _ping_product_write's own
+    docstring in x402_catalog/api/routes.py for why a successful product
+    write must never itself return a Response (the isinstance(outcome,
+    Response) check both callers above rely on would become ambiguous).
+    Raises DirectoryError on the one reachable failure: a relist attempt by
+    a wallet that does not own the url (listing_service.create()'s ownership
+    check) -- the URL, schema, category and tags were already validated
+    before the gate, so nothing else here can raise.
+    """
+    listing = listing_service.create(
+        normalized_url=normalized_url,
+        price=payload.price,
+        description=payload.description,
+        assets=payload.assets,
+        tags=tags,
+        schema_json=schema_json,
+        settlement_tx_id=result.payment_txid or "",
+        # A promo redemption settles nothing, so result.payer is empty —
+        # attribute the listing to the caller's own claimed wallet instead
+        # (already validated in promo.attempt_promo_redemption).
+        payer=result.payer or promo_wallet,
+        category=category,
+        reimburses=payload.reimburses,
+        contact=payload.contact,
+    )
+    return {"listing": _listing_json(listing)}
 
 
 def x402_renew(request: Request) -> Response:
@@ -260,7 +355,26 @@ def x402_renew(request: Request) -> Response:
     and the board's renew, and the 402 offer says so before the payer
     commits. See listing_service.renew() for the term arithmetic and what a
     renewal does and does not change.
+
+    For a REAL payment (not promo), the ownership refusal still goes
+    through run_with_refund (2026-09-02 retrofit) like x402_list's
+    identical case -- but DirectoryError is a PlatformError, so
+    run_with_refund's own contract treats this exactly as documented above:
+    payment kept, receipt served, NEVER a refund and never counted against
+    the circuit breaker (see run_with_refund's own docstring, and
+    x402_list's docstring for why refunding a fully caller-controlled
+    rejection would have been a free way to pump the breaker). A promo
+    redemption never settles a real payment, so it keeps its own
+    direct-4xx path regardless -- see the promo branch below.
     """
+    if circuit_breaker.is_tripped(_RENEW_RESOURCE):
+        return json_error_response(
+            503,
+            "temporarily_disabled",
+            "This endpoint is temporarily disabled after an elevated failure rate. "
+            "Try again later.",
+        )
+
     try:
         payload = serialization.decode(request.body, X402ListingRenewRequest)
     except serialization.DecodeError as exc:
@@ -277,7 +391,7 @@ def x402_renew(request: Request) -> Response:
     result = require_paid_request(
         request,
         price=settings.x402_listing_price,
-        resource="x402-directory-renew",
+        resource=_RENEW_RESOURCE,
         promo_code=promo_code,
         promo_wallet=promo_wallet,
         description=(
@@ -307,38 +421,80 @@ def x402_renew(request: Request) -> Response:
     if result.error:
         return result.error
 
-    try:
-        renewed = listing_service.renew(
-            normalized_url=normalized_url,
-            # See x402_list's identical fallback: a promo redemption settles
-            # nothing, so result.payer is empty on a promo result.
-            payer=result.payer or promo_wallet,
-            settlement_tx_id=result.payment_txid or "",
-        )
-    except DirectoryError as exc:
-        # The ownership refusal (or, only if the listing was admin-deleted
-        # between the pre-gate lookup and now, not_found): payment taken,
-        # nothing changed. The settlement headers are still served so the
-        # payer has their receipt.
+    if result.is_promo:
+        # Nothing settled, so there is nothing for run_with_refund to
+        # refund -- keep the original direct-4xx-no-refund behavior, with
+        # the settlement headers still attached so the payer has a receipt.
+        try:
+            renewed = _renew_product_write(
+                normalized_url=normalized_url, result=result, promo_wallet=promo_wallet
+            )
+        except DirectoryError as exc:
+            return Response(
+                status_code=exc.http_status,
+                headers={"Content-Type": "application/json", **result.settlement_headers},
+                description=serialization.dumps(
+                    {"error": {"code": exc.code, "message": exc.message}}
+                ),
+            )
         return Response(
-            status_code=exc.http_status,
+            status_code=200,
             headers={"Content-Type": "application/json", **result.settlement_headers},
-            description=serialization.dumps({"error": {"code": exc.code, "message": exc.message}}),
+            description=serialization.dumps(
+                {
+                    "listing": _listing_json(renewed),
+                    "settlement_tx_id": "",
+                    "term_days": term_days,
+                    "via": "promo",
+                }
+            ),
         )
 
-    if not result.is_promo:
-        mark_fulfilled(result.payment_txid, resource="x402-directory-renew")
+    outcome = run_with_refund(
+        result,
+        resource=_RENEW_RESOURCE,
+        product_write=lambda: _renew_product_write(
+            normalized_url=normalized_url, result=result, promo_wallet=promo_wallet
+        ),
+    )
+    if isinstance(outcome, Response):
+        return outcome
+
+    mark_fulfilled(result.payment_txid, resource=_RENEW_RESOURCE)
     return Response(
         status_code=200,
         headers={"Content-Type": "application/json", **result.settlement_headers},
         description=serialization.dumps(
             {
-                "listing": _listing_json(renewed),
+                "listing": _listing_json(outcome),
                 "settlement_tx_id": result.payment_txid or "",
                 "term_days": term_days,
-                **({"via": "promo"} if result.is_promo else {}),
             }
         ),
+    )
+
+
+def _renew_product_write(
+    *, normalized_url: str, result: PaymentResult, promo_wallet: str
+) -> StoredListing:
+    """The product write x402_renew protects (via run_with_refund for a real payment, direct for promo): extend the listing's term.
+
+    Returns the renewed StoredListing directly, never a Response -- unlike
+    _list_product_write, the caller wraps this return value into the final
+    JSON itself (the renew response shape is simpler, just the listing), so
+    there is no dict/Response ambiguity to guard against here: a StoredListing
+    is never mistaken for a Response by the isinstance check both callers
+    above rely on. Raises DirectoryError on the one reachable failure: a
+    renewal attempt by a wallet that does not own the url
+    (listing_service.renew()'s ownership check) -- the url's existence was
+    already confirmed before the gate, so nothing else here can raise.
+    """
+    return listing_service.renew(
+        normalized_url=normalized_url,
+        # See x402_list's identical fallback: a promo redemption settles
+        # nothing, so result.payer is empty on a promo result.
+        payer=result.payer or promo_wallet,
+        settlement_tx_id=result.payment_txid or "",
     )
 
 

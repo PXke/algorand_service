@@ -21,11 +21,13 @@ def http_status_for_code(code: str, *, default: int = 400) -> int:
         "invalid_signature_or_nonce": 401,
         "missing_session_token": 401,
         "invalid_or_expired_session": 401,
+        "invalid_or_expired_consent": 401,
         "not_found": 404,
         "duplicate_txid": 409,
         "duplicate_upvote": 409,
         "listing_owned_by_another_payer": 403,
         "rate_limited": 429,
         "treasury_not_configured": 503,
+        "consent_store_unavailable": 503,
     }
     return mapping.get(code, default)
