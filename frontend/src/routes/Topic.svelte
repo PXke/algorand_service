@@ -161,6 +161,14 @@
     color: var(--accent);
     text-decoration: none;
   }
+  /* A lone mono word under the hub title read as a stray stamp, not a way
+     back — the arrow marks it as a route, same affordance as prev/next. */
+  .folio a::before {
+    content: '← ';
+  }
+  :global([dir='rtl']) .folio a::before {
+    content: '→ ';
+  }
   .folio a:hover {
     text-decoration: underline;
     text-underline-offset: 2px;

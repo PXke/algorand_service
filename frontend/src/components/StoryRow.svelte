@@ -228,7 +228,8 @@
     letter-spacing: 0.3px;
     text-transform: uppercase;
     padding: 1.5px 7px;
-    border-radius: 2px;
+    /* Square, like every other stamp — LeadStory and Article set 0. */
+    border-radius: 0;
     background: var(--accent);
     color: var(--surface);
   }

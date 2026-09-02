@@ -211,30 +211,32 @@
   </nav>
 
   {#if tab === 'directory'}
-    <label class="find">
-      <span class="sr-only">{t($messages, 'x402TagFilter')}</span>
-      <span class="query-shell">
-        <span class="query-prompt" aria-hidden="true">#</span>
-        <input
-          type="search"
-          bind:value={tag}
-          placeholder={t($messages, 'x402TagFilter')}
-          autocomplete="off"
-          spellcheck="false"
-        />
-      </span>
-    </label>
-    <label class="find">
-      <span class="sr-only">{t($messages, 'x402CategoryFilter')}</span>
-      <span class="query-shell">
-        <select bind:value={category}>
-          <option value="">{t($messages, 'x402CategoryFilter')}</option>
-          {#each X402_CATEGORIES as c (c)}
-            <option value={c}>{c}</option>
-          {/each}
-        </select>
-      </span>
-    </label>
+    <div class="filters">
+      <label class="find find-tag">
+        <span class="sr-only">{t($messages, 'x402TagFilter')}</span>
+        <span class="query-shell">
+          <span class="query-prompt" aria-hidden="true">#</span>
+          <input
+            type="search"
+            bind:value={tag}
+            placeholder={t($messages, 'x402TagFilter')}
+            autocomplete="off"
+            spellcheck="false"
+          />
+        </span>
+      </label>
+      <label class="find find-category">
+        <span class="sr-only">{t($messages, 'x402CategoryFilter')}</span>
+        <span class="query-shell">
+          <select bind:value={category}>
+            <option value="">{t($messages, 'x402CategoryFilter')}</option>
+            {#each X402_CATEGORIES as c (c)}
+              <option value={c}>{c}</option>
+            {/each}
+          </select>
+        </span>
+      </label>
+    </div>
   {/if}
 
   {#if loading}
@@ -503,8 +505,18 @@
     color: var(--on-surface);
     word-break: break-all;
   }
-  .curl-label {
-    margin-top: 14px;
+  /* `.agents p` (serif body, one class + one type) outranked the bare
+     `.curl-label` class above, so these sub-heads rendered as bold serif
+     paragraphs instead of the mono stamps every other label on this page
+     uses. Restate the machine voice at higher specificity. */
+  .agents p.curl-label {
+    margin: 14px 0 0;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.8px;
+    text-transform: uppercase;
+    color: var(--on-surface);
   }
   .curl {
     margin: 6px 0 0;
@@ -549,9 +561,22 @@
     height: 2px;
     background: var(--accent);
   }
+  /* Tag and category share one row — stacked, the two lone 420px boxes read
+     as a form, not a query bar. */
+  .filters {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+  }
   .find {
     display: block;
+  }
+  .find-tag {
+    flex: 1 1 240px;
     max-width: 420px;
+  }
+  .find-category {
+    flex: 0 1 240px;
   }
   .query-shell {
     display: flex;
@@ -573,7 +598,8 @@
     color: var(--accent);
     line-height: 1;
   }
-  .find input {
+  .find input,
+  .find select {
     flex: 1;
     min-width: 0;
     border: 0;
@@ -583,6 +609,10 @@
     font-size: 13px;
     padding: 10px 0;
     outline: none;
+  }
+  .find select {
+    cursor: pointer;
+    align-self: stretch;
   }
   .sr-only {
     position: absolute;

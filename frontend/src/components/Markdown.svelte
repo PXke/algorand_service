@@ -577,10 +577,29 @@
      disclosure affordance itself needs new rules here. */
   .md :global(.cite-summary) {
     cursor: pointer;
+    /* No native marker: the heading inside is a block element, so the
+       list-item marker painted alone on an empty first line above it — a
+       stray floating triangle. The disclosure glyph is drawn inline at the
+       start of the heading instead (below). */
+    list-style: none;
   }
-  .md :global(.cite-summary)::marker {
+  .md :global(.cite-summary::-webkit-details-marker) {
+    display: none;
+  }
+  .md :global(.cite-summary :is(h1, h2, h3, h4))::before {
+    content: '▸';
+    display: inline-block;
+    margin-inline-end: 12px;
+    font-size: 0.55em;
+    line-height: 1;
     color: var(--muted);
-    font-size: 0.7em;
+    vertical-align: 12%;
+  }
+  :global([dir='rtl']) .md :global(.cite-summary :is(h1, h2, h3, h4))::before {
+    content: '◂';
+  }
+  .md :global(details.cite-block[open] .cite-summary :is(h1, h2, h3, h4))::before {
+    content: '▾';
   }
   .md :global(.cite-summary:hover h2),
   .md :global(.cite-summary:hover h3) {
