@@ -13,7 +13,7 @@ from typing import Any
 from urllib.parse import urlparse
 from uuid import UUID
 
-from app.core.config import LLM_MAX_SOURCE_CHARS
+from app.core.config import ADMIN_SOURCE_PROMPT_MAX_CHARS, LLM_MAX_SOURCE_CHARS
 from app.modules.ai.llm_openai_compatible import MistralProvider, OpenAICompatibleProvider
 from app.modules.ai.llm_provider import LLMCreditError, LLMError, LLMProvider
 from app.modules.ai.llm_purpose_router import (
@@ -27,6 +27,7 @@ from app.modules.ai.reference_block import append_reference_block
 from app.modules.ai.session_register import SessionRegister, SessionRegisterCassandra
 from app.modules.ai.story_spike import StorySpikedError
 from app.modules.metrics.price_metrics_store import load_mistral_context
+from app.modules.newspaper.admin_source_store import AdminSource
 from app.modules.newspaper.weekly_digest import WeeklyDigestContext
 
 logger = logging.getLogger(__name__)
@@ -169,6 +170,32 @@ def _writing_guidelines(today: str) -> str:
         "dollars' lets the reader draw that conclusion themselves (flagged 2026-08-06: "
         "otherwise-fair, well-sourced criticism read as a bit rude because of exactly "
         "one line like this).\n"
+        "- WEIGH GOOD FAITH, NOT JUST FINDINGS: your research will often surface "
+        "both genuine signs of good faith (a claimed mechanism independently "
+        "verified to work as designed, transparency about a limitation, activity "
+        "consistent with ordinary early-stage testing, a disclosed risk) and "
+        "genuine concerns (something unproven, something that doesn't add up, "
+        "something withheld). Weigh both, and let the fuller picture — not just "
+        "the single most dramatic fact — set the piece's overall frame and what "
+        "comes first; don't open on the sharpest undercut just because it makes "
+        "the stronger lede. This does not soften a real problem (state it "
+        "plainly, in its own section, once, per NO REPETITION below) — it "
+        "changes the weight and order, not what gets said. The line that "
+        "actually separates good faith from bad faith is DECEPTION, not merely "
+        "an unflattering fact: an actor being quiet about something ordinary "
+        "(e.g. testing its own product before real users arrive) is not the "
+        "same as that same activity being presented TO OTHERS as something it "
+        "isn't (e.g. displayed to visitors as outside validation, with no "
+        "disclosure) — the second is a distinct, still-reportable finding in "
+        "its own right, and should be named as exactly that; it is not license "
+        "to read every ordinary or unflattering fact as bad faith, and it is "
+        "not grounds to undersell a genuine good-faith signal you also found. "
+        "Flagged 2026-09-02: a crowdfunding platform's contract-enforced refund "
+        "fired exactly as designed — real evidence of good faith — but a first "
+        "draft opened on an unrelated finding before crediting it, and treated "
+        "an ordinary, undisplayed self-funded test the same as a self-funded "
+        "total that WAS shown to visitors as live backer momentum, when only "
+        "the latter was actually deceptive.\n"
         "- NO REPETITION, ANYWHERE (the one rule every other repetition note in "
         "these instructions points back to — this is the single source of truth): "
         "state each specific fact, number, or judgment ONCE, in the single section "
@@ -2547,6 +2574,68 @@ def _parse_article_fields(payload: dict[str, Any]) -> LLMArticleFields:
         broken_link_hold_reason=str(payload.get("_broken_link_hold_reason") or ""),
         regrade_unconfirmed_hold_reason=str(payload.get("_regrade_unconfirmed_hold_reason") or ""),
     )
+
+
+def _admin_source_prompt_block(admin_sources: list[AdminSource] | None) -> str:
+    """The "## OWNER-SUPPLIED SOURCE MATERIAL" block appended after scraped source material (design doc section 3). Clipped as a WHOLE block to ADMIN_SOURCE_PROMPT_MAX_CHARS -- separate from LLM_MAX_SOURCE_CHARS, so owner material never competes with the scrape for space. Empty string when there are no active sources (the normal, silent no-sources case)."""
+    if not admin_sources:
+        return ""
+    sections = "\n\n".join(
+        f"### {s.label} (added {s.added_at.date().isoformat() if s.added_at else 'unknown date'})\n"
+        f"{s.content}"
+        for s in admin_sources
+    )
+    block = (
+        "\n\n## OWNER-SUPPLIED SOURCE MATERIAL (exclusive to this newspaper)\n"
+        "The publisher personally obtained the material below; it is not on the "
+        "public web. Treat it as a primary source. Attribute claims drawn from it "
+        'to its stated provenance (e.g. "told PXke Algorand in an interview"), '
+        "never to the service's website. Judge its age against today's date.\n\n"
+        f"{sections}"
+    )
+    return _clip(block, ADMIN_SOURCE_PROMPT_MAX_CHARS)
+
+
+def _seed_admin_source_trace(trace: list[dict], admin_sources: list[AdminSource] | None) -> None:
+    """Append one synthetic ``admin_supplied_source`` trace entry per source, BEFORE the research loop starts, chunked at INVESTIGATION_RESULT_MAX_CHARS with ``part N/M`` markers in ``arguments`` (design doc section 3).
+
+    This is what lets a figure the writer takes from the interview become a
+    grounded anchor for ``numeric_entailment_score`` instead of being flagged
+    as fabricated (design doc section 0b) -- seeding the live session
+    ``trace`` list gets this stored via the normal
+    ``_record_compose_telemetry`` -> ``store_investigation_findings`` path
+    for free, with zero gatekeeper changes.
+
+    The tool name ``admin_supplied_source`` is reserved and must never be a
+    real writer tool name: no completeness rule
+    (``gatekeeper/completeness.py``) accepts it, on purpose (design doc
+    section 0a) -- this is honestly-labeled owner-pasted text, never a forged
+    stand-in for a verification tool actually running.
+    """
+    if not admin_sources:
+        return
+    from app.core.config import INVESTIGATION_RESULT_MAX_CHARS
+
+    for source in admin_sources:
+        content = source.content or ""
+        chunks = [
+            content[i : i + INVESTIGATION_RESULT_MAX_CHARS]
+            for i in range(0, len(content), INVESTIGATION_RESULT_MAX_CHARS)
+        ] or [""]
+        total = len(chunks)
+        for i, chunk in enumerate(chunks, start=1):
+            trace.append(
+                {
+                    "tool": "admin_supplied_source",
+                    "arguments": {
+                        "label": source.label,
+                        "added_at": source.added_at.isoformat() if source.added_at else "",
+                        "attribution_url": source.attribution_url,
+                        "part": f"{i}/{total}",
+                    },
+                    "result": {"text": chunk},
+                }
+            )
 
 
 def compose_scrape_article(
