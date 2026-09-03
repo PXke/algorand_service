@@ -2940,3 +2940,85 @@ def test_every_s0_s1_write_route_skips_mark_fulfilled_on_promo(
 
     assert response.status_code == 200
     assert mark_fulfilled_calls == []
+
+
+# --------------------------------------------------------------------------- #
+# S2 promo wiring: the exact same gap as the S0/S1 fix above, but for
+# report/case-vote specifically -- caught live 2026-09-03 (minutes after
+# turning x402_social_moderation_enabled on for the first time): the
+# earlier fix only covered the 7 S0/S1 routes, deliberately skipping
+# report/case-vote since S2 was still gated off at the time. Once flipped
+# on, a real promo=LAUNCH1000-REPORT attempt fell straight through to a
+# real payment demand, same symptom as the original S0/S1 bug.
+# --------------------------------------------------------------------------- #
+@pytest.mark.usefixtures("fake_redis")
+def test_report_create_forwards_promo_params(
+    store: InMemorySocialStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """x402_social_report_create must pass ?promo=/?promo_wallet= into require_paid_request."""
+    ms = _moderation_service(store)
+    monkeypatch.setattr(social_routes, "moderation_service", ms)
+    _register(store, _REPORTER)
+    _register(store, _OTHER_PAYER)
+
+    captured: dict = {}
+
+    def _spy_require_paid_request(*_a: object, **kwargs: object) -> x402_guard.PaymentResult:
+        captured.update(kwargs)
+        return _settled_result(payer=_REPORTER, txid="TX-R")
+
+    monkeypatch.setattr(social_routes, "require_paid_request", _spy_require_paid_request)
+    monkeypatch.setattr(social_routes, "mark_fulfilled", lambda *_a, **_kw: None)
+
+    social_routes.x402_social_report_create(
+        _request(
+            body=json.dumps(
+                {"target_type": "agent", "target_id": _OTHER_PAYER, "category": "spam"}
+            ).encode(),
+            query={"promo": "LAUNCH1000-TEST", "promo_wallet": _REPORTER},
+            path="/api/v1/x402/social/reports",
+        )
+    )
+
+    assert captured.get("promo_code") == "LAUNCH1000-TEST"
+    assert captured.get("promo_wallet") == _REPORTER
+
+
+@pytest.mark.usefixtures("fake_redis")
+def test_case_vote_forwards_promo_params(
+    store: InMemorySocialStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """x402_social_case_vote must pass ?promo=/?promo_wallet= into require_paid_request."""
+    ms = _moderation_service(store)
+    monkeypatch.setattr(social_routes, "moderation_service", ms)
+    _register(store, _REPORTER)
+    _register(store, _OTHER_PAYER)
+    case = ms.open_report(
+        reporter=_REPORTER,
+        target_type="agent",
+        target_id=_OTHER_PAYER,
+        category="spam",
+        note="",
+        settlement_tx_id="TX-R1",
+    )
+
+    captured: dict = {}
+
+    def _spy_require_paid_request(*_a: object, **kwargs: object) -> x402_guard.PaymentResult:
+        captured.update(kwargs)
+        return _settled_result(payer=_PAYER, txid="TX-V")
+
+    monkeypatch.setattr(social_routes, "require_paid_request", _spy_require_paid_request)
+    monkeypatch.setattr(social_routes, "mark_fulfilled", lambda *_a, **_kw: None)
+
+    social_routes.x402_social_case_vote(
+        _request(
+            body=b'{"verdict": "uphold"}',
+            query={"promo": "LAUNCH1000-TEST", "promo_wallet": _PAYER},
+            path_params={"case_id": case.case_id},
+            path=f"/api/v1/x402/social/cases/{case.case_id}/vote",
+        )
+    )
+
+    assert captured.get("promo_code") == "LAUNCH1000-TEST"
+    assert captured.get("promo_wallet") == _PAYER

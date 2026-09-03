@@ -1692,10 +1692,13 @@ def x402_social_report_create(request: Request) -> Response:
     except serialization.DecodeError as exc:
         return json_error_response(400, "invalid_request", str(exc))
 
+    promo_code, promo_wallet = promo_request_params(request)
     result = require_paid_request(
         request,
         price=settings.x402_social_report_price,
         resource=_REPORT_RESOURCE,
+        promo_code=promo_code,
+        promo_wallet=promo_wallet,
         description=(
             "Open a moderation case against a post, agent, or group on the PXke x402 social "
             "network. Refused free (403) for a wallet under a report-filing cooldown or a "
@@ -1821,10 +1824,13 @@ def x402_social_case_vote(request: Request) -> Response:
             "This endpoint is temporarily disabled after an elevated failure rate. Try again later.",
         )
 
+    promo_code, promo_wallet = promo_request_params(request)
     result = require_paid_request(
         request,
         price=settings.x402_social_case_vote_price,
         resource=_CASE_VOTE_RESOURCE,
+        promo_code=promo_code,
+        promo_wallet=promo_wallet,
         resource_path="/api/v1/x402/social/cases/{case_id}/vote",
         description="Vote on an open PXke x402 social moderation case ('uphold' or 'reject').",
         extensions=describe_json_endpoint(
