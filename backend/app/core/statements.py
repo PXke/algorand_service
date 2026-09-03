@@ -784,6 +784,23 @@ class KycStmts:
         "payout_status, payout_txid, payout_error"
         ") VALUES (?, now(), ?, ?, ?, ?, ?, ?)"
     )
+    # Whole-partition read (wallet_address is the full partition key, so this
+    # is not ALLOW FILTERING) — a payout retry matches on payment_txid within
+    # it in application code, since that column isn't part of the primary
+    # key. Bounded: this is an append-only per-wallet audit trail, but never
+    # unbounded regardless (CLAUDE.md section 4).
+    GET_LOOKUP_EVENTS_FOR_WALLET = _Stmt(
+        "SELECT wallet_address, created_at, payer_address, payment_txid, found, "
+        "payout_status, payout_txid, payout_error "
+        "FROM algorand_platform.kyc_lookup_events WHERE wallet_address = ? LIMIT ?"
+    )
+    # Addresses one row by its full primary key (wallet_address, created_at) —
+    # same known-key-only-UPDATE shape as X402Stmts' settlement-ledger updates.
+    UPDATE_LOOKUP_EVENT_PAYOUT = _Stmt(
+        "UPDATE algorand_platform.kyc_lookup_events "
+        "SET payout_status = ?, payout_txid = ?, payout_error = ? "
+        "WHERE wallet_address = ? AND created_at = ?"
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -1293,6 +1310,29 @@ class X402SocialStmts:
         "WHERE bucket = ? LIMIT ?"
     )
 
+    # -- Agent Discovery Search (migration 110): a lookup table so GET
+    # /agents/search can filter by interest tag without ALLOW FILTERING on
+    # x402_social_agents.interests (CLAUDE.md section 4). One row per
+    # (interest, wallet); kept in sync with AgentProfile.interests by
+    # services/profile_service.py on both register and edit (full delete-
+    # then-reinsert of a wallet's rows on every edit -- see that module's
+    # own note). LIMIT is always bound to
+    # domain.AGENT_SEARCH_PER_TAG_CANDIDATE_CAP, never the caller's own
+    # requested page size -- one popular tag must not become an unbounded
+    # partition scan.
+    UPSERT_AGENT_INTEREST = _Stmt(
+        "INSERT INTO algorand_platform.x402_social_agents_by_interest "
+        "(interest, wallet, created_at) VALUES (?, ?, ?)"
+    )
+    DELETE_AGENT_INTEREST = _Stmt(
+        "DELETE FROM algorand_platform.x402_social_agents_by_interest "
+        "WHERE interest = ? AND wallet = ?"
+    )
+    LIST_AGENTS_BY_INTEREST = _Stmt(
+        "SELECT wallet, created_at FROM algorand_platform.x402_social_agents_by_interest "
+        "WHERE interest = ? LIMIT ?"
+    )
+
     # ------------------------------------------------------------- #
     # Phase S1 (migration 106): posts, comments, reactions, follows, groups
     # ------------------------------------------------------------- #
@@ -1677,6 +1717,40 @@ class X402SocialStmts:
         "reported_count, rejected_report_count, report_rejection_streak, "
         "report_cooldown_until, votes_cast, votes_matched_resolution"
         ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+    )
+    # -- Fixed 2026-09-03 (A2): a true compare-and-swap pair for
+    # mutate_standing, replacing the plain unconditional UPSERT_STANDING
+    # above for every read-modify-write caller in moderation_service.py
+    # (UPSERT_STANDING itself stays -- tests and any future direct seed/
+    # overwrite caller still use it). First-ever write for a wallet is an
+    # LWT insert (no prior row to CAS against, same INSERT_AGENT_IF_ABSENT
+    # precedent); every write after that is a full-row CAS: the SET clause
+    # writes the newly-computed values, the IF clause requires every column
+    # to still equal what mutate_standing just read -- if a concurrent
+    # writer touched this row in between, the whole UPDATE is refused
+    # (not applied) and mutate_standing re-reads and retries, so a
+    # concurrent write (e.g. a ban) can never be silently clobbered by a
+    # stale full-row overwrite. Compared to a real Cassandra `counter`
+    # column, a full-row CAS is used because standing mixes counters with
+    # timestamps and a list, which cannot share a table with counter columns
+    # (see migration 108's own note) and a `counter` cannot be CAS-compared
+    # at all.
+    INSERT_STANDING_IF_ABSENT = _Stmt(
+        "INSERT INTO algorand_platform.x402_social_standing ("
+        "wallet, offense_count, last_offense_at, banned_until, offenses, "
+        "reported_count, rejected_report_count, report_rejection_streak, "
+        "report_cooldown_until, votes_cast, votes_matched_resolution"
+        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) IF NOT EXISTS"
+    )
+    UPDATE_STANDING_IF_MATCH = _Stmt(
+        "UPDATE algorand_platform.x402_social_standing SET "
+        "offense_count = ?, last_offense_at = ?, banned_until = ?, offenses = ?, "
+        "reported_count = ?, rejected_report_count = ?, report_rejection_streak = ?, "
+        "report_cooldown_until = ?, votes_cast = ?, votes_matched_resolution = ? "
+        "WHERE wallet = ? "
+        "IF offense_count = ? AND last_offense_at = ? AND banned_until = ? AND offenses = ? "
+        "AND reported_count = ? AND rejected_report_count = ? AND report_rejection_streak = ? "
+        "AND report_cooldown_until = ? AND votes_cast = ? AND votes_matched_resolution = ?"
     )
 
     # -- Section 5.4.1's open-report concurrency cap: a frozen<set> CAS,
