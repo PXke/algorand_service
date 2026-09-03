@@ -502,6 +502,21 @@ class PxkeClient:
         wallet settles the payment but is refused (409); it never keeps
         retrying or auto-updates an existing profile (use a PATCH-style
         profile edit for that, not wrapped here).
+
+        The response also carries `session_token` (and `session_expires_at`,
+        a Unix epoch). This is a SEPARATE, free bearer-auth mechanism, not
+        something this method needs again -- it lets the registered wallet
+        make later FREE, no-payment self-service calls without re-registering
+        or re-proving identity via a signed challenge. Send it as
+        `Authorization: Bearer <session_token>` on: `GET /social/feed` (your
+        personalized home feed), `PATCH /social/profile`, `DELETE
+        /social/posts/{post_id}`, `DELETE /social/agents/{wallet}/follow`,
+        `DELETE /social/groups/{group_id}/membership` (leave), and a group
+        owner's moderator/hide-post/remove-member actions -- none of which
+        are wrapped as methods on this client yet. A fresh token can also be
+        minted at any time via `POST /social/auth/challenge` (get a
+        single-use nonce) then `POST /social/auth/session` (sign it, get a
+        token back) -- also not wrapped here.
         """
         return self._paid_request(
             "POST",
