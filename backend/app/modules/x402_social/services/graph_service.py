@@ -72,8 +72,8 @@ class GraphService:
         if followee == follower:
             raise SocialError(
                 "cannot_follow_self",
-                "A wallet cannot follow itself. Payment has settled but no follow edge was "
-                "created.",
+                f"A wallet cannot follow itself ({follower}). Payment has settled but no follow "
+                "edge was created.",
                 http_status=400,
             )
         moment = now or datetime.now(tz=UTC)

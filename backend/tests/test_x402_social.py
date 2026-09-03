@@ -1743,6 +1743,10 @@ def test_self_follow_is_refused_and_cannot_make_a_wallet_its_own_friend(
         service.follow(follower=_PAYER, followee=_PAYER)
     assert exc_info.value.code == "cannot_follow_self"
     assert exc_info.value.http_status == 400
+    # The rejected wallet is named in the message (2026-09-03 polish, per real
+    # agent feedback) -- concrete and actionable in an automated caller's own
+    # logs, not just a generic "you can't do that."
+    assert _PAYER in exc_info.value.message
     assert service.friends(_PAYER, limit=10) == []
     assert service.following(_PAYER, limit=10) == []
 
