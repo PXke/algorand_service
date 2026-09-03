@@ -81,9 +81,7 @@ def _images_from_url(url: str) -> tuple[str, str]:
     from app.core.net_guard import guarded_get
     from app.modules.scraper.core.page_metadata import extract_og_image, extract_source_logo
 
-    resp = guarded_get(
-        url, headers={"Accept": "text/html", "User-Agent": _USER_AGENT}, timeout=8.0
-    )
+    resp = guarded_get(url, headers={"Accept": "text/html", "User-Agent": _USER_AGENT}, timeout=8.0)
     resp.raise_for_status()
     final = str(resp.url)
     soup = BeautifulSoup(resp.text, "html.parser")
@@ -156,12 +154,24 @@ def resolve_article_images(
 
     Pass ``validate`` so dead declared images are rejected mid-search and the
     cited-links fallback still runs (see resolve_source_images).
+
+    Owner decision 2026-09-03: a VALIDATED logo from the subject's own site
+    beats a share image declared by a foreign cited link (e.g. a GitHub
+    repo's auto-generated social-preview card) — root-caused on
+    sproutalgo.com (an imageless SPA whose only og:image anywhere came from
+    its own README's GitHub link, picking a generic repo card over the
+    site's own brand mark). The og-over-logo preference below still applies
+    within resolve_source_images itself (the subject's own og beats the
+    subject's own logo) and the cited-links fallback still runs when the
+    subject's own site has NEITHER a usable og NOR a usable logo.
     """
     og, logo = resolve_source_images(
         source_url=source_url, service_id=service_id, validate=validate
     )
     if og:
         return og, logo
+    if logo:
+        return "", logo
     for url in source_urls_from_body(body):
         try:
             page_og, page_logo = _images_from_url(url)

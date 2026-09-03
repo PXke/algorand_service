@@ -114,6 +114,83 @@ def test_dead_declared_og_falls_through_to_sources_block(monkeypatch: pytest.Mon
     assert og == "https://hesab.com/images/logos/favicon.png"
 
 
+def test_own_site_validated_logo_beats_foreign_cited_link_og(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The subject's own validated logo must win over a foreign cited-link og.
+
+    Owner decision 2026-09-03, root-caused on sproutalgo.com: an imageless SPA with no og:image
+    anywhere on its own site, but a validated brand logo (its own favicon) — its Sources-block
+    cited a GitHub repo whose auto-generated social-preview card WAS a real, validated og:image.
+    Before this fix, that foreign og won outright (the resolver never even looked at the logo
+    once an og was found anywhere). The subject's own validated logo must now win instead, and
+    the cited-links fallback must never even be fetched once it does.
+    """
+    fetched: list[str] = []
+
+    def fake_images(url: str) -> tuple[str, str]:
+        fetched.append(url)
+        if url == "https://sproutalgo.com":
+            return "", "https://sproutalgo.com/sprout-avatar.svg"
+        if url == "https://github.com/sproutalgo/SproutV2":
+            return "https://opengraph.githubassets.com/xyz/sproutalgo/SproutV2", ""
+        return "", ""
+
+    monkeypatch.setattr(si, "_images_from_url", fake_images)
+    body = """Sprout runs on Algorand.
+
+## Sources
+
+- [SproutV2 repo](https://github.com/sproutalgo/SproutV2)
+"""
+    og, logo = resolve_article_images(
+        source_url="https://sproutalgo.com",
+        service_id="sproutalgo-com",
+        body=body,
+        validate=lambda image, _page_url, _kind: image,  # everything validates
+    )
+    assert og == ""
+    assert logo == "https://sproutalgo.com/sprout-avatar.svg"
+    # The GitHub fallback must never even be fetched -- the own-site logo won first.
+    assert "https://github.com/sproutalgo/SproutV2" not in fetched
+
+
+def test_foreign_fallback_still_runs_when_own_site_has_neither_og_nor_logo(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fallback still runs when the subject's own site has neither a usable og nor a usable logo.
+
+    The cited-links fallback is only skipped when the subject's own site has a usable logo --
+    an imageless site with NO icons at all still falls through to the Sources block, unchanged
+    from the pre-existing behavior.
+    """
+    fetched: list[str] = []
+
+    def fake_images(url: str) -> tuple[str, str]:
+        fetched.append(url)
+        if url == "https://noicons.example":
+            return "", ""
+        if url == "https://github.com/noicons/repo":
+            return "https://opengraph.githubassets.com/xyz/noicons/repo", ""
+        return "", ""
+
+    monkeypatch.setattr(si, "_images_from_url", fake_images)
+    body = """No icons here.
+
+## Sources
+
+- [repo](https://github.com/noicons/repo)
+"""
+    og, _logo = resolve_article_images(
+        source_url="https://noicons.example",
+        service_id="noicons-example",
+        body=body,
+        validate=lambda image, _page_url, _kind: image,
+    )
+    assert og == "https://opengraph.githubassets.com/xyz/noicons/repo"
+    assert "https://github.com/noicons/repo" in fetched
+
+
 def test_resolver_validation_is_anchored_to_the_declaring_page(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -564,6 +641,8 @@ def test_is_real_image_rejects_mislabeled_svg_path(monkeypatch: pytest.MonkeyPat
     """A `.svg`-shaped URL that actually serves an HTML error/redirect page (the real brain-chain.app case: a dead cross-domain favicon link) is still rejected, not nodded through by the extension check alone."""
     monkeypatch.setattr(
         "app.core.net_guard.guarded_get",
-        lambda *_a, **_kw: _fake_response(content=b"<html><body>Not found</body></html>", content_type="text/html"),
+        lambda *_a, **_kw: _fake_response(
+            content=b"<html><body>Not found</body></html>", content_type="text/html"
+        ),
     )
     assert not publish_tasks._is_real_image("https://brain-chain.app/favicon.svg")
