@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import itertools
+from dataclasses import dataclass, field
 
-from app.modules.kya.models.domain import StoredEnrollment
+from app.modules.kya.models.domain import StoredEnrollment, StoredLookupEvent
+
+_created_at_counter = itertools.count()
 
 
 @dataclass
@@ -16,6 +19,10 @@ class _LookupEvent:
     payout_status: str
     payout_txid: str | None
     payout_error: str | None
+    # Opaque per-process surrogate for Cassandra's server-generated timeuuid
+    # clustering key -- monotonically increasing is all a caller ever needs
+    # from it (identify-then-update the same row).
+    created_at: int = field(default_factory=lambda: next(_created_at_counter))
 
 
 class InMemoryEnrollmentStore:
@@ -57,3 +64,38 @@ class InMemoryEnrollmentStore:
                 payout_error=payout_error,
             )
         )
+
+    def find_lookup_event(
+        self, *, wallet_address: str, payment_txid: str
+    ) -> StoredLookupEvent | None:
+        """The recorded lookup event for this wallet+payment_txid, or None if there isn't one."""
+        for event in self._lookup_events:
+            if event.wallet_address == wallet_address and event.payment_txid == payment_txid:
+                return StoredLookupEvent(
+                    wallet_address=event.wallet_address,
+                    created_at=event.created_at,
+                    payer_address=event.payer_address,
+                    payment_txid=event.payment_txid,
+                    found=event.found,
+                    payout_status=event.payout_status,
+                    payout_txid=event.payout_txid,
+                    payout_error=event.payout_error,
+                )
+        return None
+
+    def update_lookup_event_payout(
+        self,
+        *,
+        wallet_address: str,
+        created_at: object,
+        payout_status: str,
+        payout_txid: str | None,
+        payout_error: str | None,
+    ) -> None:
+        """Update one lookup event's payout outcome in place (after a payout retry)."""
+        for event in self._lookup_events:
+            if event.wallet_address == wallet_address and event.created_at == created_at:
+                event.payout_status = payout_status
+                event.payout_txid = payout_txid
+                event.payout_error = payout_error
+                return

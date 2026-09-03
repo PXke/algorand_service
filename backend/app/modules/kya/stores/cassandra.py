@@ -4,7 +4,12 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from app.modules.kya.models.domain import StoredEnrollment
+from app.modules.kya.models.domain import StoredEnrollment, StoredLookupEvent
+
+# Bound on the whole-partition scan a payout retry does to find one lookup
+# event by payment_txid (see GET_LOOKUP_EVENTS_FOR_WALLET) -- generous for a
+# per-wallet audit trail of paid lookups, never unbounded.
+_MAX_LOOKUP_EVENTS_SCANNED = 2000
 
 
 class CassandraEnrollmentStore:
@@ -77,4 +82,49 @@ class CassandraEnrollmentStore:
                 payout_txid,
                 payout_error,
             ),
+        )
+
+    def find_lookup_event(
+        self, *, wallet_address: str, payment_txid: str
+    ) -> StoredLookupEvent | None:
+        """The recorded lookup event for this wallet+payment_txid, or None if there isn't one."""
+        from app.core.cassandra import get_cassandra_session
+        from app.core.statements import KycStmts
+
+        session = get_cassandra_session()
+        rows = session.execute(
+            KycStmts.GET_LOOKUP_EVENTS_FOR_WALLET,
+            (wallet_address, _MAX_LOOKUP_EVENTS_SCANNED),
+        )
+        for row in rows:
+            if row.payment_txid == payment_txid:
+                return StoredLookupEvent(
+                    wallet_address=row.wallet_address,
+                    created_at=row.created_at,
+                    payer_address=row.payer_address,
+                    payment_txid=row.payment_txid,
+                    found=row.found,
+                    payout_status=row.payout_status,
+                    payout_txid=row.payout_txid,
+                    payout_error=row.payout_error,
+                )
+        return None
+
+    def update_lookup_event_payout(
+        self,
+        *,
+        wallet_address: str,
+        created_at: object,
+        payout_status: str,
+        payout_txid: str | None,
+        payout_error: str | None,
+    ) -> None:
+        """Update one lookup event's payout outcome in place (after a payout retry)."""
+        from app.core.cassandra import get_cassandra_session
+        from app.core.statements import KycStmts
+
+        session = get_cassandra_session()
+        session.execute(
+            KycStmts.UPDATE_LOOKUP_EVENT_PAYOUT,
+            (payout_status, payout_txid, payout_error, wallet_address, created_at),
         )

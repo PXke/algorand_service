@@ -17,6 +17,12 @@ What is covered:
        every limiter fails OPEN on a Redis outage.
   K-3a a malformed wallet is a 400 before the gate, so nobody is charged for
        a lookup that could never have matched.
+  K-4  kyc_payout_retry never trusts a caller-supplied amount/asset: it
+       re-derives them from the matching kyc_lookup_event + the shared x402
+       settlement ledger, rejects a retry with no matching failed event,
+       rejects one whose settlement wasn't actually a kyc-verify payment, is
+       a safe 409 no-op on an already-paid event (never a second payout),
+       and never lets a raw exception string reach the client.
 """
 
 from __future__ import annotations
@@ -36,6 +42,7 @@ from app.core import rate_limit as rate_limit_core
 from app.core import serialization
 from app.core.config import settings
 from app.core.http import QueryParams, Request, Response
+from app.modules.admin import auth as admin_auth
 from app.modules.kya.api import routes as kyc_routes
 from app.modules.kya.models.domain import StoredEnrollment
 from app.modules.kya.services import consent_challenge as consent_challenge_store
@@ -48,7 +55,11 @@ from app.modules.kya.stores.memory import InMemoryEnrollmentStore
 from app.modules.x402 import guard as x402_guard
 from app.modules.x402 import paid_request as payment_service
 from app.modules.x402 import replay as replay_module
-from app.modules.x402.settlement import InMemorySettlementStore, set_settlement_store
+from app.modules.x402.settlement import (
+    InMemorySettlementStore,
+    SettlementRecord,
+    set_settlement_store,
+)
 
 # Real, checksum-valid Algorand addresses. kyc_verify validates with algosdk's
 # own is_valid_address, so the "X" * 58 placeholders the service-level KYA
@@ -688,3 +699,281 @@ def test_an_enrolled_wallet_is_returned_by_a_paid_lookup(
     assert response.status_code == 200
     assert '"enrolled":true' in response.description.replace(" ", "")
     assert len(ledger.settlements) == 1
+
+
+# --------------------------------------------------------------------------- #
+# K-4: payout-retry never trusts a caller-supplied amount/asset
+# --------------------------------------------------------------------------- #
+def _retry_body(wallet_address: str = _WALLET, payment_txid: str = "TX123") -> bytes:
+    return serialization.dumps(
+        {"wallet_address": wallet_address, "payment_txid": payment_txid}
+    ).encode("utf-8")
+
+
+def _retry_request(wallet_address: str = _WALLET, payment_txid: str = "TX123") -> Request:
+    return _request(
+        method="POST",
+        body=_retry_body(wallet_address, payment_txid),
+        path="/api/v1/admin/kyc/payouts/retry",
+    )
+
+
+@pytest.fixture
+def admin_ok(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Bypass the real admin-session check for these payout-retry-logic tests.
+
+    require_admin_wallet's own contract (session-token-resolved wallet, never
+    a self-asserted header) is exercised elsewhere; patched at its own module
+    since the route imports it with a function-local `from ... import` (fetched
+    fresh on every call, so patching the source attribute here still takes
+    effect).
+    """
+    monkeypatch.setattr(admin_auth, "require_admin_wallet", lambda _request: None)
+
+
+@pytest.fixture
+def retry_store(monkeypatch: pytest.MonkeyPatch) -> InMemoryEnrollmentStore:
+    """Point kyc_payout_retry's lookup_service at a fresh in-memory store."""
+    store = InMemoryEnrollmentStore()
+    monkeypatch.setattr(kyc_routes, "lookup_service", LookupService(store=store))
+    return store
+
+
+def _seed_failed_event(
+    store: InMemoryEnrollmentStore,
+    settlement_ledger: InMemorySettlementStore,
+    *,
+    wallet_address: str = _WALLET,
+    payment_txid: str = "TX123",
+    amount_atomic: str = "25000",
+    asset_id: str = "10458941",
+    resource: str = "kyc-verify",
+) -> None:
+    """A previously-settled kyc-verify lookup whose payout previously failed."""
+    settlement_ledger.record_settlement(
+        SettlementRecord(
+            tx_id=payment_txid,
+            asset_id=asset_id,
+            amount_atomic=amount_atomic,
+            payer=_PAYER,
+            resource=resource,
+            network=ALGORAND_TESTNET_CAIP2,
+            settled_at_epoch=1_700_000_000,
+        )
+    )
+    store.record_lookup_event(
+        wallet_address=wallet_address,
+        payer_address=_PAYER,
+        payment_txid=payment_txid,
+        found=True,
+        payout_status="failed",
+        payout_txid=None,
+        payout_error="algod unreachable",
+    )
+
+
+@pytest.mark.usefixtures("admin_ok", "retry_store", "ledger")
+def test_payout_retry_with_no_matching_event_is_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No stored kyc_lookup_event for this wallet/payment_txid — reject, never pay."""
+    calls: list[dict] = []
+    monkeypatch.setattr(
+        kyc_routes,
+        "send_payout",
+        lambda **kw: calls.append(kw) or PayoutResult(status="sent", txid="SHOULD_NOT_HAPPEN"),
+    )
+
+    response = kyc_routes.kyc_payout_retry(_retry_request())
+
+    assert response.status_code == 404
+    assert "no_matching_lookup_event" in response.description
+    assert calls == []
+
+
+@pytest.mark.usefixtures("admin_ok")
+def test_payout_retry_pays_the_real_settled_amount_not_a_caller_supplied_one(
+    retry_store: InMemoryEnrollmentStore,
+    ledger: InMemorySettlementStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression for the core bug.
+
+    The request schema no longer even HAS an amount/asset field, but this
+    proves the route also actually PAYS the amount from the real settlement
+    record — not merely that it stopped reading a field that no longer
+    exists.
+    """
+    _seed_failed_event(retry_store, ledger, amount_atomic="25000", asset_id="10458941")
+    calls: list[dict] = []
+    monkeypatch.setattr(
+        kyc_routes,
+        "send_payout",
+        lambda **kw: calls.append(kw) or PayoutResult(status="sent", txid="RETRY_TX"),
+    )
+
+    response = kyc_routes.kyc_payout_retry(_retry_request())
+
+    assert isinstance(response, dict)
+    assert response["payout_status"] == "sent"
+    assert response["payout_txid"] == "RETRY_TX"
+    assert calls == [{"receiver": _WALLET, "amount_atomic": "25000", "asset_id": "10458941"}]
+
+
+@pytest.mark.usefixtures("admin_ok")
+def test_payout_retry_ignores_a_stale_client_supplied_amount_and_asset(
+    retry_store: InMemoryEnrollmentStore,
+    ledger: InMemorySettlementStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression for the amount cap.
+
+    An inflated amount_atomic/asset_id posted by an old client build (the
+    fields the schema used to accept) has zero effect — msgspec ignores
+    unknown JSON fields, and the route only ever reads amount_atomic/asset_id
+    off the real settlement record it looked up itself. This is the "cap": a
+    retry can never pay more than what actually settled, because the amount
+    never comes from the request at all.
+    """
+    _seed_failed_event(retry_store, ledger, amount_atomic="25000", asset_id="10458941")
+    calls: list[dict] = []
+    monkeypatch.setattr(
+        kyc_routes,
+        "send_payout",
+        lambda **kw: calls.append(kw) or PayoutResult(status="sent", txid="RETRY_TX"),
+    )
+    body = serialization.dumps(
+        {
+            "wallet_address": _WALLET,
+            "payment_txid": "TX123",
+            "amount_atomic": "999999999999",
+            "asset_id": "10458941",
+        }
+    ).encode("utf-8")
+
+    response = kyc_routes.kyc_payout_retry(
+        _request(method="POST", body=body, path="/api/v1/admin/kyc/payouts/retry")
+    )
+
+    assert isinstance(response, dict)
+    assert calls == [{"receiver": _WALLET, "amount_atomic": "25000", "asset_id": "10458941"}]
+
+
+@pytest.mark.usefixtures("admin_ok")
+def test_payout_retry_rejects_a_settlement_that_was_not_a_kyc_verify_payment(
+    retry_store: InMemoryEnrollmentStore,
+    ledger: InMemorySettlementStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cross-resource guard.
+
+    A payment_txid that actually settled a DIFFERENT paid product's resource
+    must never be replayed into a KYA payout just because it happens to line
+    up with a wallet/payment_txid pair posted to this route.
+    """
+    _seed_failed_event(retry_store, ledger, resource="x402-directory-list")
+    calls: list[dict] = []
+    monkeypatch.setattr(
+        kyc_routes,
+        "send_payout",
+        lambda **kw: calls.append(kw) or PayoutResult(status="sent", txid="SHOULD_NOT_HAPPEN"),
+    )
+
+    response = kyc_routes.kyc_payout_retry(_retry_request())
+
+    assert response.status_code == 404
+    assert "no_matching_settlement" in response.description
+    assert calls == []
+
+
+@pytest.mark.usefixtures("admin_ok")
+def test_payout_retry_on_an_already_paid_event_is_a_safe_no_op_not_a_second_payout(
+    retry_store: InMemoryEnrollmentStore,
+    ledger: InMemorySettlementStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Idempotency guard.
+
+    Retrying an event whose payout already succeeded must be a safe 409
+    no-op, never a second payout.
+    """
+    _seed_failed_event(retry_store, ledger)
+    already_sent = retry_store.find_lookup_event(wallet_address=_WALLET, payment_txid="TX123")
+    assert already_sent is not None
+    retry_store.update_lookup_event_payout(
+        wallet_address=_WALLET,
+        created_at=already_sent.created_at,
+        payout_status="sent",
+        payout_txid="ALREADY_SENT_TX",
+        payout_error=None,
+    )
+    calls: list[dict] = []
+    monkeypatch.setattr(
+        kyc_routes,
+        "send_payout",
+        lambda **kw: calls.append(kw) or PayoutResult(status="sent", txid="SECOND_TX"),
+    )
+
+    response = kyc_routes.kyc_payout_retry(_retry_request())
+
+    assert response.status_code == 409
+    assert "already_paid" in response.description
+    assert calls == []
+
+
+@pytest.mark.usefixtures("admin_ok")
+def test_payout_retry_never_returns_a_raw_error_string_from_a_failed_payout(
+    retry_store: InMemoryEnrollmentStore,
+    ledger: InMemorySettlementStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """CLAUDE.md section 4: never return str(exc)-shaped detail to the client.
+
+    PayoutResult.error can carry algod/provider detail (see
+    payout_service.send_payout's broad except) — that must be logged
+    server-side and persisted on the lookup event, never echoed to the
+    caller.
+    """
+    _seed_failed_event(retry_store, ledger)
+    secret_detail = "TransactionPool.Remember: SECRET_INTERNAL_DETAIL_12345"
+    monkeypatch.setattr(
+        kyc_routes,
+        "send_payout",
+        lambda **_kw: PayoutResult(status="failed", error=secret_detail),
+    )
+
+    response = kyc_routes.kyc_payout_retry(_retry_request())
+
+    assert isinstance(response, dict)
+    assert response["payout_status"] == "failed"
+    assert secret_detail not in serialization.dumps(response)
+    # The real detail is still durably recorded server-side for an operator.
+    event = retry_store.find_lookup_event(wallet_address=_WALLET, payment_txid="TX123")
+    assert event is not None
+    assert event.payout_error == secret_detail
+
+
+@pytest.mark.usefixtures("admin_ok")
+def test_payout_retry_never_returns_a_raised_exceptions_message_either(
+    retry_store: InMemoryEnrollmentStore,
+    ledger: InMemorySettlementStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Same guarantee for the defensive path.
+
+    If send_payout ever raises (rather than returning a failed PayoutResult,
+    its documented contract), the route must still never leak str(exc) to
+    the client.
+    """
+    _seed_failed_event(retry_store, ledger)
+    secret_detail = "raised: SECRET_INTERNAL_DETAIL_67890"
+
+    def _boom(**_kw: object) -> PayoutResult:
+        raise RuntimeError(secret_detail)
+
+    monkeypatch.setattr(kyc_routes, "send_payout", _boom)
+
+    response = kyc_routes.kyc_payout_retry(_retry_request())
+
+    assert response.status_code == 500
+    assert secret_detail not in response.description

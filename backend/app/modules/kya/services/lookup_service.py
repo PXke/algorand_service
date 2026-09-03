@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
+from app.modules.kya.models.domain import StoredLookupEvent
 from app.modules.kya.services.payout_service import PayoutResult, send_payout
 from app.modules.kya.stores.base import EnrollmentStore
 from app.modules.kya.stores.factory import get_enrollment_store
@@ -75,3 +76,27 @@ class LookupService:
             "recent_tx_count": enrollment.recent_tx_count,
             "payout_status": payout.status,
         }
+
+    def find_failed_payout_event(
+        self, *, wallet_address: str, payment_txid: str
+    ) -> StoredLookupEvent | None:
+        """The stored lookup event this wallet+payment_txid pair refers to, or None.
+
+        The source of truth a payout retry must reconcile the caller-supplied
+        wallet/payment_txid against, instead of trusting a fresh
+        caller-supplied amount/asset triple (CLAUDE.md section 9: this route
+        moves real funds).
+        """
+        return self._store.find_lookup_event(
+            wallet_address=wallet_address, payment_txid=payment_txid
+        )
+
+    def record_payout_retry_result(self, *, event: StoredLookupEvent, result: PayoutResult) -> None:
+        """Persist a payout retry's outcome onto the event it retried, for idempotency and audit."""
+        self._store.update_lookup_event_payout(
+            wallet_address=event.wallet_address,
+            created_at=event.created_at,
+            payout_status=result.status,
+            payout_txid=result.txid,
+            payout_error=result.error,
+        )

@@ -199,6 +199,25 @@ def test_send_payout_skipped_for_asset_id_not_accepted_on_the_configured_network
     assert "unrecognized" in (result.error or "").lower()
 
 
+def test_send_payout_skipped_for_non_numeric_amount_atomic(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Regression: `int(amount_atomic)` used to raise ValueError outside its own try/except.
+
+    That contradicted the docstring's "never raises" claim (found 2026-09-03
+    while hardening kyc_payout_retry, CLAUDE.md section 9 — this function
+    moves real funds).
+    """
+    priv, _ = account.generate_account()
+    monkeypatch.setattr(settings, "kyc_payout_mnemonic", mnemonic.from_private_key(priv))
+    monkeypatch.setattr(settings, "kyc_payout_share", 0.5)
+
+    result = send_payout(
+        receiver=RECEIVER, amount_atomic="not-a-number", asset_id=_DEFAULT_NETWORK_USDC_ASSET_ID
+    )
+
+    assert result.status == "skipped"
+    assert "not numeric" in (result.error or "")
+
+
 def test_send_payout_skipped_for_garbage_asset_id(monkeypatch: pytest.MonkeyPatch) -> None:
     """Skips rather than raising when `asset_id` isn't even a parseable integer."""
     priv, _ = account.generate_account()

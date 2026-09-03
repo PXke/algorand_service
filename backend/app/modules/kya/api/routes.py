@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import time
 
 from algosdk.encoding import is_valid_address
@@ -28,7 +29,23 @@ from app.modules.kya.services.rate_limit import (
 )
 from app.modules.x402.discovery import describe_json_endpoint
 from app.modules.x402.paid_request import mark_fulfilled, require_paid_request
+from app.modules.x402.settlement import get_settlement_store
 from app.schemas import EnrollRequest, KycPayoutRetryRequest
+
+logger = logging.getLogger(__name__)
+
+# The resource id kyc_verify books its settlements under (see require_paid_request
+# call below) — a payout retry only ever re-derives amount/asset from a settlement
+# actually booked under THIS resource, so a payment_txid from some other paid
+# product's ledger row can never be used to mint a KYA payout.
+_KYC_VERIFY_RESOURCE = "kyc-verify"
+
+# The route's own generic, safe stand-in for a real payout error: CLAUDE.md
+# section 4 forbids returning str(exc) (or any provider/algod-derived detail)
+# to a client on a payout failure. The real detail is logged server-side and
+# also persisted on the lookup event (kyc_lookup_events.payout_error) for an
+# operator to read.
+_GENERIC_PAYOUT_ERROR = "Payout attempt failed — see server logs"
 
 
 def _current_round() -> int | None:
@@ -193,7 +210,16 @@ def kyc_verify(request: Request) -> Response:
 
 
 def kyc_payout_retry(request: Request) -> Response:
-    """Admin-gated manual retry for a lookup whose payout failed (float too low, opt-in missing, algod hiccup, confirm timeout) — see kyc_lookup_events for which ones need it. Deliberately manual rather than an automatic backoff sweep: ship simple first, automate later if failures turn out to be common in practice."""
+    """Admin-gated manual retry for a lookup whose payout failed (float too low, opt-in missing, algod hiccup, confirm timeout) — see kyc_lookup_events for which ones need it. Deliberately manual rather than an automatic backoff sweep: ship simple first, automate later if failures turn out to be common in practice.
+
+    The caller identifies WHICH lookup to retry (wallet_address + payment_txid)
+    but never supplies the amount/asset to pay out — those are re-derived from
+    the matching kyc_lookup_event and the shared x402 settlement ledger, the
+    same sources of truth the original (non-retry) payout in LookupService.lookup
+    uses, so this route can never be used to mint an arbitrary payout. Retrying
+    an event whose payout already succeeded is a safe no-op (409), never a
+    second payout.
+    """
     from app.modules.admin.auth import require_admin_wallet
 
     denied = require_admin_wallet(request)
@@ -205,16 +231,67 @@ def kyc_payout_retry(request: Request) -> Response:
     except serialization.DecodeError as exc:
         return json_error_response(400, "invalid_request", str(exc))
 
-    result = send_payout(
-        receiver=payload.wallet_address,
-        amount_atomic=payload.amount_atomic,
-        asset_id=payload.asset_id,
+    event = lookup_service.find_failed_payout_event(
+        wallet_address=payload.wallet_address, payment_txid=payload.payment_txid
     )
+    if event is None:
+        return json_error_response(
+            404,
+            "no_matching_lookup_event",
+            "No lookup event for this wallet_address/payment_txid was found",
+        )
+    if event.payout_status == "sent":
+        return json_error_response(
+            409,
+            "already_paid",
+            "This lookup's payout already succeeded — retry is a no-op",
+        )
+    if event.payout_status != "failed":
+        return json_error_response(
+            400,
+            "not_retryable",
+            f"Lookup payout status is {event.payout_status!r}, not retryable",
+        )
+
+    settlement = get_settlement_store().get_settlement(payload.payment_txid)
+    if settlement is None or settlement.resource != _KYC_VERIFY_RESOURCE:
+        return json_error_response(
+            404,
+            "no_matching_settlement",
+            "No settled kyc-verify payment was found for this payment_txid",
+        )
+
+    try:
+        result = send_payout(
+            receiver=payload.wallet_address,
+            amount_atomic=settlement.amount_atomic,
+            asset_id=settlement.asset_id,
+        )
+    except Exception:
+        logger.error(
+            "kyc payout retry crashed for wallet_address=%s payment_txid=%s",
+            payload.wallet_address,
+            payload.payment_txid,
+            exc_info=True,
+        )
+        return json_error_response(500, "payout_error", _GENERIC_PAYOUT_ERROR)
+
+    lookup_service.record_payout_retry_result(event=event, result=result)
+
+    if result.status != "sent":
+        logger.warning(
+            "kyc payout retry did not send for wallet_address=%s payment_txid=%s status=%s error=%s",
+            payload.wallet_address,
+            payload.payment_txid,
+            result.status,
+            result.error,
+        )
+
     return {
         "wallet_address": payload.wallet_address,
         "payout_status": result.status,
         "payout_txid": result.txid,
-        "payout_error": result.error,
+        "payout_error": _GENERIC_PAYOUT_ERROR if result.error else None,
     }
 
 

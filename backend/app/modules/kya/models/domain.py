@@ -26,3 +26,22 @@ class StoredEnrollment:
     wallet_age_round: int | None
     recent_tx_count: int
     kyc_level: str
+
+
+@dataclass
+class StoredLookupEvent:
+    """One recorded paid KYA lookup and its payout outcome (kyc_lookup_events).
+
+    `created_at` is the row's clustering-key value (a Cassandra timeuuid, or
+    an opaque per-process surrogate for the in-memory store) — callers never
+    interpret it, only pass it back to address the same row for an update.
+    """
+
+    wallet_address: str
+    created_at: object
+    payer_address: str
+    payment_txid: str
+    found: bool
+    payout_status: str
+    payout_txid: str | None
+    payout_error: str | None

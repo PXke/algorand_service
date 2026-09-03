@@ -45,11 +45,19 @@ def payout_share(amount_atomic: str, share: float) -> int:
 
 
 def send_payout(*, receiver: str, amount_atomic: str, asset_id: str) -> PayoutResult:
-    """Best-effort: sign and submit an ASA transfer of a share of the settled fee to `receiver` from the dedicated payout wallet, in the SAME asset the inbound payment actually settled in (`asset_id`, the settled ASA id as a string — see x402.guard.PaymentResult.asset_id). Never raises — every failure mode (unconfigured wallet, unrecognized settled asset, algod unreachable, opt-in missing, confirm timeout) becomes PayoutResult(status="failed"/"skipped", ...)."""
+    """Best-effort: sign and submit an ASA transfer of a share of the settled fee to `receiver` from the dedicated payout wallet, in the SAME asset the inbound payment actually settled in (`asset_id`, the settled ASA id as a string — see x402.guard.PaymentResult.asset_id). Never raises — every failure mode (unconfigured wallet, a non-numeric `amount_atomic`, unrecognized settled asset, algod unreachable, opt-in missing, confirm timeout) becomes PayoutResult(status="failed"/"skipped", ...)."""
     if not settings.kyc_payout_mnemonic.strip():
         return PayoutResult(status="skipped", error="payout wallet not configured")
 
-    amount = payout_share(amount_atomic, settings.kyc_payout_share)
+    try:
+        amount = payout_share(amount_atomic, settings.kyc_payout_share)
+    except (TypeError, ValueError):
+        logger.warning(
+            "kya payout skipped for %s: amount_atomic %r is not numeric", receiver, amount_atomic
+        )
+        return PayoutResult(
+            status="skipped", error=f"amount_atomic {amount_atomic!r} is not numeric"
+        )
     if amount <= 0:
         return PayoutResult(status="skipped", error="payout amount rounds to zero")
 
