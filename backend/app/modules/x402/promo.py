@@ -663,4 +663,4 @@ def attempt_promo_redemption(
         return None
 
     logger.info("x402 promo: code=%s redeemed for resource=%s", code, resource)
-    return PaymentResult(error=None, is_promo=True)
+    return PaymentResult(error=None, is_promo=True, payer=wallet)

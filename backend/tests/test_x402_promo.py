@@ -215,9 +215,18 @@ def test_valid_code_and_wallet_bypasses_payment(promo_store: InMemoryPromoStore)
     assert result.error is None
     assert result.is_promo is True
     assert result.is_preview is False
-    # Nothing settled: no txid, no payer, no headers -- there is no payment.
+    # Nothing settled: no txid, no headers -- there is no payment. `payer` IS
+    # set, though, to the caller-supplied `wallet` -- root-caused 2026-09-03:
+    # a route whose product write needs an identity even on a promo bypass
+    # (x402_social's "the payment IS the identity" design) got payer=None and
+    # raised, since attempt_promo_redemption used to leave payer at its
+    # PaymentResult default. `wallet` here is only syntactically validated
+    # (is_valid_address, no signature proof) -- same caveat the module
+    # docstring's own "Wallet abuse guard" section already documents for
+    # every other use of this value, now also true of the identity a promo
+    # call attributes work to.
     assert result.payment_txid is None
-    assert result.payer is None
+    assert result.payer == _WALLET
     assert result.settlement_headers == {}
 
 
