@@ -3022,3 +3022,23 @@ def test_case_vote_forwards_promo_params(
 
     assert captured.get("promo_code") == "LAUNCH1000-TEST"
     assert captured.get("promo_wallet") == _PAYER
+
+
+def test_cassandra_epoch_treats_a_naive_driver_datetime_as_utc() -> None:
+    """_epoch must treat a timezone-naive datetime as UTC, not the interpreter's local zone.
+
+    That's what the real Cassandra driver actually returns for a `timestamp` column. Root-caused
+    2026-09-03 live on prod (a CEST/UTC+2 host): a report-rejection cooldown, written correctly
+    via _dt(epoch) = datetime.fromtimestamp(epoch, tz=UTC), read back exactly 2 hours earlier than
+    it was written. `value.timestamp()` on a naive datetime assumes the *local* system zone -- on
+    a UTC+2 host, "13:18:17 wall-clock, no tzinfo" is silently read as 13:18:17 CEST = 11:18:17
+    UTC, 2 hours off from the real UTC value that was actually stored. Same bug class already
+    fixed once in news/stores/cassandra.py, never propagated here.
+
+    Constructs the naive datetime explicitly rather than relying on this test's own execution
+    environment happening to run in a non-UTC zone (which would make the bug invisible in CI).
+    """
+    naive = datetime(2026, 9, 4, 13, 18, 17)  # noqa: DTZ001 -- naive on purpose, see docstring
+    assert naive.tzinfo is None
+    assert social_cassandra_store._epoch(naive) == 1788527897  # the correct UTC epoch
+    assert social_cassandra_store._epoch(None) == 0

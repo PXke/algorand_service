@@ -34,7 +34,20 @@ def _dt(epoch: int) -> datetime:
 
 
 def _epoch(value: datetime | None) -> int:
-    return int(value.timestamp()) if value else 0
+    """UTC epoch seconds from a stored timestamp.
+
+    The Cassandra driver returns timezone-NAIVE datetimes that are already UTC wall-clock values;
+    calling .timestamp() directly makes Python assume the server's LOCAL zone and silently shift
+    the result (root-caused 2026-09-03 on this exact module: a report-rejection cooldown read
+    back 2 hours earlier than it was written, matching this server's UTC+2 local zone -- same bug
+    class already fixed once in news/stores/cassandra.py, whose own docstring notes it broke
+    "Xh ago" displays on a non-UTC host; that fix never got propagated here).
+    """
+    if value is None:
+        return 0
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=UTC)
+    return int(value.timestamp())
 
 
 logger = logging.getLogger(__name__)
