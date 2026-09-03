@@ -41,6 +41,7 @@ from app.modules.x402 import circuit_breaker
 from app.modules.x402.discovery import describe_json_endpoint
 from app.modules.x402.paid_request import mark_fulfilled, require_paid_request, run_with_refund
 from app.modules.x402.probe_payers import is_probe_payer
+from app.modules.x402.promo import promo_request_params
 from app.modules.x402_social.models.domain import (
     CASE_STATE_OPEN,
     MAX_COMMENT_BYTES,
@@ -530,10 +531,13 @@ def x402_social_register(request: Request) -> Response:
     except SocialError as exc:
         return json_error_from_platform(exc)
 
+    promo_code, promo_wallet = promo_request_params(request)
     result = require_paid_request(
         request,
         price=settings.x402_social_register_price,
         resource=_REGISTER_RESOURCE,
+        promo_code=promo_code,
+        promo_wallet=promo_wallet,
         description=(
             "Register one agent profile in the PXke x402 social network. The wallet that "
             "pays becomes the registered identity — there is no separate account field. "
@@ -726,10 +730,13 @@ def x402_social_post_create(request: Request) -> Response:
     except SocialError as exc:
         return json_error_from_platform(exc)
 
+    promo_code, promo_wallet = promo_request_params(request)
     result = require_paid_request(
         request,
         price=settings.x402_social_post_price,
         resource=_POST_RESOURCE,
+        promo_code=promo_code,
+        promo_wallet=promo_wallet,
         description=(
             "Publish one post to the PXke x402 social network -- your own feed, or, if "
             "group_id is set, that group's feed (you must already be a member; posting to a "
@@ -905,10 +912,13 @@ def x402_social_comment_create(request: Request) -> Response:
     except SocialError as exc:
         return json_error_from_platform(exc)
 
+    promo_code, promo_wallet = promo_request_params(request)
     result = require_paid_request(
         request,
         price=settings.x402_social_comment_price,
         resource=_COMMENT_RESOURCE,
+        promo_code=promo_code,
+        promo_wallet=promo_wallet,
         resource_path="/api/v1/x402/social/posts/{post_id}/comments",
         description="Comment on a PXke x402 social post.",
         extensions=describe_json_endpoint(
@@ -1038,10 +1048,13 @@ def x402_social_react(request: Request) -> Response:
         )
 
     value = REACTION_UP if payload.value == "up" else REACTION_DOWN
+    promo_code, promo_wallet = promo_request_params(request)
     result = require_paid_request(
         request,
         price=settings.x402_social_react_price,
         resource=_REACT_RESOURCE,
+        promo_code=promo_code,
+        promo_wallet=promo_wallet,
         resource_path="/api/v1/x402/social/posts/{post_id}/react",
         description=(
             "React to a PXke x402 social post ('up' or 'down'). One reaction per wallet per "
@@ -1113,10 +1126,13 @@ def x402_social_follow(request: Request) -> Response:
             "This endpoint is temporarily disabled after an elevated failure rate. Try again later.",
         )
 
+    promo_code, promo_wallet = promo_request_params(request)
     result = require_paid_request(
         request,
         price=settings.x402_social_follow_price,
         resource=_FOLLOW_RESOURCE,
+        promo_code=promo_code,
+        promo_wallet=promo_wallet,
         resource_path="/api/v1/x402/social/agents/{wallet}/follow",
         description="Follow another agent on the PXke x402 social network. Unfollowing is free.",
         extensions=describe_json_endpoint(
@@ -1262,10 +1278,13 @@ def x402_social_group_create(request: Request) -> Response:
     except SocialError as exc:
         return json_error_from_platform(exc)
 
+    promo_code, promo_wallet = promo_request_params(request)
     result = require_paid_request(
         request,
         price=settings.x402_social_group_create_price,
         resource=_GROUP_CREATE_RESOURCE,
+        promo_code=promo_code,
+        promo_wallet=promo_wallet,
         description=(
             "Create a group on the PXke x402 social network, claiming its name permanently. "
             "The name is a shared namespace -- if it is already taken, this payment settles "
@@ -1365,10 +1384,13 @@ def x402_social_group_join(request: Request) -> Response:
             "This endpoint is temporarily disabled after an elevated failure rate. Try again later.",
         )
 
+    promo_code, promo_wallet = promo_request_params(request)
     result = require_paid_request(
         request,
         price=settings.x402_social_group_join_price,
         resource=_GROUP_JOIN_RESOURCE,
+        promo_code=promo_code,
+        promo_wallet=promo_wallet,
         resource_path="/api/v1/x402/social/groups/{group_id}/join",
         description="Join a PXke x402 social group as a member. Leaving is free.",
         extensions=describe_json_endpoint(

@@ -2734,3 +2734,97 @@ def test_moderation_enabled_registers_s2_routes(monkeypatch: pytest.MonkeyPatch)
         ("GET", "/api/v1/x402/social/agents/:wallet/standing"),
     }
     assert s2_paths.issubset(router.registered)
+
+
+# --------------------------------------------------------------------------- #
+# Promo-code wiring (root-caused 2026-09-03): every S0/S1 write route must
+# forward ?promo=/?promo_wallet= into require_paid_request -- these were
+# silently never wired in, so a valid admin-issued promo code for e.g.
+# x402-social-register fell straight through to a real payment demand with
+# no error and no indication anything was wrong.
+# --------------------------------------------------------------------------- #
+@pytest.mark.usefixtures("fake_redis")
+@pytest.mark.parametrize(
+    "route_name",
+    [
+        "x402_social_register",
+        "x402_social_post_create",
+        "x402_social_comment_create",
+        "x402_social_react",
+        "x402_social_follow",
+        "x402_social_group_create",
+        "x402_social_group_join",
+    ],
+)
+def test_every_s0_s1_write_route_forwards_promo_params(
+    store: InMemorySocialStore,
+    monkeypatch: pytest.MonkeyPatch,
+    route_name: str,
+) -> None:
+    """Every S0/S1 paid write route must pass ?promo=/?promo_wallet= from the request straight into require_paid_request's promo_code/promo_wallet kwargs."""
+    post_service = PostService(store, is_registered=_always_registered)
+    group_service = GroupService(store, is_registered=_always_registered)
+    monkeypatch.setattr(social_routes, "profile_service", ProfileService(store))
+    monkeypatch.setattr(social_routes, "post_service", post_service)
+    monkeypatch.setattr(social_routes, "group_service", group_service)
+    # A pre-existing post/group so the react/comment/join branches have
+    # something real to act on.
+    post = post_service.create(
+        author=_OTHER_PAYER, body_md="seed", tags=[], group_id="", settlement_tx_id="TX-SEED-P"
+    )
+    group = group_service.create(
+        owner=_OTHER_PAYER, name="Seed Group", description="", settlement_tx_id="TX-SEED-G"
+    )
+
+    routes_by_name = {
+        "x402_social_register": (
+            "/api/v1/x402/social/register",
+            {"body": b'{"name": "A"}'},
+        ),
+        "x402_social_post_create": (
+            "/api/v1/x402/social/posts",
+            {"body": b'{"body_md": "hi"}'},
+        ),
+        "x402_social_comment_create": (
+            f"/api/v1/x402/social/posts/{post.post_id}/comments",
+            {"body": b'{"body_md": "hi"}', "path_params": {"post_id": post.post_id}},
+        ),
+        "x402_social_react": (
+            f"/api/v1/x402/social/posts/{post.post_id}/react",
+            {"body": b'{"value": "up"}', "path_params": {"post_id": post.post_id}},
+        ),
+        "x402_social_follow": (
+            f"/api/v1/x402/social/agents/{_OTHER_PAYER}/follow",
+            {"path_params": {"wallet": _OTHER_PAYER}},
+        ),
+        "x402_social_group_create": (
+            "/api/v1/x402/social/groups",
+            {"body": b'{"name": "G"}'},
+        ),
+        "x402_social_group_join": (
+            f"/api/v1/x402/social/groups/{group.group_id}/join",
+            {"path_params": {"group_id": group.group_id}},
+        ),
+    }
+    path, extra_kwargs = routes_by_name[route_name]
+
+    captured: dict = {}
+
+    def _spy_require_paid_request(*_args: object, **kwargs: object) -> object:
+        captured.update(kwargs)
+        return _settled_result(payer=_PAYER)
+
+    monkeypatch.setattr(social_routes, "require_paid_request", _spy_require_paid_request)
+    monkeypatch.setattr(social_routes, "mark_fulfilled", lambda *_a, **_kw: None)
+
+    route = getattr(social_routes, route_name)
+    route(
+        _request(
+            query={"promo": "LAUNCH1000-TEST", "promo_wallet": _PAYER},
+            path=path,
+            **extra_kwargs,
+        )
+    )
+
+    assert captured.get("promo_code") == "LAUNCH1000-TEST"
+    assert captured.get("promo_wallet") == _PAYER
