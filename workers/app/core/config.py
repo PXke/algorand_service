@@ -305,9 +305,15 @@ COINGECKO_NAME_TTL = env_int("COINGECKO_NAME_TTL", 604800)  # asset name is stat
 COINGECKO_STALE_TTL = env_int("COINGECKO_STALE_TTL", 86400)  # last-good fallback on error
 # Chain-tools indexer/algod cache: tiered by how fast the underlying data
 # actually changes (same philosophy as COINGECKO_*_TTL above).
-CHAIN_CACHE_TTL_STATIC = env_int("CHAIN_CACHE_TTL_STATIC", 604800)  # 7d: permanent once confirmed (asset params, historical blocks/txns)
-CHAIN_CACHE_TTL_SLOW = env_int("CHAIN_CACHE_TTL_SLOW", 300)  # 5m: changes with activity, not sub-minute (app state, holder balances, tx aggregates)
-CHAIN_CACHE_TTL_FAST = env_int("CHAIN_CACHE_TTL_FAST", 60)  # 1m: current-state snapshots (account balance, consensus stats)
+CHAIN_CACHE_TTL_STATIC = env_int(
+    "CHAIN_CACHE_TTL_STATIC", 604800
+)  # 7d: permanent once confirmed (asset params, historical blocks/txns)
+CHAIN_CACHE_TTL_SLOW = env_int(
+    "CHAIN_CACHE_TTL_SLOW", 300
+)  # 5m: changes with activity, not sub-minute (app state, holder balances, tx aggregates)
+CHAIN_CACHE_TTL_FAST = env_int(
+    "CHAIN_CACHE_TTL_FAST", 60
+)  # 1m: current-state snapshots (account balance, consensus stats)
 PRICE_METRICS_SAMPLE_LIMIT = env_int("PRICE_METRICS_SAMPLE_LIMIT", 200)
 PRICE_METRICS_BRIEF_MAX_CHARS = env_int("PRICE_METRICS_BRIEF_MAX_CHARS", 4000)
 
@@ -383,14 +389,15 @@ DEEPSEEK_API_BASE = env_str("DEEPSEEK_API_BASE", "https://api.deepseek.com").rst
 # generally, not specific evidence against either of them, neither of which
 # ever gets tool access or produces an image result either way).
 #
-# DEEPSEEK_MODEL_DIGEST (below) is the only one still on vision-exp
-# (2026-08-27 decision, see git history) -- it doesn't get tool access or
-# produce an image result either, so this experiment doesn't concern it;
-# splits the cache pool that decision unified, an accepted cost of testing
-# the others in isolation.
+# DEEPSEEK_MODEL_DIGEST briefly stayed on vision-exp after the above
+# (2026-08-27 decision, see git history) since it doesn't get tool access or
+# produce an image result either -- but owner decision 2026-09-03 widened
+# the distrust to blanket "no vision-exp anywhere," full stop, closing that
+# carve-out. All five DeepSeek call sites are back on one shared model
+# string.
 DEEPSEEK_MODEL_WRITER = env_str("DEEPSEEK_MODEL_WRITER", "deepseek-v4-flash")
 DEEPSEEK_MODEL_RESEARCH = env_str("DEEPSEEK_MODEL_RESEARCH", "deepseek-v4-flash")
-DEEPSEEK_MODEL_DIGEST = env_str("DEEPSEEK_MODEL_DIGEST", "deepseek-v4-flash-vision-exp")
+DEEPSEEK_MODEL_DIGEST = env_str("DEEPSEEK_MODEL_DIGEST", "deepseek-v4-flash")
 DEEPSEEK_MODEL_TRANSLATE = env_str("DEEPSEEK_MODEL_TRANSLATE", "deepseek-v4-flash")
 # Per-language override: languages in this list translate via DeepSeek
 # (translate_article) instead of the local CPU engines, independent
@@ -435,8 +442,7 @@ DEEPSEEK_TRANSLATE_LANGS = frozenset(
 # (see config.py's DEEPSEEK_MODEL_WRITER comment) -- rubric never gets tool
 # access or produces an image result either way, so this is the same
 # blanket distrust-of-the-experimental-variant call, not new evidence
-# specific to grading. DEEPSEEK_MODEL_DIGEST is now the only one still on
-# vision-exp.
+# specific to grading.
 DEEPSEEK_MODEL_RUBRIC = env_str("DEEPSEEK_MODEL_RUBRIC", "deepseek-v4-flash")
 # DeepSeek's thinking mode returns reasoning in a separate reasoning_content
 # field, but BOTH reasoning_content and content draw from the same max_tokens
@@ -580,9 +586,7 @@ LLM_TIMEOUT_SECONDS = env_int("MISTRAL_TIMEOUT_SECONDS", 660)
 # dead API would block every other compose on the platform for the full
 # worst-case retry window -- 2x balances "tolerate a slow big-context round"
 # against "don't let one stuck special edition wedge the whole pipeline."
-LLM_TIMEOUT_SPECIAL_EDITION_MULTIPLIER = env_int(
-    "MISTRAL_TIMEOUT_SPECIAL_EDITION_MULTIPLIER", 2
-)
+LLM_TIMEOUT_SPECIAL_EDITION_MULTIPLIER = env_int("MISTRAL_TIMEOUT_SPECIAL_EDITION_MULTIPLIER", 2)
 # REQUIRED for article generation — there is no template fallback (owner
 # decision 2026-07-14: a lesser, robotic article is worse than no article).
 # Nothing gets composed until this is True with a valid MISTRAL_API_KEY.

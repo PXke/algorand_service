@@ -98,9 +98,9 @@ def test_writer_and_research_default_off_the_experimental_vision_model() -> None
     assert DEEPSEEK_MODEL_RESEARCH == "deepseek-v4-flash"
 
 
-def test_digest_still_defaults_to_the_vision_model_translate_and_rubric_do_not() -> None:
-    """2026-08-27 put all five DeepSeek call sites on one shared model string; 2026-08-28 pulled writer/research/translate/rubric back off it (owner decision -- distrust of the experimental variant, see config.py's DEEPSEEK_MODEL_WRITER comment), leaving digest as the only one still on vision-exp. `_supports_vision()` reading True for digest is harmless either way: it only gates OPTIONAL image embedding when a tool result actually carries an image_url, which digest never produces regardless of what the model can see."""
-    assert DEEPSEEK_MODEL_DIGEST == "deepseek-v4-flash-vision-exp"
+def test_all_deepseek_call_sites_default_off_vision_exp() -> None:
+    """2026-08-27 put all five DeepSeek call sites on one shared model string; 2026-08-28 pulled writer/research/translate/rubric back off it (owner decision -- distrust of the experimental variant, see config.py's DEEPSEEK_MODEL_WRITER comment), leaving digest as the only one still on vision-exp since it never gets tool access or produces an image result either. Owner decision 2026-09-03 closed that carve-out too -- blanket "no vision-exp anywhere." All five are back on one shared model string."""
+    assert DEEPSEEK_MODEL_DIGEST == "deepseek-v4-flash"
     assert DEEPSEEK_MODEL_TRANSLATE == "deepseek-v4-flash"
     assert DEEPSEEK_MODEL_RUBRIC == "deepseek-v4-flash"
 
