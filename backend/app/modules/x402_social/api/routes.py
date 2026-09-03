@@ -594,7 +594,8 @@ def x402_social_register(request: Request) -> Response:
     if isinstance(outcome, Response):
         return outcome
 
-    mark_fulfilled(result.payment_txid, resource=_REGISTER_RESOURCE)
+    if not result.is_promo:
+        mark_fulfilled(result.payment_txid, resource=_REGISTER_RESOURCE)
     # A session token is a convenience -- the payment already proved key
     # possession (section 4.2: "POST /register also returns one as a
     # convenience — minted directly"). If the session store itself is down,
@@ -778,7 +779,8 @@ def x402_social_post_create(request: Request) -> Response:
     if isinstance(outcome, Response):
         return outcome
 
-    mark_fulfilled(result.payment_txid, resource=_POST_RESOURCE)
+    if not result.is_promo:
+        mark_fulfilled(result.payment_txid, resource=_POST_RESOURCE)
     _record_trending(
         payer=result.payer or "",
         tags=outcome.tags,
@@ -960,7 +962,8 @@ def x402_social_comment_create(request: Request) -> Response:
     if isinstance(outcome, Response):
         return outcome
 
-    mark_fulfilled(result.payment_txid, resource=_COMMENT_RESOURCE)
+    if not result.is_promo:
+        mark_fulfilled(result.payment_txid, resource=_COMMENT_RESOURCE)
     _record_trending(
         payer=result.payer or "",
         tags=post.tags,
@@ -1089,7 +1092,8 @@ def x402_social_react(request: Request) -> Response:
     if isinstance(outcome, Response):
         return outcome
 
-    mark_fulfilled(result.payment_txid, resource=_REACT_RESOURCE)
+    if not result.is_promo:
+        mark_fulfilled(result.payment_txid, resource=_REACT_RESOURCE)
     _record_trending(
         payer=result.payer or "",
         tags=post.tags,
@@ -1151,7 +1155,8 @@ def x402_social_follow(request: Request) -> Response:
     if isinstance(outcome, Response):
         return outcome
 
-    mark_fulfilled(result.payment_txid, resource=_FOLLOW_RESOURCE)
+    if not result.is_promo:
+        mark_fulfilled(result.payment_txid, resource=_FOLLOW_RESOURCE)
     return Response(
         status_code=200,
         headers={"Content-Type": "application/json", **result.settlement_headers},
@@ -1329,7 +1334,8 @@ def x402_social_group_create(request: Request) -> Response:
     if isinstance(outcome, Response):
         return outcome
 
-    mark_fulfilled(result.payment_txid, resource=_GROUP_CREATE_RESOURCE)
+    if not result.is_promo:
+        mark_fulfilled(result.payment_txid, resource=_GROUP_CREATE_RESOURCE)
     return Response(
         status_code=200,
         headers={"Content-Type": "application/json", **result.settlement_headers},
@@ -1420,7 +1426,8 @@ def x402_social_group_join(request: Request) -> Response:
     if isinstance(outcome, Response):
         return outcome
 
-    mark_fulfilled(result.payment_txid, resource=_GROUP_JOIN_RESOURCE)
+    if not result.is_promo:
+        mark_fulfilled(result.payment_txid, resource=_GROUP_JOIN_RESOURCE)
     return Response(
         status_code=200,
         headers={"Content-Type": "application/json", **result.settlement_headers},
@@ -1745,7 +1752,8 @@ def x402_social_report_create(request: Request) -> Response:
     if isinstance(outcome, Response):
         return outcome
 
-    mark_fulfilled(result.payment_txid, resource=_REPORT_RESOURCE)
+    if not result.is_promo:
+        mark_fulfilled(result.payment_txid, resource=_REPORT_RESOURCE)
     return Response(
         status_code=200,
         headers={"Content-Type": "application/json", **result.settlement_headers},
@@ -1846,7 +1854,8 @@ def x402_social_case_vote(request: Request) -> Response:
     if isinstance(outcome, Response):
         return outcome
 
-    mark_fulfilled(result.payment_txid, resource=_CASE_VOTE_RESOURCE)
+    if not result.is_promo:
+        mark_fulfilled(result.payment_txid, resource=_CASE_VOTE_RESOURCE)
     return Response(
         status_code=200,
         headers={"Content-Type": "application/json", **result.settlement_headers},
