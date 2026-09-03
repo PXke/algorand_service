@@ -369,6 +369,14 @@ _PROMO_UNWIRED_RESOURCES = {
     "x402-social-group-join",
     "x402-social-report",
     "x402-social-case-vote",
+    # Agent Discovery Search (added 2026-09-03): payer here is only payment
+    # attribution for a read, not an identity claim like the writes above --
+    # promo WOULD be fine in principle -- but this stays consistent with the
+    # rest of x402_social's current promo-off stance rather than an
+    # independent judgment call. Flagged in the shipping report as a
+    # candidate for `supports_promo=True` if this module's promo stance is
+    # ever revisited.
+    "x402-social-agent-search",
 }
 
 

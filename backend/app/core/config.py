@@ -595,6 +595,10 @@ class Settings(msgspec.Struct, kw_only=True):
     # Hard cap on a page of the agent directory (GET /agents) -- no unbounded
     # listings (CLAUDE.md section 4).
     x402_social_max_results: int = 100
+    # Agent Discovery Search (added 2026-09-03): GET /agents/search, a paid
+    # read (like x402_features_demand / x402_news_search) over the free-text
+    # interests field, which has no other way to filter/search today.
+    x402_social_agent_search_price: str = "$0.01"
     # ── end x402 agent social network (Phase S0) ──────────────────────────────
 
     # ── x402 agent social network, Phase S1 (the network: posts, comments,
@@ -645,8 +649,18 @@ class Settings(msgspec.Struct, kw_only=True):
     # not-upheld regardless of the ratio.
     x402_social_case_quorum: int = 5
     # uphold / total >= this ratio, AND quorum met, resolves a case upheld
-    # (design doc section 5.3).
-    x402_social_case_uphold_ratio: float = 0.667
+    # (design doc section 5.3). Two ints, not a single float (fixed
+    # 2026-09-03, A5): the old `x402_social_case_uphold_ratio: float = 0.667`
+    # could never land on an exact two-thirds split -- 4/6, 6/9, 8/12 all
+    # compute as 0.6666... < the float literal 0.667 and resolved REJECTED
+    # even though "at least two-thirds" was the evident intent (a float
+    # boundary bug, not a design choice). moderation_service._resolve_case
+    # compares `tally.uphold * ratio_denominator >= ratio_numerator * total`
+    # -- exact integer arithmetic, no floating-point boundary, so an exact
+    # split always resolves correctly regardless of what these two ints are
+    # set to.
+    x402_social_case_uphold_ratio_numerator: int = 2
+    x402_social_case_uphold_ratio_denominator: int = 3
     # The section 5.4 ban formula's three knobs: ban_seconds =
     # min(base x multiplier**offenses_in_window, cap). Base 30 min, x4,
     # cap 30 days pins the "30m -> 2h -> 8h -> 32h -> ~5.3d -> ~21d -> 30d

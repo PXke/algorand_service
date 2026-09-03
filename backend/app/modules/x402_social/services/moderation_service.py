@@ -299,8 +299,33 @@ class ModerationService:
             window_ends_at_epoch=epoch + settings.x402_social_case_window_seconds,
             state=CASE_STATE_OPEN,
         )
-        self.store.insert_case(case)
-        self._bump_reported_count(target_wallet)
+        # Both claims above have no TTL and are only ever released as part of
+        # a case's own resolution (_resolve_case, below) -- which requires a
+        # case row that, at this point, does not exist yet. If either write
+        # below throws, this case never becomes durable and can therefore
+        # never resolve, so without this compensating release BOTH claims
+        # would leak forever: the target becomes permanently unreportable
+        # and the reporter permanently loses one of their max_open open-
+        # report slots (finding-class 2026-09-03, A1). Same "wrap the
+        # post-claim writes, release on any failure before re-raising"
+        # pattern group_service.create already uses for its own claim-then-
+        # write sequence (the name claim there) -- including that same
+        # method's accepted edge case: if insert_case itself succeeds but
+        # only _bump_reported_count fails, the claims are still released
+        # even though a case now durably exists, exactly mirroring what
+        # group_service.create already accepts for a group whose name claim
+        # is freed after the group row itself was already stored. A full
+        # compensating rollback of insert_case is overkill for that edge
+        # case, same reasoning as this codebase's other "our failure, not
+        # the caller's" recovery paths.
+        try:
+            self.store.insert_case(case)
+            self._bump_reported_count(target_wallet)
+        except Exception:
+            self._release_open_report_claims(
+                target_id=target_id, case_id=case_id, reporter=reporter
+            )
+            raise
 
         if category == CATEGORY_ILLEGAL_CONTENT:
             # No real operator-paging integration exists in this backend
@@ -319,13 +344,41 @@ class ModerationService:
             )
         return case
 
+    def _release_open_report_claims(self, *, target_id: str, case_id: str, reporter: str) -> None:
+        """Best-effort compensating release of the two claims open_report takes before the case is durably stored (A1, 2026-09-03) -- see that method's own comment on why leaving either claimed forever is the bug. Never masks a release failure: logs a warning with the exact wallet/target that may now need manual cleanup, then returns (the caller re-raises the ORIGINAL exception)."""
+        try:
+            self.store.release_open_case_for_target(target_id=target_id, case_id=case_id)
+        except Exception:
+            logger.warning(
+                "x402 social moderation: failed to release the open-case-per-target claim "
+                "for target_id=%s case_id=%s after an open_report failure -- this target may "
+                "now be permanently unreportable; manual cleanup may be required",
+                target_id,
+                case_id,
+                exc_info=True,
+            )
+        try:
+            self.store.release_reporter_slot(reporter=reporter, case_id=case_id)
+        except Exception:
+            logger.warning(
+                "x402 social moderation: failed to release reporter=%s's open-report slot "
+                "for case_id=%s after an open_report failure -- this reporter's open-report "
+                "count may now be permanently overcounted by one",
+                reporter,
+                case_id,
+                exc_info=True,
+            )
+
     def _bump_reported_count(self, target_wallet: str) -> None:
-        """Increment `target_wallet`'s reported_count by one -- read-modify-write, an accepted small race window under concurrent opens against the same wallet from different target_ids (see migration 108's own note; a cosmetic karma counter, never a ban/payment-correctness input)."""
+        """Increment `target_wallet`'s reported_count by one -- an atomic read-modify-write via mutate_standing (fixed 2026-09-03, A2: this used to be a plain get_standing-then-upsert_standing pair, which raced under concurrent opens against the same wallet the same way every other standing mutation did -- see mutate_standing's own docstring)."""
         if not target_wallet:
             return
-        standing = self._get_standing_or_default(target_wallet)
-        standing.reported_count += 1
-        self.store.upsert_standing(standing)
+
+        def _mutate(standing: StoredStanding) -> StoredStanding:
+            standing.reported_count += 1
+            return standing
+
+        self.store.mutate_standing(target_wallet, _mutate)
 
     # ------------------------------------------------------------- #
     # Read cases (design doc section 5.2) -- both touch _resolve_if_due.
@@ -370,6 +423,24 @@ class ModerationService:
         the voter must not currently be banned (design doc section 5.4: "a
         banned agent must not help swing the very system that banned it").
         One vote per wallet per case, forever, via LWT.
+
+        Documented, not fully closed (A4, 2026-09-03): there is a TOCTOU
+        race between this method's open-state check above (including the
+        `_resolve_if_due` touch) and `try_add_case_vote`'s own LWT below --
+        the case can lazily resolve, elsewhere, in that gap. A vote that
+        wins its per-voter LWT after that point is still durably counted
+        (`increment_case_vote_total` runs unconditionally once the LWT is
+        won) even though the case that decided the verdict is already
+        resolved: the payer's vote is real and paid-for, but it will never
+        be reflected in that case's own tally or in `_settle_vote_karma`'s
+        bookkeeping for this case, since resolution already read the vote
+        list once and will not revisit an already-resolved case. No cheap
+        fix closes this without a larger redesign: the case's own state and
+        the per-voter vote LWT live in different tables, so there is no
+        single conditional write that can guard both at once the way
+        `UPDATE_CASE_RESOLUTION`'s own `IF state = 'open'` guards resolution
+        itself. Reported as documented-not-fully-closed rather than
+        silently unmentioned.
         """
         if verdict not in CASE_VERDICTS:
             raise SocialError(
@@ -444,15 +515,32 @@ class ModerationService:
         tally = self.store.get_case_vote_totals(case.case_id)
         total = tally.uphold + tally.reject
         quorum = settings.x402_social_case_quorum
-        ratio = settings.x402_social_case_uphold_ratio
-        upheld = total >= quorum and (tally.uphold / total) >= ratio if total else False
+        # Exact-fraction comparison (fixed 2026-09-03, A5) -- NOT
+        # `(tally.uphold / total) >= ratio` as a float threshold: with the
+        # numerator/denominator pinned to 2/3, that float form could never
+        # land on an exact two-thirds split (4/6, 6/9, 8/12 all computed as
+        # 0.6666... < the float literal 0.667 the OLD single-float setting
+        # used, and resolved REJECTED even though "at least two-thirds" was
+        # the evident intent). `tally.uphold * ratio_den >= ratio_num * total`
+        # is exactly equivalent to "uphold ratio >= ratio_num/ratio_den" with
+        # pure integer arithmetic -- no floating-point boundary, and an exact
+        # split always resolves upheld regardless of what these two ints are
+        # set to. x402_social_case_uphold_ratio_numerator/_denominator
+        # replace the old single float setting (config.py) for exactly this
+        # reason.
+        ratio_num = settings.x402_social_case_uphold_ratio_numerator
+        ratio_den = settings.x402_social_case_uphold_ratio_denominator
+        upheld = (
+            total >= quorum and tally.uphold * ratio_den >= ratio_num * total if total else False
+        )
+        ratio_display = ratio_num / ratio_den if ratio_den else 0.0
         resolved_epoch = int(now.timestamp())
 
         if upheld:
             state = CASE_STATE_UPHELD
             note = (
                 f"upheld: {tally.uphold} of {total} votes reached quorum "
-                f"(>= {quorum}) and the required uphold ratio (>= {ratio:.0%})"
+                f"(>= {quorum}) and the required uphold ratio (>= {ratio_display:.0%})"
             )
         else:
             state = CASE_STATE_REJECTED
@@ -464,8 +552,8 @@ class ModerationService:
             else:
                 note = (
                     f"report did not reach the required uphold ratio: {tally.uphold} of "
-                    f"{total} votes ({tally.uphold / total:.0%} < {ratio:.0%}); resolved as "
-                    "not-upheld"
+                    f"{total} votes ({tally.uphold / total:.0%} < {ratio_display:.0%}); "
+                    "resolved as not-upheld"
                 )
 
         content_snapshot = case.content_snapshot
@@ -518,60 +606,73 @@ class ModerationService:
         self._apply_ban(case.target_wallet, resolved_at_epoch=case.resolved_at_epoch)
 
     def _apply_ban(self, wallet: str, *, resolved_at_epoch: int) -> None:
-        """The section 5.4 ban formula, applied once per upheld case against `wallet`."""
+        """The section 5.4 ban formula, applied once per upheld case against `wallet`, via mutate_standing (fixed 2026-09-03, A2 -- see that method's own docstring: this is the exact mutation a concurrent stale-read overwrite used to silently drop)."""
         if not wallet:
             return
-        standing = self._get_standing_or_default(wallet)
-        offenses_in_window = offenses_in_decay_window(
-            standing.offenses,
-            now_epoch=resolved_at_epoch,
-            decay_days=settings.x402_social_offense_decay_days,
-        )
-        ban_seconds = compute_ban_seconds(
-            offenses_in_window,
-            base_seconds=settings.x402_social_ban_base_seconds,
-            multiplier=settings.x402_social_ban_multiplier,
-            cap_seconds=settings.x402_social_ban_cap_seconds,
-        )
-        standing.offense_count += 1
-        standing.last_offense_at_epoch = resolved_at_epoch
-        standing.offenses = [*standing.offenses, resolved_at_epoch]
-        standing.banned_until_epoch = resolved_at_epoch + ban_seconds
-        self.store.upsert_standing(standing)
+
+        def _mutate(standing: StoredStanding) -> StoredStanding:
+            offenses_in_window = offenses_in_decay_window(
+                standing.offenses,
+                now_epoch=resolved_at_epoch,
+                decay_days=settings.x402_social_offense_decay_days,
+            )
+            ban_seconds = compute_ban_seconds(
+                offenses_in_window,
+                base_seconds=settings.x402_social_ban_base_seconds,
+                multiplier=settings.x402_social_ban_multiplier,
+                cap_seconds=settings.x402_social_ban_cap_seconds,
+            )
+            standing.offense_count += 1
+            standing.last_offense_at_epoch = resolved_at_epoch
+            standing.offenses = [*standing.offenses, resolved_at_epoch]
+            standing.banned_until_epoch = resolved_at_epoch + ban_seconds
+            return standing
+
+        self.store.mutate_standing(wallet, _mutate)
 
     def _reset_reporter_streak(self, reporter: str) -> None:
-        """An upheld report resets the reporter's report_rejection_streak to 0 (design doc section 5.4.1, chosen explicitly over merely not-incrementing -- see that section's own argument)."""
+        """An upheld report resets the reporter's report_rejection_streak to 0 (design doc section 5.4.1, chosen explicitly over merely not-incrementing -- see that section's own argument). Via mutate_standing (A2)."""
         if not reporter:
             return
-        standing = self._get_standing_or_default(reporter)
-        standing.report_rejection_streak = 0
-        self.store.upsert_standing(standing)
+
+        def _mutate(standing: StoredStanding) -> StoredStanding:
+            standing.report_rejection_streak = 0
+            return standing
+
+        self.store.mutate_standing(reporter, _mutate)
 
     def _escalate_reporter_cooldown(self, reporter: str, *, resolved_at_epoch: int) -> None:
-        """Every rejected resolution increments the reporter's rejection streak and sets a filing cooldown that doubles per consecutive rejection, capped (design doc section 5.4.1). Does NOT shorten an already-running cooldown -- only the streak resets on an upheld report; a rejection's own cooldown always runs its full course."""
+        """Every rejected resolution increments the reporter's rejection streak and sets a filing cooldown that doubles per consecutive rejection, capped (design doc section 5.4.1). Does NOT shorten an already-running cooldown -- only the streak resets on an upheld report; a rejection's own cooldown always runs its full course. Via mutate_standing (A2)."""
         if not reporter:
             return
-        standing = self._get_standing_or_default(reporter)
-        standing.rejected_report_count += 1
-        standing.report_rejection_streak += 1
-        cooldown_seconds = compute_report_cooldown_seconds(
-            standing.report_rejection_streak,
-            base_seconds=settings.x402_social_report_cooldown_base_seconds,
-            multiplier=_REPORT_COOLDOWN_MULTIPLIER,
-            cap_seconds=settings.x402_social_report_cooldown_cap_seconds,
-        )
-        standing.report_cooldown_until_epoch = resolved_at_epoch + cooldown_seconds
-        self.store.upsert_standing(standing)
+
+        def _mutate(standing: StoredStanding) -> StoredStanding:
+            standing.rejected_report_count += 1
+            standing.report_rejection_streak += 1
+            cooldown_seconds = compute_report_cooldown_seconds(
+                standing.report_rejection_streak,
+                base_seconds=settings.x402_social_report_cooldown_base_seconds,
+                multiplier=_REPORT_COOLDOWN_MULTIPLIER,
+                cap_seconds=settings.x402_social_report_cooldown_cap_seconds,
+            )
+            standing.report_cooldown_until_epoch = resolved_at_epoch + cooldown_seconds
+            return standing
+
+        self.store.mutate_standing(reporter, _mutate)
 
     def _settle_vote_karma(self, case_id: str, *, upheld: bool, limit: int) -> None:
-        """Every voter's votes_cast increments; votes_matched_resolution increments too iff their vote matched the outcome (design doc section 5.3's own resolver bookkeeping note)."""
+        """Every voter's votes_cast increments; votes_matched_resolution increments too iff their vote matched the outcome (design doc section 5.3's own resolver bookkeeping note). Each voter's row is mutated via mutate_standing (A2) -- a separate atomic RMW per voter, since each touches a different wallet."""
         resolution_verdict = VERDICT_UPHOLD if upheld else VERDICT_REJECT
         for voter, verdict in self.store.list_case_votes(case_id, limit=limit):
-            standing = self._get_standing_or_default(voter)
-            standing.votes_cast += 1
-            if verdict == resolution_verdict:
-                standing.votes_matched_resolution += 1
-            self.store.upsert_standing(standing)
+            matched = verdict == resolution_verdict
+
+            def _mutate(standing: StoredStanding, matched: bool = matched) -> StoredStanding:
+                standing.votes_cast += 1
+                if matched:
+                    standing.votes_matched_resolution += 1
+                return standing
+
+            self.store.mutate_standing(voter, _mutate)
 
     # ------------------------------------------------------------- #
     # Hard-delete machinery (design doc section 5.4.2) -- shared by the

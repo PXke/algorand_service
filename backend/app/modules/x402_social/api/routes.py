@@ -57,6 +57,8 @@ from app.modules.x402.discovery import describe_json_endpoint
 from app.modules.x402.paid_request import mark_fulfilled, require_paid_request, run_with_refund
 from app.modules.x402.probe_payers import is_probe_payer
 from app.modules.x402_social.models.domain import (
+    AGENT_SEARCH_DEFAULT_LIMIT,
+    AGENT_SEARCH_MAX_LIMIT,
     CASE_STATE_OPEN,
     MAX_COMMENT_BYTES,
     MAX_REPORT_NOTE_LEN,
@@ -94,7 +96,11 @@ from app.modules.x402_social.services.group_service import GroupService, normali
 from app.modules.x402_social.services.markdown_guard import validate_markdown_body
 from app.modules.x402_social.services.moderation_service import ModerationService
 from app.modules.x402_social.services.post_service import PostService, normalize_tags
-from app.modules.x402_social.services.profile_service import ProfileService, validate_profile_fields
+from app.modules.x402_social.services.profile_service import (
+    ProfileService,
+    normalize_interests,
+    validate_profile_fields,
+)
 from app.modules.x402_social.services.rate_limit import (
     free_write_rate_limited,
     read_rate_limited,
@@ -150,6 +156,7 @@ moderation_service = ModerationService(
 )
 
 _REGISTER_RESOURCE = "x402-social-register"
+_AGENT_SEARCH_RESOURCE = "x402-social-agent-search"
 _POST_RESOURCE = "x402-social-post"
 _COMMENT_RESOURCE = "x402-social-comment"
 _REACT_RESOURCE = "x402-social-react"
@@ -703,6 +710,106 @@ def x402_social_agents_list(request: Request) -> Response | dict:
     return {"agents": [_agent_json(item) for item in items]}
 
 
+def x402_social_agent_search(request: Request) -> Response:
+    """Paid: search registered agents by interest tag (added 2026-09-03).
+
+    An external agent, via this same social network, asked for a way to
+    filter/search the free-text `interests` profile field, which GET
+    /agents cannot do today. `interests` is required (comma-separated
+    tags, normalized the SAME way profile_service.validate_profile_fields
+    normalizes a profile's own interests -- profile_service.normalize_interests,
+    reused directly here so a search tag and a stored tag are transformed
+    identically) and `limit` is clamped like every other list endpoint in
+    this module. Both are parsed and validated BEFORE the payment gate, so
+    a malformed query is a free 400. ANY-match: an agent matching at least
+    one requested tag is a candidate, ranked by number of matching tags
+    descending then registration recency descending -- see
+    ProfileService.search_by_interests's own docstring for the ranking and
+    bounded-scan mechanics.
+    """
+    raw_interests = query_param(request.query_params.get("interests", ""))
+    if not raw_interests:
+        return json_error_response(400, "invalid_request", "interests is required")
+    try:
+        interests = normalize_interests(raw_interests.split(","))
+    except SocialError as exc:
+        return json_error_from_platform(exc)
+    if not interests:
+        return json_error_response(
+            400, "invalid_request", "interests must include at least one non-empty tag"
+        )
+    limit = _limit_param(request, default=AGENT_SEARCH_DEFAULT_LIMIT)
+    if isinstance(limit, Response):
+        return limit
+    clamped_limit = max(1, min(limit, AGENT_SEARCH_MAX_LIMIT))
+
+    if circuit_breaker.is_tripped(_AGENT_SEARCH_RESOURCE):
+        return json_error_response(
+            503,
+            "temporarily_disabled",
+            "This endpoint is temporarily disabled after an elevated failure rate. Try again "
+            "later.",
+        )
+
+    result = require_paid_request(
+        request,
+        price=settings.x402_social_agent_search_price,
+        resource=_AGENT_SEARCH_RESOURCE,
+        description=(
+            "Search registered agents by interest tag (?interests=defi,nft, ANY-match), "
+            "ranked by number of matching tags then registration recency. The free "
+            "GET /api/v1/x402/social/agents lists every agent newest-first with no filter."
+        ),
+        extensions=describe_json_endpoint(
+            input={"interests": "defi,nft", "limit": 25},
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "interests": {"type": "string"},
+                    "limit": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": AGENT_SEARCH_MAX_LIMIT,
+                    },
+                },
+                "required": ["interests"],
+            },
+            output_example={
+                "agents": [{**_AGENT_OUTPUT_EXAMPLE, "matched_interests": ["defi"]}],
+                "query": {"interests": ["defi", "nft"], "limit": 25},
+                "settlement_tx_id": "...",
+            },
+        ),
+    )
+    if result.error:
+        return result.error
+
+    outcome = run_with_refund(
+        result,
+        resource=_AGENT_SEARCH_RESOURCE,
+        product_write=lambda: profile_service.search_by_interests(interests, limit=clamped_limit),
+        request=request,
+    )
+    if isinstance(outcome, Response):
+        return outcome
+
+    mark_fulfilled(result.payment_txid, resource=_AGENT_SEARCH_RESOURCE)
+    return Response(
+        status_code=200,
+        headers={"Content-Type": "application/json", **result.settlement_headers},
+        description=serialization.dumps(
+            {
+                "agents": [
+                    {**_agent_json(profile), "matched_interests": matched}
+                    for profile, matched in outcome
+                ],
+                "query": {"interests": interests, "limit": clamped_limit},
+                "settlement_tx_id": result.payment_txid or "",
+            }
+        ),
+    )
+
+
 # --------------------------------------------------------------------------- #
 # S1: posts and comments (design doc section 2.2)
 # --------------------------------------------------------------------------- #
@@ -989,7 +1096,13 @@ def x402_social_comment_list(request: Request) -> Response | dict:
         )
     post_id = query_param(request.path_params.get("post_id", ""))
     post = post_service.get(post_id) if post_id else None
-    if post is None:
+    # Same "deleted/hidden_platform == not found" contract every other free
+    # read on a post already applies (x402_social_post_detail,
+    # x402_social_comment_create, x402_social_react) -- fixed 2026-09-03
+    # (A3): this used to only check `post is None`, so a deleted or
+    # platform-hidden post's comments kept serving here even though the
+    # post itself was gone from every other read surface.
+    if post is None or post.deleted or post.hidden_platform:
         return json_error_response(404, "not_found", "No post with that id")
     limit = _limit_param(request, default=settings.x402_social_max_results)
     if isinstance(limit, Response):
@@ -1881,6 +1994,7 @@ def register_x402_social_routes(app: Router) -> None:
     app.patch("/api/v1/x402/social/profile")(x402_social_profile_patch)
     app.get("/api/v1/x402/social/agents/:wallet")(x402_social_agent_detail)
     app.get("/api/v1/x402/social/agents")(x402_social_agents_list)
+    app.get("/api/v1/x402/social/agents/search")(x402_social_agent_search)
 
     # Phase S1: posts, comments, reactions.
     app.post("/api/v1/x402/social/posts")(x402_social_post_create)

@@ -40,6 +40,21 @@ MAX_MISSION_LEN = 512
 MAX_LOCATION_LEN = 128
 MAX_INTERESTS = 10
 MAX_INTEREST_LEN = 32
+
+# GET /agents/search (Agent Discovery Search, added 2026-09-03): default and
+# hard-capped page size for the paid interest search, a module constant
+# rather than a settings knob for the same "fixed shape bound, not an
+# operator-tunable price/gate" reason MAX_TAG_LENGTH etc. are -- deliberately
+# lower than x402_social_max_results (the shared free-listing cap) because
+# each result here costs one extra point-read of the matched wallet's full
+# profile on top of the search itself. AGENT_SEARCH_PER_TAG_CANDIDATE_CAP
+# bounds how many candidate wallets a single requested interest tag can
+# contribute before ranking/limiting -- the search-side twin of GRAPH_SCAN_LIMIT
+# (CLAUDE.md section 4: no unbounded listings, and no popular tag can turn
+# this into an unbounded scan of x402_social_agents_by_interest).
+AGENT_SEARCH_DEFAULT_LIMIT = 25
+AGENT_SEARCH_MAX_LIMIT = 50
+AGENT_SEARCH_PER_TAG_CANDIDATE_CAP = 200
 # Bytes, not characters -- emoji is free text (design doc: "avatar
 # stand-in"), and a multi-codepoint emoji sequence (ZWJ, skin-tone modifier)
 # can be several UTF-8 bytes per visible glyph.
@@ -305,6 +320,18 @@ GROUP_HARD_DELETE_MAX_PAGES = 50
 # swap (design doc section 5.4.1: "bounded retries on contention; a lost
 # race that fills the set => refuse").
 REPORTER_SLOT_CAS_RETRIES = 5
+
+# Bounded CAS-retry budget for x402_social_standing's full-row compare-and-
+# swap (stores.cassandra.CassandraSocialStore.mutate_standing, fixed
+# 2026-09-03: two concurrent case resolutions touching the SAME wallet's
+# standing -- e.g. a ban write and a vote-karma settlement -- could
+# previously interleave a stale read/full-row-overwrite and silently drop
+# one side's write, including a ban). Same bounded-retry-then-give-up shape
+# as REPORTER_SLOT_CAS_RETRIES, except mutate_standing raises rather than
+# silently discarding the mutation on exhaustion -- a standing mutation can
+# carry a ban, so a silent give-up here would just reproduce the bug this
+# exists to fix.
+STANDING_CAS_RETRIES = 5
 
 TARGET_POST = "post"
 TARGET_AGENT = "agent"

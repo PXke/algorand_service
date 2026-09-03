@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import uuid
+from collections.abc import Callable
 from datetime import UTC, datetime
 
 from app.core.cassandra import execute_parallel_with_args, get_cassandra_session
@@ -14,6 +15,7 @@ from app.modules.x402_social.models.domain import (
     GRAPH_SCAN_LIMIT,
     GROUPS_PARTITION,
     REPORTER_SLOT_CAS_RETRIES,
+    STANDING_CAS_RETRIES,
     VERDICT_UPHOLD,
     AgentProfile,
     CaseTally,
@@ -278,6 +280,27 @@ def _recency_params(item: AgentProfile) -> tuple:
     )
 
 
+def _standing_values(item: StoredStanding) -> tuple:
+    """The 10 non-wallet column values for x402_social_standing, in column order -- shared by INSERT_STANDING_IF_ABSENT (via _standing_params), UPSERT_STANDING, and UPDATE_STANDING_IF_MATCH's SET and IF clauses (mutate_standing) so all three never drift out of sync on column order."""
+    return (
+        item.offense_count,
+        _dt(item.last_offense_at_epoch) if item.last_offense_at_epoch else None,
+        _dt(item.banned_until_epoch) if item.banned_until_epoch else None,
+        [_dt(e) for e in item.offenses],
+        item.reported_count,
+        item.rejected_report_count,
+        item.report_rejection_streak,
+        _dt(item.report_cooldown_until_epoch) if item.report_cooldown_until_epoch else None,
+        item.votes_cast,
+        item.votes_matched_resolution,
+    )
+
+
+def _standing_params(item: StoredStanding) -> tuple:
+    """Bind params for UPSERT_STANDING / INSERT_STANDING_IF_ABSENT: wallet, then _standing_values."""
+    return (item.wallet, *_standing_values(item))
+
+
 class CassandraSocialStore:
     """Cassandra-backed x402 social agent-profile storage.
 
@@ -350,6 +373,29 @@ class CassandraSocialStore:
         session = get_cassandra_session()
         rows = session.execute(X402SocialStmts.LIST_RECENT_AGENTS, (AGENTS_PARTITION, limit))
         return [_row_to_agent_from_recency(row) for row in rows]
+
+    # ----------------------------------------------------------------- #
+    # Agent Discovery Search (added 2026-09-03) -- x402_social_agents_by_interest,
+    # migration 110. Kept in sync with AgentProfile.interests by
+    # services/profile_service.py.
+    # ----------------------------------------------------------------- #
+    def upsert_agent_interest(self, *, interest: str, wallet: str, created_at_epoch: int) -> None:
+        """Add (or overwrite) one (interest, wallet) row to the interest lookup."""
+        session = get_cassandra_session()
+        session.execute(
+            X402SocialStmts.UPSERT_AGENT_INTEREST, (interest, wallet, _dt(created_at_epoch))
+        )
+
+    def delete_agent_interest(self, *, interest: str, wallet: str) -> None:
+        """Remove one (interest, wallet) row from the interest lookup. A no-op if it did not exist."""
+        session = get_cassandra_session()
+        session.execute(X402SocialStmts.DELETE_AGENT_INTEREST, (interest, wallet))
+
+    def list_agents_by_interest(self, interest: str, *, limit: int) -> list[tuple[str, int]]:
+        """Up to `limit` (wallet, created_at_epoch) pairs registered under one interest tag."""
+        session = get_cassandra_session()
+        rows = session.execute(X402SocialStmts.LIST_AGENTS_BY_INTEREST, (interest, limit))
+        return [(row.wallet, _epoch(row.created_at)) for row in rows]
 
     # ----------------------------------------------------------------- #
     # Phase S1: posts and comments
@@ -825,6 +871,13 @@ class CassandraSocialStore:
         )
         return bool(result.was_applied)
 
+    def release_open_case_for_target(self, *, target_id: str, case_id: str) -> None:
+        """Best-effort compensating release of the open-case-per-target claim THIS case_id won (A1, 2026-09-03) -- used ONLY when open_report fails after the claim but before the case is fully stored. Reuses DELETE_OPEN_CASE_BY_TARGET_IF_OWNED, the same statement resolve_case's own win path already uses -- IF case_id = ? so this can only ever release the exact claim THIS case_id won, never a different (later) case's legitimate claim on the same target."""
+        session = get_cassandra_session()
+        session.execute(
+            X402SocialStmts.DELETE_OPEN_CASE_BY_TARGET_IF_OWNED, (target_id, _uuid(case_id))
+        )
+
     def get_open_case_id_for_target(self, target_id: str) -> str | None:
         """The currently-open case_id for `target_id`, or None -- used only to report it in a caller-fault 409's message when try_claim_open_case_for_target loses."""
         session = get_cassandra_session()
@@ -938,14 +991,35 @@ class CassandraSocialStore:
         return bool(result.was_applied)
 
     def increment_case_vote_total(self, case_id: str, *, verdict: str) -> None:
-        """Add one to a case's uphold or reject counter, atomically. Called EXACTLY ONCE, only after try_add_case_vote returned True for this call -- same "issued exactly once" contract as increment_reaction_total."""
+        """Add one to a case's uphold or reject counter, atomically. Called EXACTLY ONCE, only after try_add_case_vote returned True for this call -- same "issued exactly once" contract as increment_reaction_total.
+
+        On a failure here the vote IS durably recorded in
+        x402_social_case_votes (try_add_case_vote already won) -- only the
+        denormalized tally is under-counted, the same "core write succeeded,
+        only a counter is stale" class increment_reaction_total documents.
+        Fixed 2026-09-03 (A4): this used to fail silently (no log line, same
+        contract as increment_reaction_total's success path but missing that
+        method's OWN warning-log-then-re-raise on failure) -- now logs at
+        warning with the same detail before re-raising.
+        """
         session = get_cassandra_session()
         stmt = (
             X402SocialStmts.INCREMENT_CASE_UPHOLD
             if verdict == VERDICT_UPHOLD
             else X402SocialStmts.INCREMENT_CASE_REJECT
         )
-        session.execute(stmt, (_uuid(case_id),))
+        try:
+            session.execute(stmt, (_uuid(case_id),))
+        except Exception:
+            logger.warning(
+                "x402 social moderation: vote recorded for case_id=%s verdict=%s but the vote "
+                "tally counter increment failed -- the uphold/reject total for this case is now "
+                "under-counted by one",
+                case_id,
+                verdict,
+                exc_info=True,
+            )
+            raise
 
     def get_case_vote_totals(self, case_id: str) -> CaseTally:
         """Return a case's current uphold/reject totals, (0, 0) if never voted on."""
@@ -968,28 +1042,89 @@ class CassandraSocialStore:
         return None if row is None else _row_to_standing(row)
 
     def upsert_standing(self, item: StoredStanding) -> None:
-        """Full-row overwrite of one wallet's standing (CLAUDE.md section 3: never a partial UPDATE -- the articles_feed phantom-null-row class of bug). Callers always read-modify-write the WHOLE row (moderation_service.py)."""
+        """Full-row, UNCONDITIONAL overwrite of one wallet's standing (CLAUDE.md section 3: never a PARTIAL UPDATE -- the articles_feed phantom-null-row class of bug).
+
+        This is NOT what a read-modify-write caller should use directly --
+        see base.SocialStore.upsert_standing's own docstring: an
+        unconditional overwrite from a stale read is exactly what let two
+        concurrent read-modify-writes clobber each other (finding-class
+        2026-09-03, A2), which is why every moderation_service.py caller now
+        goes through mutate_standing (below) instead. This method survives
+        for direct seeding (tests) and any future caller that has already
+        re-derived the row's true current state some other way.
+        """
         session = get_cassandra_session()
-        session.execute(
-            X402SocialStmts.UPSERT_STANDING,
-            (
-                item.wallet,
-                item.offense_count,
-                _dt(item.last_offense_at_epoch) if item.last_offense_at_epoch else None,
-                _dt(item.banned_until_epoch) if item.banned_until_epoch else None,
-                [_dt(e) for e in item.offenses],
-                item.reported_count,
-                item.rejected_report_count,
-                item.report_rejection_streak,
-                (
-                    _dt(item.report_cooldown_until_epoch)
-                    if item.report_cooldown_until_epoch
-                    else None
-                ),
-                item.votes_cast,
-                item.votes_matched_resolution,
-            ),
+        session.execute(X402SocialStmts.UPSERT_STANDING, _standing_params(item))
+
+    def mutate_standing(
+        self, wallet: str, mutate: Callable[[StoredStanding], StoredStanding]
+    ) -> StoredStanding:
+        """Atomic read-modify-write of one wallet's standing row via bounded-retry compare-and-swap (A2, 2026-09-03).
+
+        The OLD pattern every moderation_service.py caller used --
+        get_standing() then a plain upsert_standing() of the mutated copy,
+        as two separate calls -- let two concurrent mutations of the SAME
+        wallet (e.g. one case resolution's ban write racing another case
+        resolution's vote-karma settlement) interleave a stale read between
+        them: the second writer's unconditional full-row INSERT silently
+        overwrote the first writer's change, including a ban. This method
+        closes that window: first-ever write for a wallet is an LWT insert
+        (INSERT_STANDING_IF_ABSENT, no prior row to CAS against -- same
+        precedent as INSERT_AGENT_IF_ABSENT); every write after that is a
+        full-row CAS (UPDATE_STANDING_IF_MATCH, mirroring
+        UPDATE_REPORTER_SLOTS_IF_MATCH's own "read, mutate, UPDATE ... IF
+        every compared column still equals what was just read" shape,
+        generalized to a full row since standing mixes plain columns that
+        cannot be true Cassandra `counter`s -- see migration 108's own
+        note). A losing CAS means a concurrent writer touched the row in
+        between; this re-reads and retries, bounded by STANDING_CAS_RETRIES.
+
+        Raises RuntimeError if the mutation still has not converged after
+        that many attempts (logged at ERROR first) -- unlike
+        release_reporter_slot's own best-effort give-up, a standing
+        mutation can carry a ban, so silently discarding it here would just
+        reproduce the bug this method exists to fix; a caller several
+        layers up (get_case / cast_vote / list_open_cases) surfaces this as
+        an unhandled 500 instead of a fabricated success.
+        """
+        session = get_cassandra_session()
+        for _ in range(STANDING_CAS_RETRIES):
+            current = self.get_standing(wallet)
+            if current is None:
+                base = StoredStanding(wallet=wallet)
+                updated = mutate(base)
+                result = session.execute(
+                    X402SocialStmts.INSERT_STANDING_IF_ABSENT, _standing_params(updated)
+                )
+                if result.was_applied:
+                    return updated
+                continue  # someone else created the row first -- retry as an update
+            # Snapshot the IF-clause values BEFORE calling mutate(): every
+            # real caller's mutator (moderation_service.py) mutates the
+            # StoredStanding it is handed IN PLACE and returns that same
+            # object, so `current` and `updated` below are the identical
+            # object -- computing the "old" values from `current` AFTER
+            # mutate() would silently capture the POST-mutation values
+            # instead, making the IF clause compare the new row against
+            # itself and never match a genuinely-unchanged row (a bug
+            # caught in this method's own regression test, which mutates
+            # a StoredStanding in place exactly like every real call site).
+            old_values = _standing_values(current)
+            updated = mutate(current)
+            result = session.execute(
+                X402SocialStmts.UPDATE_STANDING_IF_MATCH,
+                (*_standing_values(updated), wallet, *old_values),
+            )
+            if result.was_applied:
+                return updated
+        logger.error(
+            "x402 social moderation: standing CAS for wallet=%s did not converge after %d "
+            "retries under contention -- refusing to apply this mutation rather than silently "
+            "drop it (this can include a ban)",
+            wallet,
+            STANDING_CAS_RETRIES,
         )
+        raise RuntimeError(f"x402 social standing CAS did not converge for wallet={wallet}")
 
     def get_reporter_open_case_ids(self, reporter: str) -> frozenset[str]:
         """The set of case ids currently claimed against `reporter`'s open-report concurrency cap (design doc section 5.4.1), empty if the reporter has never filed a report."""

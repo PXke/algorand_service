@@ -15,6 +15,7 @@ from datetime import UTC, datetime
 
 from app.core.config import settings
 from app.modules.x402_social.models.domain import (
+    AGENT_SEARCH_PER_TAG_CANDIDATE_CAP,
     MAX_BIO_LEN,
     MAX_EMOJI_BYTES,
     MAX_INTEREST_LEN,
@@ -184,6 +185,19 @@ class ProfileService:
                 "(free, session-authenticated) to edit it instead.",
                 http_status=409,
             )
+        # Agent Discovery Search (added 2026-09-03): populate the interest
+        # lookup for a brand-new profile. Canonical row first (store before
+        # mark, above), interest-index rows after -- a failure here
+        # propagates (same "do not silently swallow a denormalized-
+        # projection write failure" precedent as insert_agent_if_absent's
+        # own INSERT_RECENCY handling), which lets run_with_refund's
+        # generic-exception path refund this registration instead of
+        # leaving the wallet registered but unsearchable with no record of
+        # the gap.
+        for interest in profile.interests:
+            self.store.upsert_agent_interest(
+                interest=interest, wallet=wallet, created_at_epoch=epoch
+            )
         return profile
 
     def get(self, wallet: str) -> AgentProfile | None:
@@ -242,4 +256,63 @@ class ProfileService:
             updated_at_epoch=int(moment.timestamp()),
         )
         self.store.upsert_agent(updated)
+        # Agent Discovery Search (added 2026-09-03): keep the interest
+        # lookup in sync -- a full delete of every OLD tag's row for this
+        # wallet, then a full re-insert of every CURRENT tag's row, on
+        # every edit (deliberately not diffed: "a full delete-then-reinsert
+        # of that wallet's rows on every edit is fine and simplest" -- this
+        # module's interests list is capped at MAX_INTERESTS=10, so the
+        # extra writes are cheap). created_at_epoch is the profile's
+        # REGISTRATION epoch (updated.created_at_epoch, never touched by an
+        # edit -- see AgentProfile's own docstring), not this edit's
+        # timestamp, since that is the "registration recency" the search
+        # ranking's tiebreak means.
+        for interest in existing.interests:
+            self.store.delete_agent_interest(interest=interest, wallet=wallet)
+        for interest in merged_interests:
+            self.store.upsert_agent_interest(
+                interest=interest, wallet=wallet, created_at_epoch=updated.created_at_epoch
+            )
         return updated
+
+    def search_by_interests(
+        self, interests: list[str], *, limit: int
+    ) -> list[tuple[AgentProfile, list[str]]]:
+        """Agents matching at least one of `interests` (ANY-match), ranked by matching-tag count descending then registration recency descending, at most `limit` of them -- the paid product read for GET /agents/search (added 2026-09-03).
+
+        For each requested tag, reads at most
+        AGENT_SEARCH_PER_TAG_CANDIDATE_CAP candidate (wallet, created_at_epoch)
+        pairs from the interest lookup -- bounded so one popular tag cannot
+        turn this into an unbounded scan (CLAUDE.md section 4) -- then
+        tallies match counts and each wallet's best-known created_at_epoch
+        across every tag's candidates, ranks, and point-reads each of the
+        top `limit` wallets' full profile. A wallet whose profile read races
+        a concurrent unregister/edit and comes back None is simply skipped
+        (the ranking was already computed from the lookup table, which may
+        run slightly ahead of or behind the canonical row in the rare case
+        of a concurrent edit) -- never surfaced as a failure for the whole
+        search. Every returned profile is paired with the subset of
+        `interests` it actually matched.
+        """
+        match_counts: dict[str, int] = {}
+        matched_tags: dict[str, list[str]] = {}
+        best_created_at: dict[str, int] = {}
+        for interest in interests:
+            for wallet, created_at_epoch in self.store.list_agents_by_interest(
+                interest, limit=AGENT_SEARCH_PER_TAG_CANDIDATE_CAP
+            ):
+                match_counts[wallet] = match_counts.get(wallet, 0) + 1
+                matched_tags.setdefault(wallet, []).append(interest)
+                best_created_at[wallet] = max(best_created_at.get(wallet, 0), created_at_epoch)
+
+        ranked = sorted(
+            match_counts,
+            key=lambda w: (-match_counts[w], -best_created_at.get(w, 0), w),
+        )
+        results: list[tuple[AgentProfile, list[str]]] = []
+        for wallet in ranked[: max(0, limit)]:
+            profile = self.store.get_agent(wallet)
+            if profile is None:
+                continue
+            results.append((profile, matched_tags[wallet]))
+        return results

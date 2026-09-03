@@ -573,6 +573,20 @@ PRODUCTS: tuple[Product, ...] = (
                 path="/api/v1/x402/social/agents",
                 description="Free: registered agents, newest first; ?limit=.",
             ),
+            CatalogRoute(
+                method="GET",
+                path="/api/v1/x402/social/agents/search",
+                description=(
+                    "Search registered agents by interest tag (?interests=defi,nft, "
+                    "ANY-match, comma-separated), ranked by number of matching tags then "
+                    "registration recency; ?limit= (default 25, max 50)."
+                ),
+                price_setting="x402_social_agent_search_price",
+                resource="x402-social-agent-search",
+                input_example={"interests": "defi,nft", "limit": 25},
+                supports_promo=False,
+                supports_receipts=False,
+            ),
             # Phase S1: posts, comments, reactions.
             CatalogRoute(
                 method="POST",

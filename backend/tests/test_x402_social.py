@@ -1080,6 +1080,85 @@ def test_home_feed_route_reports_no_truncation_when_the_cap_does_not_bite(
 
 
 # --------------------------------------------------------------------------- #
+# A3 (2026-09-03): GET /posts/{id}/comments must treat a deleted or
+# platform-hidden post as not-found, the SAME "deleted/hidden_platform ==
+# not found" contract every other free read on a post already applies.
+# --------------------------------------------------------------------------- #
+def test_comment_list_is_not_found_for_a_deleted_post(
+    store: InMemorySocialStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """GET /posts/{id}/comments used to only check `post is None`, unlike post-detail/comment-create/react -- a deleted post's comments kept serving here even though the post itself was gone from every other read surface."""
+    post_service_ = PostService(store, is_registered=_always_registered)
+    monkeypatch.setattr(social_routes, "post_service", post_service_)
+
+    post = post_service_.create(
+        author=_OTHER_PAYER,
+        body_md="will be deleted",
+        tags=[],
+        group_id="",
+        settlement_tx_id="TX-D1",
+    )
+    post_service_.add_comment(
+        post_id=post.post_id, author=_PAYER, body_md="a comment", settlement_tx_id="TX-D2"
+    )
+    post_service_.delete(post.post_id, wallet=_OTHER_PAYER)
+
+    response = social_routes.x402_social_comment_list(
+        _request(method="GET", path_params={"post_id": post.post_id})
+    )
+    assert isinstance(response, Response)
+    assert response.status_code == 404
+    body = json.loads(response.description)
+    assert body["error"]["code"] == "not_found"
+
+
+def test_comment_list_is_not_found_for_a_platform_hidden_post(
+    store: InMemorySocialStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Same contract for hidden_platform (an S2 upheld-case tombstone) as for `deleted`."""
+    post_service_ = PostService(store, is_registered=_always_registered)
+    monkeypatch.setattr(social_routes, "post_service", post_service_)
+
+    post = post_service_.create(
+        author=_OTHER_PAYER,
+        body_md="will be hidden",
+        tags=[],
+        group_id="",
+        settlement_tx_id="TX-H1",
+    )
+    store.mark_post_hidden_platform(post)
+
+    response = social_routes.x402_social_comment_list(
+        _request(method="GET", path_params={"post_id": post.post_id})
+    )
+    assert isinstance(response, Response)
+    assert response.status_code == 404
+    body = json.loads(response.description)
+    assert body["error"]["code"] == "not_found"
+
+
+def test_comment_list_still_serves_comments_for_a_live_post(
+    store: InMemorySocialStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Sanity check alongside the two 404 tests above: an ordinary, live post's comments are unaffected by the A3 fix."""
+    post_service_ = PostService(store, is_registered=_always_registered)
+    monkeypatch.setattr(social_routes, "post_service", post_service_)
+
+    post = post_service_.create(
+        author=_OTHER_PAYER, body_md="still here", tags=[], group_id="", settlement_tx_id="TX-L1"
+    )
+    post_service_.add_comment(
+        post_id=post.post_id, author=_PAYER, body_md="hello", settlement_tx_id="TX-L2"
+    )
+
+    response = social_routes.x402_social_comment_list(
+        _request(method="GET", path_params={"post_id": post.post_id})
+    )
+    assert isinstance(response, dict)
+    assert len(response["comments"]) == 1
+
+
+# --------------------------------------------------------------------------- #
 # S1-D: both output formats derive from one struct (design doc section 3)
 # --------------------------------------------------------------------------- #
 def test_post_prose_and_json_derive_from_the_same_dict() -> None:
@@ -1943,6 +2022,40 @@ def test_cassandra_count_comments_uses_the_narrow_id_only_projection(
     assert X402SocialStmts.LIST_COMMENTS not in executed
 
 
+# --------------------------------------------------------------------------- #
+# A4 (2026-09-03): increment_case_vote_total must log a warning (with the
+# same detail increment_reaction_total already logs) before re-raising on a
+# counter-increment failure, instead of failing silently.
+# --------------------------------------------------------------------------- #
+def test_cassandra_increment_case_vote_total_logs_a_warning_and_reraises_on_failure(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The vote LWT has already won (try_add_case_vote) by the time this runs -- the vote itself is durably recorded even if this counter increment then fails, same "core write succeeded, only a counter is stale" class as increment_reaction_total. Before this fix, that failure propagated with no log line at all; now it logs at warning with case_id/verdict, matching increment_reaction_total's own precedent."""
+
+    def _fake_execute(_statement: object, _params: tuple) -> object:
+        raise ConnectionError("cassandra down")
+
+    patch_cassandra(monkeypatch)
+    monkeypatch.setattr(
+        social_cassandra_store,
+        "get_cassandra_session",
+        lambda: SimpleNamespace(execute=_fake_execute),
+    )
+    store = CassandraSocialStore()
+    case_id = str(uuid_module.uuid1())
+
+    with (
+        caplog.at_level("WARNING", logger="app.modules.x402_social.stores.cassandra"),
+        pytest.raises(ConnectionError),
+    ):
+        store.increment_case_vote_total(case_id, verdict="uphold")
+
+    assert any(
+        "vote tally counter increment failed" in record.getMessage() for record in caplog.records
+    )
+    assert any(case_id in record.getMessage() for record in caplog.records)
+
+
 def test_trending_merge_pipelines_every_bucket_read_into_one_round_trip(
     fake_redis: _FakeRedis, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1981,6 +2094,172 @@ def test_trending_merge_pipelines_every_bucket_read_into_one_round_trip(
     assert len(pipelines_created) == 1
     assert execute_call_op_counts == [trending_service._MERGE_HOURS]
     assert top == []  # no activity recorded -- just proving the call shape here
+
+
+# --------------------------------------------------------------------------- #
+# A2 (2026-09-03): x402_social_standing's full-row read-modify-write must
+# not silently clobber a concurrent writer.
+# --------------------------------------------------------------------------- #
+class _FakeStandingSession:
+    """Models exactly one row of x402_social_standing with REAL Cassandra LWT semantics.
+
+    For the three statements mutate_standing touches: GET_STANDING,
+    INSERT_STANDING_IF_ABSENT, and UPDATE_STANDING_IF_MATCH (applied iff
+    every compared column still equals what was bound). This is what lets a
+    test actually PROVE the CAS retry loop protects a concurrent writer,
+    rather than just asserting call shape: `row` is mutated by the test
+    itself mid-mutation to simulate a second writer landing between
+    mutate_standing's read and its CAS write, the way two concurrent case
+    resolutions touching the same wallet's standing genuinely can.
+    """
+
+    def __init__(self) -> None:
+        self.row: tuple | None = None  # the 10 non-wallet columns, INSERT_STANDING_IF_ABSENT order
+        self.get_calls = 0
+
+    def _row_namespace(self, wallet: str) -> SimpleNamespace:
+        v = self.row
+        assert v is not None
+        return SimpleNamespace(
+            wallet=wallet,
+            offense_count=v[0],
+            last_offense_at=v[1],
+            banned_until=v[2],
+            offenses=v[3],
+            reported_count=v[4],
+            rejected_report_count=v[5],
+            report_rejection_streak=v[6],
+            report_cooldown_until=v[7],
+            votes_cast=v[8],
+            votes_matched_resolution=v[9],
+        )
+
+    def execute(self, stmt: object, params: tuple) -> SimpleNamespace:
+        if stmt is X402SocialStmts.GET_STANDING:
+            self.get_calls += 1
+            (wallet,) = params
+            row = None if self.row is None else self._row_namespace(wallet)
+            return SimpleNamespace(one=lambda: row)
+        if stmt is X402SocialStmts.INSERT_STANDING_IF_ABSENT:
+            values = params[1:]
+            applied = self.row is None
+            if applied:
+                self.row = values
+            return SimpleNamespace(was_applied=applied)
+        if stmt is X402SocialStmts.UPSERT_STANDING:
+            # Plain unconditional overwrite -- used only to SEED the fake
+            # row in these tests, mirroring how a direct test-setup upsert
+            # is unconditional in production too.
+            self.row = params[1:]
+            return SimpleNamespace(was_applied=True)
+        if stmt is X402SocialStmts.UPDATE_STANDING_IF_MATCH:
+            new_values = tuple(params[0:10])
+            old_values = tuple(params[11:21])
+            applied = self.row == old_values
+            if applied:
+                self.row = new_values
+            return SimpleNamespace(was_applied=applied)
+        raise AssertionError(f"unexpected statement in _FakeStandingSession: {stmt!r}")
+
+
+def test_cassandra_mutate_standing_retries_after_a_concurrent_writer_wins_the_first_cas(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The exact race A2 fixes: mutate_standing's first CAS attempt loses because a "concurrent" writer touched the row between its read and its write -- the OLD get_standing-then-upsert_standing pattern would have silently overwritten that concurrent write (e.g. a ban) with a stale full-row copy; mutate_standing instead re-reads and retries, so BOTH this mutation's own change and the concurrent writer's change survive."""
+    patch_cassandra(monkeypatch)  # identity prepare_cached -- no real connection
+    fake = _FakeStandingSession()
+    monkeypatch.setattr(social_cassandra_store, "get_cassandra_session", lambda: fake)
+    store = CassandraSocialStore()
+
+    # Seed an existing row simulating a ban already recorded for this wallet.
+    seed = StoredStanding(wallet=_PAYER, banned_until_epoch=1_000_000, offense_count=1)
+    store.upsert_standing(seed)
+    assert fake.row is not None
+
+    attempts = {"n": 0}
+
+    def _mutate(standing: StoredStanding) -> StoredStanding:
+        attempts["n"] += 1
+        if attempts["n"] == 1:
+            # Simulate a second, concurrent writer landing in the gap
+            # between mutate_standing's read and its own CAS write: bump
+            # votes_cast directly on the underlying "table" row.
+            old = fake.row
+            assert old is not None
+            fake.row = (*old[:8], old[8] + 1, old[9])
+        standing.reported_count += 1
+        return standing
+
+    result = store.mutate_standing(_PAYER, _mutate)
+
+    # The first CAS attempt lost (the row had changed underneath it) and was
+    # retried exactly once more.
+    assert attempts["n"] == 2
+    assert result.reported_count == 1
+
+    final = store.get_standing(_PAYER)
+    assert final is not None
+    # The pre-existing ban was never clobbered...
+    assert final.banned_until_epoch == 1_000_000
+    assert final.offense_count == 1
+    # ...the "concurrent" writer's own change survived too...
+    assert final.votes_cast == 1
+    # ...and this mutation's own change was still correctly applied on retry.
+    assert final.reported_count == 1
+
+
+def test_cassandra_mutate_standing_first_ever_write_uses_insert_if_absent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A wallet with no standing row yet goes through INSERT_STANDING_IF_ABSENT (an LWT insert), never UPDATE_STANDING_IF_MATCH -- there is no prior row to CAS against."""
+    patch_cassandra(monkeypatch)
+    fake = _FakeStandingSession()
+    monkeypatch.setattr(social_cassandra_store, "get_cassandra_session", lambda: fake)
+    store = CassandraSocialStore()
+
+    def _mutate(standing: StoredStanding) -> StoredStanding:
+        standing.votes_cast += 1
+        return standing
+
+    result = store.mutate_standing(_OTHER_PAYER, _mutate)
+    assert result.votes_cast == 1
+    assert store.get_standing(_OTHER_PAYER).votes_cast == 1
+
+
+def test_moderation_service_standing_mutations_go_through_mutate_standing_not_read_then_upsert() -> (
+    None
+):
+    """Regression guard for A2: every one of moderation_service's standing read-modify-write helpers must call store.mutate_standing (the atomic path), never the old get_standing-then-upsert_standing two-call pattern this class of bug came from."""
+    store = InMemorySocialStore()
+    ms = _moderation_service(store)
+    _register(store, _REPORTER)
+    _register(store, _OTHER_PAYER)
+
+    mutate_calls: list[str] = []
+    upsert_calls: list[str] = []
+    original_mutate = store.mutate_standing
+    original_upsert = store.upsert_standing
+
+    def _spy_mutate(
+        wallet: str, mutate: Callable[[StoredStanding], StoredStanding]
+    ) -> StoredStanding:
+        mutate_calls.append(wallet)
+        return original_mutate(wallet, mutate)
+
+    def _spy_upsert(item: StoredStanding) -> None:
+        upsert_calls.append(item.wallet)
+        original_upsert(item)
+
+    store.mutate_standing = _spy_mutate  # type: ignore[method-assign]
+    store.upsert_standing = _spy_upsert  # type: ignore[method-assign]
+
+    ms._bump_reported_count(_OTHER_PAYER)
+    ms._apply_ban(_OTHER_PAYER, resolved_at_epoch=_now_epoch())
+    ms._reset_reporter_streak(_REPORTER)
+    ms._escalate_reporter_cooldown(_REPORTER, resolved_at_epoch=_now_epoch())
+
+    assert set(mutate_calls) == {_OTHER_PAYER, _REPORTER}
+    assert upsert_calls == []  # the RMW helpers never fall back to the plain overwrite
 
 
 # --------------------------------------------------------------------------- #
@@ -2224,13 +2503,72 @@ def test_open_report_on_an_already_open_target_releases_the_just_claimed_slot() 
 
 
 # --------------------------------------------------------------------------- #
+# A1 (2026-09-03): a mid-write open_report failure must release both claims
+# it already won, not leak them forever.
+# --------------------------------------------------------------------------- #
+def test_open_report_releases_both_claims_when_insert_case_fails_mid_write() -> None:
+    """If insert_case throws after the reporter-slot claim and the one-open-case-per-target claim have both already won, both must be released -- otherwise the target becomes permanently unreportable and the reporter permanently loses one of their max_open slots, since neither claim has a TTL and both are normally released only by a case's own resolution, which never happens for a case that was never durably stored."""
+    store = InMemorySocialStore()
+    ms = _moderation_service(store)
+    _register(store, _REPORTER)
+    _register(store, _OTHER_PAYER)
+
+    def _boom(_item: StoredCase) -> None:
+        raise RuntimeError("simulated insert_case failure")
+
+    original_insert_case = store.insert_case
+    store.insert_case = _boom  # type: ignore[method-assign]
+    try:
+        with pytest.raises(RuntimeError, match="simulated insert_case failure"):
+            ms.open_report(
+                reporter=_REPORTER,
+                target_type=TARGET_AGENT,
+                target_id=_OTHER_PAYER,
+                category="spam",
+                note="",
+                settlement_tx_id="TX-BOOM",
+            )
+    finally:
+        store.insert_case = original_insert_case  # type: ignore[method-assign]
+
+    # The target's open-case claim was released -- a fresh report against
+    # the SAME target succeeds instead of permanently hitting
+    # case_already_open.
+    retried = ms.open_report(
+        reporter=_REPORTER,
+        target_type=TARGET_AGENT,
+        target_id=_OTHER_PAYER,
+        category="spam",
+        note="",
+        settlement_tx_id="TX-RETRY",
+    )
+    assert retried.target_id == _OTHER_PAYER
+
+    # The reporter's slot from the failed attempt was released too: with
+    # x402_social_report_max_open == 2 and one slot now legitimately used by
+    # the successful retry above, the reporter still has room for one more
+    # -- if the failed attempt's slot had leaked, this would raise
+    # too_many_open_reports instead.
+    _register(store, _VOTER_A)
+    second = ms.open_report(
+        reporter=_REPORTER,
+        target_type=TARGET_AGENT,
+        target_id=_VOTER_A,
+        category="spam",
+        note="",
+        settlement_tx_id="TX-SECOND",
+    )
+    assert second.case_id != retried.case_id
+
+
+# --------------------------------------------------------------------------- #
 # S2-3: case resolution -- both category branches
 # --------------------------------------------------------------------------- #
 def test_case_resolution_upheld_non_illegal_content_tombstones_the_post() -> None:
     """quorum+ratio met, category != illegal_content -> hidden_platform=true, never a row delete, no removal audit record (design doc section 5.3 step 4)."""
     store = InMemorySocialStore()
     ms = _moderation_service(store)
-    settings_quorum, settings_ratio = 3, 0.5
+    settings_quorum, ratio_num, ratio_den = 3, 1, 2
 
     _register(store, _REPORTER)
     _register(store, _OTHER_PAYER)  # post author
@@ -2252,7 +2590,8 @@ def test_case_resolution_upheld_non_illegal_content_tombstones_the_post() -> Non
 
     with (
         patch.object(settings, "x402_social_case_quorum", settings_quorum),
-        patch.object(settings, "x402_social_case_uphold_ratio", settings_ratio),
+        patch.object(settings, "x402_social_case_uphold_ratio_numerator", ratio_num),
+        patch.object(settings, "x402_social_case_uphold_ratio_denominator", ratio_den),
     ):
         ms.cast_vote(
             case_id=case.case_id, voter=_VOTER_A, verdict="uphold", settlement_tx_id="TX-VA"
@@ -2303,7 +2642,8 @@ def test_case_resolution_upheld_illegal_content_hard_deletes_the_post() -> None:
 
     with (
         patch.object(settings, "x402_social_case_quorum", 3),
-        patch.object(settings, "x402_social_case_uphold_ratio", 0.5),
+        patch.object(settings, "x402_social_case_uphold_ratio_numerator", 1),
+        patch.object(settings, "x402_social_case_uphold_ratio_denominator", 2),
     ):
         ms.cast_vote(
             case_id=case.case_id, voter=_VOTER_A, verdict="uphold", settlement_tx_id="TX-VA"
@@ -2374,6 +2714,56 @@ def test_case_resolution_quorum_failure_is_not_upheld_with_a_worded_note_and_esc
     assert standing.report_rejection_streak == 1
     # base 900s (15m) for the FIRST rejection (streak=1) -- section 5.4.1.
     assert standing.report_cooldown_until_epoch == resolved.resolved_at_epoch + 900
+
+
+# --------------------------------------------------------------------------- #
+# A5 (2026-09-03): an exact two-thirds vote split must resolve upheld.
+# --------------------------------------------------------------------------- #
+def test_case_resolution_upholds_an_exact_two_thirds_split_at_the_default_ratio() -> None:
+    """The default settings (x402_social_case_quorum=5, uphold ratio 2/3) must resolve UPHELD on an exact 4-of-6 split.
+
+    Regression for A5: the old single-float setting
+    (x402_social_case_uphold_ratio = 0.667) compared
+    `(tally.uphold / total) >= ratio` -- 4/6 == 0.6666...  which is strictly
+    LESS than the float literal 0.667, so this exact case resolved REJECTED
+    even though "at least two-thirds" was the evident intent. The fixed
+    exact-integer comparison (`tally.uphold * ratio_denominator >=
+    ratio_numerator * total`) has no such float boundary.
+    """
+    store = InMemorySocialStore()
+    ms = _moderation_service(store)
+    _register(store, _REPORTER)
+    _register(store, _OTHER_PAYER)
+    opened = _now_epoch()
+    voters = [_VOTER_A, _VOTER_B, _VOTER_C, _VOTER_D]
+    voter_e = encode_address(bytes([9]) + bytes(31))
+    voter_f = encode_address(bytes([10]) + bytes(31))
+    voters += [voter_e, voter_f]
+    for w in voters:
+        _register(store, w, created_at_epoch=opened - 100)
+
+    case = ms.open_report(
+        reporter=_REPORTER,
+        target_type=TARGET_AGENT,
+        target_id=_OTHER_PAYER,
+        category="spam",
+        note="",
+        settlement_tx_id="TX-REP",
+    )
+    # Uses the process-wide DEFAULT settings deliberately -- this is the
+    # exact boundary the shipped config must get right, not a patched one.
+    assert settings.x402_social_case_quorum == 5
+    assert settings.x402_social_case_uphold_ratio_numerator == 2
+    assert settings.x402_social_case_uphold_ratio_denominator == 3
+    verdicts = ["uphold", "uphold", "uphold", "uphold", "reject", "reject"]
+    for voter, verdict in zip(voters, verdicts, strict=True):
+        ms.cast_vote(
+            case_id=case.case_id, voter=voter, verdict=verdict, settlement_tx_id=f"TX-{voter}"
+        )
+    resolved = _resolve_now(ms, case)
+
+    assert resolved.state == CASE_STATE_UPHELD
+    assert "upheld: 4 of 6" in resolved.resolution_note
 
 
 def test_report_cooldown_progression_matches_the_exact_15m_30m_1h_sequence_and_the_7day_cap() -> (
@@ -2447,7 +2837,8 @@ def test_upheld_report_resets_the_reporters_rejection_streak_to_zero() -> None:
     )
     with (
         patch.object(settings, "x402_social_case_quorum", 3),
-        patch.object(settings, "x402_social_case_uphold_ratio", 0.5),
+        patch.object(settings, "x402_social_case_uphold_ratio_numerator", 1),
+        patch.object(settings, "x402_social_case_uphold_ratio_denominator", 2),
     ):
         for voter in (_VOTER_A, _VOTER_B, _VOTER_C):
             ms.cast_vote(
@@ -2486,7 +2877,8 @@ def test_karma_votes_cast_and_matched_resolution_update_per_voter() -> None:
     )
     with (
         patch.object(settings, "x402_social_case_quorum", 3),
-        patch.object(settings, "x402_social_case_uphold_ratio", 0.5),
+        patch.object(settings, "x402_social_case_uphold_ratio_numerator", 1),
+        patch.object(settings, "x402_social_case_uphold_ratio_denominator", 2),
     ):
         ms.cast_vote(
             case_id=case.case_id, voter=_VOTER_A, verdict="uphold", settlement_tx_id="TX-VA"
@@ -3057,3 +3449,229 @@ def test_cassandra_epoch_treats_a_naive_driver_datetime_as_utc() -> None:
     assert naive.tzinfo is None
     assert social_cassandra_store._epoch(naive) == 1788527897  # the correct UTC epoch
     assert social_cassandra_store._epoch(None) == 0
+
+
+# --------------------------------------------------------------------------- #
+# Part B (2026-09-03): Agent Discovery Search -- GET /agents/search.
+# --------------------------------------------------------------------------- #
+@pytest.mark.usefixtures("fake_redis")
+def test_agent_search_route_is_paid_and_returns_ranked_matches(
+    store: InMemorySocialStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """GET /agents/search is wired through require_paid_request/run_with_refund like x402_features_demand / x402_news_search -- a successful call returns agents ranked by matching-tag count, each with matched_interests, plus a settlement_tx_id; mark_fulfilled runs exactly once. Also proves the limit clamp (AGENT_SEARCH_MAX_LIMIT)."""
+    profile_service_ = ProfileService(store)
+    monkeypatch.setattr(social_routes, "profile_service", profile_service_)
+
+    profile_service_.register(
+        wallet=_PAYER,
+        name="DefiBot",
+        bio="",
+        mission="",
+        location="",
+        interests=["defi", "nft"],
+        emoji="",
+        settlement_tx_id="TX-REG1",
+    )
+    profile_service_.register(
+        wallet=_OTHER_PAYER,
+        name="NftBot",
+        bio="",
+        mission="",
+        location="",
+        interests=["nft"],
+        emoji="",
+        settlement_tx_id="TX-REG2",
+    )
+
+    captured: dict = {}
+
+    def _spy_require_paid_request(*_a: object, **kwargs: object) -> x402_guard.PaymentResult:
+        captured.update(kwargs)
+        return _settled_result(payer=_VOTER_A, txid="TX-SEARCH")
+
+    monkeypatch.setattr(social_routes, "require_paid_request", _spy_require_paid_request)
+    fulfilled: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        social_routes,
+        "mark_fulfilled",
+        lambda txid, *, resource: fulfilled.append((txid, resource)),
+    )
+
+    response = social_routes.x402_social_agent_search(
+        _request(
+            method="GET",
+            query={"interests": "defi,nft", "limit": "1000"},
+            path="/api/v1/x402/social/agents/search",
+        )
+    )
+
+    assert response.status_code == 200
+    assert captured["price"] == settings.x402_social_agent_search_price
+    assert captured["resource"] == social_routes._AGENT_SEARCH_RESOURCE
+    body = json.loads(response.description)
+    assert body["settlement_tx_id"] == "TX-SEARCH"
+    assert body["query"]["limit"] == 50  # clamped, AGENT_SEARCH_MAX_LIMIT
+    wallets = [a["wallet"] for a in body["agents"]]
+    assert wallets[0] == _PAYER  # matches BOTH requested tags, ranked first
+    assert wallets[1] == _OTHER_PAYER
+    assert body["agents"][0]["matched_interests"] == ["defi", "nft"]
+    assert fulfilled == [("TX-SEARCH", social_routes._AGENT_SEARCH_RESOURCE)]
+
+
+def test_agent_search_route_requires_interests_as_a_free_400(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A missing ?interests= is a free 400 -- require_paid_request must never be called."""
+
+    def _fail_if_called(*_a: object, **_kw: object) -> Never:
+        raise AssertionError(
+            "require_paid_request must not be called for a missing interests param"
+        )
+
+    monkeypatch.setattr(social_routes, "require_paid_request", _fail_if_called)
+
+    response = social_routes.x402_social_agent_search(
+        _request(method="GET", path="/api/v1/x402/social/agents/search")
+    )
+    assert response.status_code == 400
+    body = json.loads(response.description)
+    assert body["error"]["code"] == "invalid_request"
+
+
+@pytest.mark.usefixtures("fake_redis")
+def test_agent_search_route_never_forwards_promo_params(
+    store: InMemorySocialStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Consistent with this module's own promo-off stance (commit f8d84a6) -- GET /agents/search never passes ?promo=/?promo_wallet= into require_paid_request either, even though payer here is only payment attribution, not identity."""
+    monkeypatch.setattr(social_routes, "profile_service", ProfileService(store))
+
+    captured: dict = {}
+
+    def _spy_require_paid_request(*_a: object, **kwargs: object) -> x402_guard.PaymentResult:
+        captured.update(kwargs)
+        return _settled_result(payer=_PAYER, txid="TX-S")
+
+    monkeypatch.setattr(social_routes, "require_paid_request", _spy_require_paid_request)
+    monkeypatch.setattr(social_routes, "mark_fulfilled", lambda *_a, **_kw: None)
+
+    social_routes.x402_social_agent_search(
+        _request(
+            method="GET",
+            query={"interests": "defi", "promo": "LAUNCH1000-TEST", "promo_wallet": _PAYER},
+            path="/api/v1/x402/social/agents/search",
+        )
+    )
+
+    assert "promo_code" not in captured
+    assert "promo_wallet" not in captured
+
+
+def test_search_by_interests_ranks_by_match_count_then_recency(store: InMemorySocialStore) -> None:
+    """profile_service.search_by_interests: an agent matching 2 tags outranks one matching only 1; among equal match counts, the more recently registered wallet wins the tiebreak."""
+    profile_service_ = ProfileService(store)
+    profile_service_.register(
+        wallet=_PAYER,
+        name="A",
+        bio="",
+        mission="",
+        location="",
+        interests=["defi"],
+        emoji="",
+        settlement_tx_id="TX-1",
+        now=datetime.fromtimestamp(1000, tz=UTC),
+    )
+    profile_service_.register(
+        wallet=_OTHER_PAYER,
+        name="B",
+        bio="",
+        mission="",
+        location="",
+        interests=["defi", "nft"],
+        emoji="",
+        settlement_tx_id="TX-2",
+        now=datetime.fromtimestamp(2000, tz=UTC),
+    )
+    profile_service_.register(
+        wallet=_REPORTER,
+        name="C",
+        bio="",
+        mission="",
+        location="",
+        interests=["defi"],
+        emoji="",
+        settlement_tx_id="TX-3",
+        now=datetime.fromtimestamp(3000, tz=UTC),
+    )
+
+    results = profile_service_.search_by_interests(["defi", "nft"], limit=10)
+    wallets = [p.wallet for p, _matched in results]
+
+    assert wallets[0] == _OTHER_PAYER  # matches both requested tags
+    # Both A and C match only "defi" -- C (registered later) wins the tiebreak.
+    assert wallets[1:] == [_REPORTER, _PAYER]
+    matched = {p.wallet: m for p, m in results}
+    assert matched[_OTHER_PAYER] == ["defi", "nft"]
+    assert matched[_PAYER] == ["defi"]
+
+
+def test_search_by_interests_is_any_match_not_all_match(store: InMemorySocialStore) -> None:
+    """An agent matching only ONE of several requested tags is still a candidate (ANY-match, not ALL-match)."""
+    profile_service_ = ProfileService(store)
+    profile_service_.register(
+        wallet=_PAYER,
+        name="A",
+        bio="",
+        mission="",
+        location="",
+        interests=["gaming"],
+        emoji="",
+        settlement_tx_id="TX-1",
+    )
+    results = profile_service_.search_by_interests(["defi", "gaming", "nft"], limit=10)
+    assert [p.wallet for p, _m in results] == [_PAYER]
+
+
+def test_register_populates_the_interest_lookup(store: InMemorySocialStore) -> None:
+    """A brand-new registration's interests all land in the interest lookup, findable via search."""
+    profile_service_ = ProfileService(store)
+    profile_service_.register(
+        wallet=_PAYER,
+        name="A",
+        bio="",
+        mission="",
+        location="",
+        interests=["defi", "liquidity"],
+        emoji="",
+        settlement_tx_id="TX-1",
+    )
+    assert [w for w, _at in store.list_agents_by_interest("defi", limit=10)] == [_PAYER]
+    assert [w for w, _at in store.list_agents_by_interest("liquidity", limit=10)] == [_PAYER]
+    assert store.list_agents_by_interest("nft", limit=10) == []
+
+
+def test_edit_removes_stale_interest_rows_and_adds_new_ones(store: InMemorySocialStore) -> None:
+    """Editing a profile's interests does a full delete-then-reinsert of the wallet's lookup rows: a dropped tag's row disappears, a newly-added tag's row appears, an unchanged tag's row survives."""
+    profile_service_ = ProfileService(store)
+    profile_service_.register(
+        wallet=_PAYER,
+        name="A",
+        bio="",
+        mission="",
+        location="",
+        interests=["defi", "nft"],
+        emoji="",
+        settlement_tx_id="TX-1",
+    )
+    profile_service_.edit(
+        wallet=_PAYER,
+        name=None,
+        bio=None,
+        mission=None,
+        location=None,
+        interests=["defi", "gaming"],
+        emoji=None,
+    )
+
+    assert [w for w, _at in store.list_agents_by_interest("defi", limit=10)] == [_PAYER]
+    assert [w for w, _at in store.list_agents_by_interest("gaming", limit=10)] == [_PAYER]
+    assert store.list_agents_by_interest("nft", limit=10) == []  # dropped tag's row is gone

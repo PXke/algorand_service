@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Protocol
 
 from app.modules.x402_social.models.domain import (
@@ -47,6 +48,23 @@ class SocialStore(Protocol):
         populated on the returned AgentProfile objects (see AgentProfile's
         own docstring) -- callers needing the full profile use get_agent.
         """
+        ...
+
+    # ----------------------------------------------------------------- #
+    # Agent Discovery Search (added 2026-09-03): a lookup table so GET
+    # /agents/search can filter by interest tag without ALLOW FILTERING.
+    # Kept in sync with AgentProfile.interests by services/profile_service.py.
+    # ----------------------------------------------------------------- #
+    def upsert_agent_interest(self, *, interest: str, wallet: str, created_at_epoch: int) -> None:
+        """Add (or overwrite, idempotently) one (interest, wallet) row to the interest lookup."""
+        ...
+
+    def delete_agent_interest(self, *, interest: str, wallet: str) -> None:
+        """Remove one (interest, wallet) row from the interest lookup. A no-op if it did not exist."""
+        ...
+
+    def list_agents_by_interest(self, interest: str, *, limit: int) -> list[tuple[str, int]]:
+        """Up to `limit` (wallet, created_at_epoch) pairs registered under one interest tag -- bounded per-tag read; the caller tallies/ranks across every requested tag."""
         ...
 
     # ----------------------------------------------------------------- #
@@ -276,6 +294,10 @@ class SocialStore(Protocol):
         """Claim the one-open-case-per-target guard for `target_id` IFF unclaimed (LWT). Returns True iff this call won it -- design doc section 5.3 step 1."""
         ...
 
+    def release_open_case_for_target(self, *, target_id: str, case_id: str) -> None:
+        """Best-effort compensating release of the open-case-per-target claim THIS case_id won (finding-class: 2026-09-03, A1 -- mirrors release_group_name's own compensating-release precedent), used ONLY when opening a report fails after the claim but before the case is fully stored. Only ever releases the exact claim THIS case_id won, never a different case's legitimate claim on the same target."""
+        ...
+
     def get_open_case_id_for_target(self, target_id: str) -> str | None:
         """The currently-open case_id for `target_id`, or None -- used to report it in a caller-fault 409 when `try_claim_open_case_for_target` loses."""
         ...
@@ -319,7 +341,29 @@ class SocialStore(Protocol):
         ...
 
     def upsert_standing(self, item: StoredStanding) -> None:
-        """Full-row overwrite of one wallet's standing (CLAUDE.md section 3: never a partial UPDATE)."""
+        """Full-row, UNCONDITIONAL overwrite of one wallet's standing (CLAUDE.md section 3: never a partial UPDATE). Callers doing a read-modify-write use `mutate_standing` instead -- this method's plain overwrite is for direct seeding (tests) or a caller that has already re-derived the row's TRUE current state some other way; it is exactly the shape that let two concurrent read-modify-writes clobber each other (finding-class: 2026-09-03, A2) when every moderation_service.py caller used it that way."""
+        ...
+
+    def mutate_standing(
+        self, wallet: str, mutate: Callable[[StoredStanding], StoredStanding]
+    ) -> StoredStanding:
+        """Atomic read-modify-write of one wallet's standing row: `mutate` receives the wallet's current row (or an all-zero default if it has never been touched) and returns the updated row, which is durably applied before this returns.
+
+        Fixes finding-class 2026-09-03 (A2): every moderation_service.py
+        caller used to do this as two separate calls (`get_standing` then
+        `upsert_standing`), so two concurrent mutations of the SAME wallet
+        (e.g. two case resolutions -- a ban write and a vote-karma
+        settlement) could interleave a stale read between them and silently
+        drop one side's write. This method is the ONE place that sequence
+        happens now, so a backing store can make it genuinely atomic (an
+        in-process lock for the in-memory store; a bounded-retry full-row
+        compare-and-swap for the Cassandra store, since standing mixes plain
+        columns that cannot be true `counter`s -- see migration 108's own
+        note). May raise if the backing store cannot converge the mutation
+        under contention within its own bounded retry budget -- callers do
+        not need to catch this themselves; letting it propagate is safer
+        than silently discarding a mutation that can carry a ban.
+        """
         ...
 
     def get_reporter_open_case_ids(self, reporter: str) -> frozenset[str]:

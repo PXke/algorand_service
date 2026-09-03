@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import threading
+from collections.abc import Callable
 from dataclasses import replace
 
 from app.modules.x402_social.models.domain import (
@@ -48,6 +49,7 @@ class InMemorySocialStore:
         """Start with empty S0 (agents) and S1 (posts/comments/reactions/follows/groups) tables."""
         self._agents: dict[str, AgentProfile] = {}
         self._recency: dict[str, AgentProfile] = {}
+        self._interests: dict[str, dict[str, int]] = {}  # interest -> {wallet: created_at_epoch}
 
         # Phase S1.
         self._posts: dict[str, StoredPost] = {}
@@ -109,6 +111,25 @@ class InMemorySocialStore:
         """
         ordered = sorted(self._recency.values(), key=lambda a: (-a.created_at_epoch, a.wallet))
         return [replace(a) for a in ordered[: max(0, limit)]]
+
+    # ----------------------------------------------------------------- #
+    # Agent Discovery Search (added 2026-09-03)
+    # ----------------------------------------------------------------- #
+    def upsert_agent_interest(self, *, interest: str, wallet: str, created_at_epoch: int) -> None:
+        """Add (or overwrite) one (interest, wallet) row to the interest lookup."""
+        with self._lock:
+            self._interests.setdefault(interest, {})[wallet] = created_at_epoch
+
+    def delete_agent_interest(self, *, interest: str, wallet: str) -> None:
+        """Remove one (interest, wallet) row from the interest lookup. A no-op if it did not exist."""
+        with self._lock:
+            self._interests.get(interest, {}).pop(wallet, None)
+
+    def list_agents_by_interest(self, interest: str, *, limit: int) -> list[tuple[str, int]]:
+        """Up to `limit` (wallet, created_at_epoch) pairs registered under one interest tag."""
+        with self._lock:
+            items = list(self._interests.get(interest, {}).items())
+        return items[: max(0, limit)]
 
     # ----------------------------------------------------------------- #
     # Phase S1: posts and comments
@@ -403,6 +424,12 @@ class InMemorySocialStore:
             self._open_case_by_target[target_id] = case_id
             return True
 
+    def release_open_case_for_target(self, *, target_id: str, case_id: str) -> None:
+        """Best-effort compensating release of the open-case-per-target claim THIS case_id won (A1). Only releases if it still maps to `case_id` -- never a different case's legitimate claim on the same target."""
+        with self._lock:
+            if self._open_case_by_target.get(target_id) == case_id:
+                del self._open_case_by_target[target_id]
+
     def get_open_case_id_for_target(self, target_id: str) -> str | None:
         """The currently-open case_id for `target_id`, or None."""
         with self._lock:
@@ -475,9 +502,25 @@ class InMemorySocialStore:
             return None if found is None else replace(found, offenses=list(found.offenses))
 
     def upsert_standing(self, item: StoredStanding) -> None:
-        """Full-row overwrite of one wallet's standing."""
+        """Full-row, unconditional overwrite of one wallet's standing. See base.SocialStore.upsert_standing's own docstring -- a read-modify-write caller uses mutate_standing instead."""
         with self._lock:
             self._standing[item.wallet] = replace(item, offenses=list(item.offenses))
+
+    def mutate_standing(
+        self, wallet: str, mutate: Callable[[StoredStanding], StoredStanding]
+    ) -> StoredStanding:
+        """Atomic read-modify-write under the store-wide lock (A2): the whole read-mutate-write sequence runs as one critical section, so two concurrent mutations of the SAME wallet can never interleave a stale read between them the way two separate get_standing/upsert_standing calls could."""
+        with self._lock:
+            current = self._standing.get(wallet)
+            base = (
+                StoredStanding(wallet=wallet)
+                if current is None
+                else replace(current, offenses=list(current.offenses))
+            )
+            updated = mutate(base)
+            stored = replace(updated, offenses=list(updated.offenses))
+            self._standing[wallet] = stored
+            return replace(stored, offenses=list(stored.offenses))
 
     def get_reporter_open_case_ids(self, reporter: str) -> frozenset[str]:
         """The set of case ids currently claimed against `reporter`'s open-report concurrency cap, empty if never filed."""
