@@ -1078,6 +1078,30 @@ class X402Stmts:
     )
 
 
+class X402ReceiptStmts:
+    """Prepared statements for signed fulfillment receipts (migration 109).
+
+    A single table, keyed by receipt_id -- no projection, no by-tx lookup:
+    the read path (GET /api/v1/x402/receipts/{receipt_id}) is always a point
+    read on the id the caller was handed in the response header, and the
+    write path never needs to look one up by settlement_tx_id (each
+    run_with_refund success mints exactly one fresh receipt_id). See
+    modules/x402/receipt_store.py.
+    """
+
+    INSERT_RECEIPT = _Stmt(
+        "INSERT INTO algorand_platform.x402_fulfillment_receipts ("
+        "receipt_id, settlement_tx_id, resource, signing_address, signature, "
+        "request_hash, response_hash, output, output_truncated, issued_at, issued_at_epoch"
+        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+    )
+    GET_RECEIPT = _Stmt(
+        "SELECT receipt_id, settlement_tx_id, resource, signing_address, signature, "
+        "request_hash, response_hash, output, output_truncated, issued_at, issued_at_epoch "
+        "FROM algorand_platform.x402_fulfillment_receipts WHERE receipt_id = ?"
+    )
+
+
 class X402PromoStmts:
     """Prepared statements for the promo-code payment bypass (migration 100).
 
@@ -1272,32 +1296,39 @@ class X402SocialStmts:
     # ------------------------------------------------------------- #
     # Phase S1 (migration 106): posts, comments, reactions, follows, groups
     # ------------------------------------------------------------- #
+    # hidden_platform (migration 108, Phase S2) is included on every one of
+    # these three post statements -- unlike hidden_group, it must tombstone
+    # a post everywhere, including the author's own feed projection (see
+    # that migration's own note).
     INSERT_POST = _Stmt(
         "INSERT INTO algorand_platform.x402_social_posts ("
         "post_id, author, group_id, body_md, tags, created_at, settlement_tx_id, "
-        "deleted, hidden_group"
-        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        "deleted, hidden_group, hidden_platform"
+        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
     )
     INSERT_POST_BY_AUTHOR = _Stmt(
         "INSERT INTO algorand_platform.x402_social_posts_by_author ("
-        "author, created_at, post_id, group_id, body_md, tags, deleted"
-        ") VALUES (?, ?, ?, ?, ?, ?, ?)"
+        "author, created_at, post_id, group_id, body_md, tags, deleted, hidden_platform"
+        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
     )
     INSERT_GROUP_FEED_POST = _Stmt(
         "INSERT INTO algorand_platform.x402_social_group_feed ("
-        "group_id, created_at, post_id, author, body_md, tags, deleted, hidden_group"
-        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+        "group_id, created_at, post_id, author, body_md, tags, deleted, hidden_group, "
+        "hidden_platform"
+        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
     )
     GET_POST = _Stmt(
         "SELECT post_id, author, group_id, body_md, tags, created_at, settlement_tx_id, "
-        "deleted, hidden_group FROM algorand_platform.x402_social_posts WHERE post_id = ?"
+        "deleted, hidden_group, hidden_platform "
+        "FROM algorand_platform.x402_social_posts WHERE post_id = ?"
     )
     LIST_POSTS_BY_AUTHOR = _Stmt(
-        "SELECT author, created_at, post_id, group_id, body_md, tags, deleted "
+        "SELECT author, created_at, post_id, group_id, body_md, tags, deleted, hidden_platform "
         "FROM algorand_platform.x402_social_posts_by_author WHERE author = ? LIMIT ?"
     )
     LIST_GROUP_FEED = _Stmt(
-        "SELECT group_id, created_at, post_id, author, body_md, tags, deleted, hidden_group "
+        "SELECT group_id, created_at, post_id, author, body_md, tags, deleted, hidden_group, "
+        "hidden_platform "
         "FROM algorand_platform.x402_social_group_feed WHERE group_id = ? LIMIT ?"
     )
     # IF EXISTS, same precedent as the promo code deactivation (100): a
@@ -1409,22 +1440,27 @@ class X402SocialStmts:
     DELETE_GROUP_NAME_IF_OWNED = _Stmt(
         "DELETE FROM algorand_platform.x402_social_group_names WHERE name_norm = ? IF group_id = ?"
     )
+    # hidden_platform (migration 108, Phase S2) on both the canonical row
+    # (so GET /groups/{id} can still serve it to members after an upheld
+    # non-illegal_content case, design doc section 5.3 step 4) and the
+    # recency browse projection (so GET /groups can filter it out --
+    # bounded scan, sorted in Python, group_service.list_recent).
     INSERT_GROUP = _Stmt(
         "INSERT INTO algorand_platform.x402_social_groups ("
-        "group_id, name, description, owner, created_at, settlement_tx_id"
-        ") VALUES (?, ?, ?, ?, ?, ?)"
+        "group_id, name, description, owner, created_at, settlement_tx_id, hidden_platform"
+        ") VALUES (?, ?, ?, ?, ?, ?, ?)"
     )
     INSERT_GROUP_RECENCY = _Stmt(
         "INSERT INTO algorand_platform.x402_social_groups_by_recency ("
-        "bucket, created_at, group_id, name, description, owner"
-        ") VALUES (?, ?, ?, ?, ?, ?)"
+        "bucket, created_at, group_id, name, description, owner, hidden_platform"
+        ") VALUES (?, ?, ?, ?, ?, ?, ?)"
     )
     GET_GROUP = _Stmt(
-        "SELECT group_id, name, description, owner, created_at, settlement_tx_id "
-        "FROM algorand_platform.x402_social_groups WHERE group_id = ?"
+        "SELECT group_id, name, description, owner, created_at, settlement_tx_id, "
+        "hidden_platform FROM algorand_platform.x402_social_groups WHERE group_id = ?"
     )
     LIST_GROUPS_RECENT = _Stmt(
-        "SELECT bucket, created_at, group_id, name, description, owner "
+        "SELECT bucket, created_at, group_id, name, description, owner, hidden_platform "
         "FROM algorand_platform.x402_social_groups_by_recency WHERE bucket = ? LIMIT ?"
     )
     UPSERT_GROUP_MEMBER = _Stmt(
@@ -1462,6 +1498,216 @@ class X402SocialStmts:
     UPDATE_MEMBERSHIP_ROLE = _Stmt(
         "UPDATE algorand_platform.x402_social_memberships SET role = ? "
         "WHERE wallet = ? AND group_id = ? IF EXISTS"
+    )
+
+    # ------------------------------------------------------------- #
+    # Phase S2 (migration 108): community moderation -- reports, cases,
+    # votes, standing/karma, the section 8.1 admin lever's shared hard-delete
+    # machinery. See app/modules/x402_social/services/moderation_service.py.
+    # ------------------------------------------------------------- #
+    # hidden_platform (S2's platform-wide tombstone, distinct from
+    # hidden_group) is set on EVERY post projection -- unlike hidden_group,
+    # a platform-hidden post must disappear from the author's own feed too
+    # (design doc section 5.3 step 4). IF EXISTS: same tombstone-flip
+    # precedent as MARK_POST_DELETED -- never upserts a phantom row.
+    MARK_POST_HIDDEN_PLATFORM = _Stmt(
+        "UPDATE algorand_platform.x402_social_posts SET hidden_platform = true "
+        "WHERE post_id = ? IF EXISTS"
+    )
+    MARK_POST_BY_AUTHOR_HIDDEN_PLATFORM = _Stmt(
+        "UPDATE algorand_platform.x402_social_posts_by_author SET hidden_platform = true "
+        "WHERE author = ? AND created_at = ? AND post_id = ? IF EXISTS"
+    )
+    MARK_GROUP_FEED_POST_HIDDEN_PLATFORM = _Stmt(
+        "UPDATE algorand_platform.x402_social_group_feed SET hidden_platform = true "
+        "WHERE group_id = ? AND created_at = ? AND post_id = ? IF EXISTS"
+    )
+    # Hard delete (design doc section 5.4.2 -- the one category-scoped
+    # exception, illegal_content only): real row removal, never IF EXISTS
+    # (a plain DELETE is already idempotent -- deleting an absent row is a
+    # no-op, which is exactly what lets moderation_service's bounded scrub
+    # loop re-run safely).
+    DELETE_POST = _Stmt("DELETE FROM algorand_platform.x402_social_posts WHERE post_id = ?")
+    DELETE_POST_BY_AUTHOR = _Stmt(
+        "DELETE FROM algorand_platform.x402_social_posts_by_author "
+        "WHERE author = ? AND created_at = ? AND post_id = ?"
+    )
+    DELETE_GROUP_FEED_POST = _Stmt(
+        "DELETE FROM algorand_platform.x402_social_group_feed "
+        "WHERE group_id = ? AND created_at = ? AND post_id = ?"
+    )
+    # Whole-partition delete: a hard-deleted post's comment thread is the
+    # liability being eliminated (design doc section 5.4.2), reachable or
+    # not -- one statement removes every comment on the post regardless of
+    # count, no LIMIT needed for a partition DELETE (unlike a read).
+    DELETE_COMMENTS_PARTITION = _Stmt(
+        "DELETE FROM algorand_platform.x402_social_comments WHERE post_id = ?"
+    )
+    MARK_GROUP_HIDDEN_PLATFORM = _Stmt(
+        "UPDATE algorand_platform.x402_social_groups SET hidden_platform = true "
+        "WHERE group_id = ? IF EXISTS"
+    )
+    MARK_GROUP_RECENCY_HIDDEN_PLATFORM = _Stmt(
+        "UPDATE algorand_platform.x402_social_groups_by_recency SET hidden_platform = true "
+        "WHERE bucket = ? AND created_at = ? AND group_id = ? IF EXISTS"
+    )
+    DELETE_GROUP = _Stmt("DELETE FROM algorand_platform.x402_social_groups WHERE group_id = ?")
+    DELETE_GROUP_RECENCY = _Stmt(
+        "DELETE FROM algorand_platform.x402_social_groups_by_recency "
+        "WHERE bucket = ? AND created_at = ? AND group_id = ?"
+    )
+    # Bounded read of a group's member wallets (moderation_service's group
+    # hard-delete walk), then one partition delete on x402_social_group_members
+    # and, per wallet read, a DELETE_MEMBERSHIP (already defined above --
+    # x402_social_memberships is keyed by wallet, not group_id, so it has no
+    # partition to bulk-delete by group_id without ALLOW FILTERING).
+    LIST_GROUP_MEMBER_WALLETS = _Stmt(
+        "SELECT wallet FROM algorand_platform.x402_social_group_members WHERE group_id = ? LIMIT ?"
+    )
+    DELETE_GROUP_MEMBERS_PARTITION = _Stmt(
+        "DELETE FROM algorand_platform.x402_social_group_members WHERE group_id = ?"
+    )
+
+    # -- Cases --
+    INSERT_CASE = _Stmt(
+        "INSERT INTO algorand_platform.x402_social_cases ("
+        "case_id, target_type, target_id, target_wallet, category, note, reporter, "
+        "settlement_tx_id, content_snapshot, opened_at, window_ends_at, state, "
+        "resolved_at, resolution_note"
+        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+    )
+    GET_CASE = _Stmt(
+        "SELECT case_id, target_type, target_id, target_wallet, category, note, reporter, "
+        "settlement_tx_id, content_snapshot, opened_at, window_ends_at, state, "
+        "resolved_at, resolution_note "
+        "FROM algorand_platform.x402_social_cases WHERE case_id = ?"
+    )
+    # Always rewrites content_snapshot too (to its unchanged existing value
+    # on every path except an upheld illegal_content hard-delete, which
+    # passes HARD_DELETE_SNAPSHOT_PLACEHOLDER instead) -- the caller already
+    # holds the full StoredCase in memory by the time it resolves, so one
+    # statement covers both cases rather than two near-duplicate UPDATEs.
+    # IF state = 'open' -- NOT IF EXISTS: this conditional update IS the
+    # "resolver slot" LWT design doc section 5.3 describes ("LWT-claim the
+    # resolver slot, then apply the verdict. Exactly-once by LWT; idempotent
+    # to observe.") -- only the caller that still sees state='open' wins and
+    # goes on to apply the case's actual consequences (tombstone/hard-delete/
+    # ban/karma, moderation_service.py); a caller that loses (state already
+    # flipped by a concurrent resolver) applies nothing further and just
+    # re-reads the now-resolved row.
+    UPDATE_CASE_RESOLUTION = _Stmt(
+        "UPDATE algorand_platform.x402_social_cases SET state = ?, resolved_at = ?, "
+        "resolution_note = ?, content_snapshot = ? WHERE case_id = ? IF state = 'open'"
+    )
+    # One-open-case-per-target guard (design doc section 5.3 step 1): an LWT,
+    # same "claim before anything else can happen" precedent as
+    # INSERT_GROUP_NAME_IF_ABSENT. GET_OPEN_CASE_BY_TARGET is used only to
+    # report the existing case_id in a caller-fault 409's message when the
+    # claim above loses.
+    INSERT_OPEN_CASE_BY_TARGET_IF_ABSENT = _Stmt(
+        "INSERT INTO algorand_platform.x402_social_open_case_by_target (target_id, case_id) "
+        "VALUES (?, ?) IF NOT EXISTS"
+    )
+    GET_OPEN_CASE_BY_TARGET = _Stmt(
+        "SELECT case_id FROM algorand_platform.x402_social_open_case_by_target WHERE target_id = ?"
+    )
+    # Released on resolution so the target becomes reportable again -- IF
+    # case_id = ? so this can only ever release the exact claim THIS case
+    # won, never a different (later) case's legitimate claim on the same
+    # target (same "delete only the claim this call owns" precedent as
+    # DELETE_GROUP_NAME_IF_OWNED above).
+    DELETE_OPEN_CASE_BY_TARGET_IF_OWNED = _Stmt(
+        "DELETE FROM algorand_platform.x402_social_open_case_by_target "
+        "WHERE target_id = ? IF case_id = ?"
+    )
+    INSERT_OPEN_CASE_FEED = _Stmt(
+        "INSERT INTO algorand_platform.x402_social_open_cases ("
+        "bucket, opened_at, case_id, target_type, target_id, category"
+        ") VALUES (?, ?, ?, ?, ?, ?)"
+    )
+    LIST_OPEN_CASES = _Stmt(
+        "SELECT bucket, opened_at, case_id, target_type, target_id, category "
+        "FROM algorand_platform.x402_social_open_cases WHERE bucket = ? LIMIT ?"
+    )
+    DELETE_OPEN_CASE_FEED = _Stmt(
+        "DELETE FROM algorand_platform.x402_social_open_cases "
+        "WHERE bucket = ? AND opened_at = ? AND case_id = ?"
+    )
+
+    # -- Votes --
+    # One vote per wallet per case, forever -- an LWT, same reaction-log
+    # discipline as INSERT_REACTION_IF_ABSENT: the LWT wins the slot, then
+    # exactly one un-retried counter add below.
+    INSERT_CASE_VOTE_IF_ABSENT = _Stmt(
+        "INSERT INTO algorand_platform.x402_social_case_votes ("
+        "case_id, voter, verdict, settlement_tx_id, voted_at"
+        ") VALUES (?, ?, ?, ?, ?) IF NOT EXISTS"
+    )
+    LIST_CASE_VOTES = _Stmt(
+        "SELECT case_id, voter, verdict, settlement_tx_id, voted_at "
+        "FROM algorand_platform.x402_social_case_votes WHERE case_id = ? LIMIT ?"
+    )
+    INCREMENT_CASE_UPHOLD = _Stmt(
+        "UPDATE algorand_platform.x402_social_case_vote_totals SET uphold = uphold + 1 "
+        "WHERE case_id = ?"
+    )
+    INCREMENT_CASE_REJECT = _Stmt(
+        "UPDATE algorand_platform.x402_social_case_vote_totals SET reject = reject + 1 "
+        "WHERE case_id = ?"
+    )
+    GET_CASE_VOTE_TOTALS = _Stmt(
+        "SELECT uphold, reject FROM algorand_platform.x402_social_case_vote_totals "
+        "WHERE case_id = ?"
+    )
+
+    # -- Standing / karma (design doc sections 5.2, 5.4, 5.4.1) --
+    # Full-row point read/write, never a partial UPDATE (CLAUDE.md section 3
+    # -- the articles_feed phantom-null-row class of bug): every caller reads
+    # the current StoredStanding (or a zero-valued default for a wallet with
+    # no row yet), mutates it in Python, and writes the WHOLE row back.
+    GET_STANDING = _Stmt(
+        "SELECT wallet, offense_count, last_offense_at, banned_until, offenses, "
+        "reported_count, rejected_report_count, report_rejection_streak, "
+        "report_cooldown_until, votes_cast, votes_matched_resolution "
+        "FROM algorand_platform.x402_social_standing WHERE wallet = ?"
+    )
+    UPSERT_STANDING = _Stmt(
+        "INSERT INTO algorand_platform.x402_social_standing ("
+        "wallet, offense_count, last_offense_at, banned_until, offenses, "
+        "reported_count, rejected_report_count, report_rejection_streak, "
+        "report_cooldown_until, votes_cast, votes_matched_resolution"
+        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+    )
+
+    # -- Section 5.4.1's open-report concurrency cap: a frozen<set> CAS,
+    # never a plain-int counter (see the migration's own note on why). --
+    GET_REPORTER_SLOTS = _Stmt(
+        "SELECT open_case_ids FROM algorand_platform.x402_social_reporter_slots WHERE reporter = ?"
+    )
+    INSERT_REPORTER_SLOTS_IF_ABSENT = _Stmt(
+        "INSERT INTO algorand_platform.x402_social_reporter_slots (reporter, open_case_ids) "
+        "VALUES (?, ?) IF NOT EXISTS"
+    )
+    UPDATE_REPORTER_SLOTS_IF_MATCH = _Stmt(
+        "UPDATE algorand_platform.x402_social_reporter_slots SET open_case_ids = ? "
+        "WHERE reporter = ? IF open_case_ids = ?"
+    )
+
+    # -- Hard-delete audit trail (design doc sections 5.4.2/8.1) --
+    INSERT_REMOVAL = _Stmt(
+        "INSERT INTO algorand_platform.x402_social_removals ("
+        "case_id, target_type, target_id, target_wallet, category, removed_by, "
+        "resolved_at, uphold_votes, reject_votes"
+        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+    )
+    # Not part of the design doc's own public endpoint table (section 5.2) --
+    # added for auditability (test verification that a removal record
+    # actually exists, and a natural future admin read) since the table is
+    # otherwise write-only from every code path.
+    GET_REMOVAL = _Stmt(
+        "SELECT case_id, target_type, target_id, target_wallet, category, removed_by, "
+        "resolved_at, uphold_votes, reject_votes "
+        "FROM algorand_platform.x402_social_removals WHERE case_id = ?"
     )
 
 

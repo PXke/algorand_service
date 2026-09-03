@@ -160,7 +160,7 @@ def x402_scan_url(request: Request) -> Response:
         return _handle_promo_scan(url, result)
 
     outcome = run_with_refund(
-        result, resource=_RESOURCE, product_write=lambda: _scan_product_write(url)
+        result, resource=_RESOURCE, product_write=lambda: _scan_product_write(url), request=request
     )
     if isinstance(outcome, Response):
         # run_with_refund's own failure-path response -- refunded (Concurrency

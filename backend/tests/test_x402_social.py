@@ -34,9 +34,11 @@ from __future__ import annotations
 import json
 import threading
 import uuid as uuid_module
+from collections.abc import Callable
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any, Never
+from unittest.mock import patch
 
 import pytest
 from conftest import patch_cassandra
@@ -49,27 +51,43 @@ from x402.mechanisms.avm.constants import ALGORAND_TESTNET_CAIP2
 
 from app.core import rate_limit as rate_limit_core
 from app.core.config import settings
-from app.core.http import QueryParams, Request
+from app.core.http import QueryParams, Request, Response
 from app.core.statements import X402SocialStmts
+from app.modules.admin.api import routes as admin_routes
 from app.modules.x402 import circuit_breaker as circuit_breaker_module
 from app.modules.x402 import guard as x402_guard
 from app.modules.x402 import paid_request as payment_service
 from app.modules.x402.refund import RefundResult
 from app.modules.x402_social.api import routes as social_routes
 from app.modules.x402_social.models.domain import (
+    CASE_STATE_REJECTED,
+    CASE_STATE_UPHELD,
+    CATEGORY_ILLEGAL_CONTENT,
+    CATEGORY_NOT_HELPFUL,
     GROUP_ROLE_MEMBER,
+    HARD_DELETE_SNAPSHOT_PLACEHOLDER,
     MAX_BIO_LEN,
     MAX_INTERESTS,
     REACTION_UP,
+    REMOVED_BY_ADMIN_LEVER,
+    REMOVED_BY_COMMUNITY_VOTE,
+    TARGET_AGENT,
+    TARGET_GROUP,
+    TARGET_POST,
     ReactionTotals,
     SocialError,
+    StoredCase,
     StoredGroup,
+    StoredStanding,
+    compute_ban_seconds,
+    compute_report_cooldown_seconds,
 )
 from app.modules.x402_social.services import prose, session_service, trending_service
 from app.modules.x402_social.services import rate_limit as social_rate_limit
 from app.modules.x402_social.services.graph_service import GraphService
 from app.modules.x402_social.services.group_service import GroupService
 from app.modules.x402_social.services.markdown_guard import validate_markdown_body
+from app.modules.x402_social.services.moderation_service import ModerationService
 from app.modules.x402_social.services.post_service import PostService, _new_post_or_comment_id
 from app.modules.x402_social.services.profile_service import ProfileService, validate_profile_fields
 from app.modules.x402_social.stores import cassandra as social_cassandra_store
@@ -78,6 +96,11 @@ from app.modules.x402_social.stores.memory import InMemorySocialStore
 
 _PAYER = encode_address(bytes([2]) + bytes(31))
 _OTHER_PAYER = encode_address(bytes([3]) + bytes(31))
+_REPORTER = encode_address(bytes([4]) + bytes(31))
+_VOTER_A = encode_address(bytes([5]) + bytes(31))
+_VOTER_B = encode_address(bytes([6]) + bytes(31))
+_VOTER_C = encode_address(bytes([7]) + bytes(31))
+_VOTER_D = encode_address(bytes([8]) + bytes(31))
 
 
 def _always_registered(_wallet: str) -> bool:
@@ -1941,3 +1964,773 @@ def test_trending_merge_pipelines_every_bucket_read_into_one_round_trip(
     assert len(pipelines_created) == 1
     assert execute_call_op_counts == [trending_service._MERGE_HOURS]
     assert top == []  # no activity recorded -- just proving the call shape here
+
+
+# --------------------------------------------------------------------------- #
+# Phase S2: community moderation (design doc section 5, owner sign-off
+# 2026-09-03) -- report -> vote -> exponential ban, hard-delete, the section
+# 8.1 admin lever. Fully offline, same in-memory store + fake-Redis
+# conventions as every S0/S1 test above.
+#
+#   S2-1  Report-cooldown pre-gate refusal is free (no payment attempted),
+#         with the cooldown timestamp in the body.
+#   S2-2  Open-report concurrency cap: a 3rd report while 2 are open is
+#         caller-fault (payment kept, 409) -- mirrors the group-name-
+#         collision test shape.
+#   S2-3  Case resolution, both category branches: quorum+ratio met ->
+#         upheld, non-illegal_content tombstones (hidden_platform), illegal_
+#         content hard-deletes (row gone, removal audit record written,
+#         content_snapshot scrubbed to the fixed placeholder).
+#   S2-4  Quorum failure -> not-upheld with a worded resolution_note; the
+#         reporter's rejection streak/cooldown escalate.
+#   S2-5  An upheld report resets the reporter's rejection streak to 0.
+#   S2-6  Karma: votes_cast/votes_matched_resolution update per voter.
+#   S2-7  The admin lever hard-deletes and writes the same removals shape,
+#         removed_by='admin_lever', 0/0 votes -- both the service method
+#         and the actual admin route (require_admin_wallet-gated).
+#   S2-8  x402_social_moderation_enabled=False keeps the S2 routes from
+#         registering (mirrors the x402_social_store gate in falcon_main.py).
+#   Plus: the ban-formula and report-cooldown-formula pure functions, pinned
+#   exactly per the design doc's own worked sequences.
+# --------------------------------------------------------------------------- #
+def _register(store: InMemorySocialStore, wallet: str, *, created_at_epoch: int = 0) -> None:
+    """Register `wallet` with a minimal profile, optionally back-dated (created_at_epoch) so it predates a case's opening for vote-eligibility tests."""
+    ProfileService(store).register(
+        wallet=wallet,
+        name="Agent",
+        bio="",
+        mission="",
+        location="",
+        interests=[],
+        emoji="",
+        settlement_tx_id="TX-REG",
+        now=datetime.fromtimestamp(created_at_epoch, tz=UTC) if created_at_epoch else None,
+    )
+
+
+def _moderation_service(store: InMemorySocialStore) -> ModerationService:
+    """A ModerationService bound to `store`, with post_service/group_service/registered_since all wired to that SAME store -- the shape api/routes.py's own module-level wiring uses."""
+    profile_service = ProfileService(store)
+    group_service = GroupService(store, is_registered=lambda w: profile_service.get(w) is not None)
+    post_service = PostService(
+        store,
+        membership_lookup=lambda group_id, wallet: group_service.is_member(group_id, wallet),
+        is_registered=lambda w: profile_service.get(w) is not None,
+    )
+
+    def registered_since(wallet: str) -> int | None:
+        profile = profile_service.get(wallet)
+        return profile.created_at_epoch if profile is not None else None
+
+    return ModerationService(
+        store,
+        post_service=post_service,
+        group_service=group_service,
+        registered_since=registered_since,
+    )
+
+
+def _now_epoch() -> int:
+    return int(datetime.now(tz=UTC).timestamp())
+
+
+def _resolve_now(ms: ModerationService, case: StoredCase) -> StoredCase:
+    """Force-resolve `case` immediately, bypassing real wall-clock window waiting: re-reads the raw stored case and calls the internal lazy-resolver with an explicit `now` just past its window."""
+    raw = ms.store.get_case(case.case_id)
+    assert raw is not None
+    return ms._resolve_if_due(raw, now=datetime.fromtimestamp(raw.window_ends_at_epoch + 1, tz=UTC))
+
+
+# --------------------------------------------------------------------------- #
+# S2-1: report cooldown pre-gate refusal is free
+# --------------------------------------------------------------------------- #
+@pytest.mark.usefixtures("fake_redis")
+def test_report_cooldown_pregate_refusal_is_free_and_returns_the_timestamp(
+    store: InMemorySocialStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A wallet under an active report cooldown, identified via an optional bearer session, is refused free (403) with the cooldown timestamp in the body, WITHOUT require_paid_request ever being called (design doc sections 5.3/5.4.1)."""
+    ms = _moderation_service(store)
+    monkeypatch.setattr(social_routes, "moderation_service", ms)
+    _register(store, _REPORTER)
+
+    future = _now_epoch() + 900
+    store.upsert_standing(StoredStanding(wallet=_REPORTER, report_cooldown_until_epoch=future))
+
+    token, _expires = session_service.issue_session_token(_REPORTER)
+
+    def _fail_if_called(*_a: object, **_kw: object) -> Never:
+        raise AssertionError("require_paid_request must not be called for a cooldown refusal")
+
+    monkeypatch.setattr(social_routes, "require_paid_request", _fail_if_called)
+
+    response = social_routes.x402_social_report_create(
+        _request(
+            body=json.dumps(
+                {"target_type": "agent", "target_id": _OTHER_PAYER, "category": "spam"}
+            ).encode(),
+            headers={"Authorization": f"Bearer {token}"},
+            path="/api/v1/x402/social/reports",
+        )
+    )
+
+    assert response.status_code == 403
+    body = json.loads(response.description)
+    assert body["error"]["code"] == "report_cooldown_active"
+    assert body["report_cooldown_until_epoch"] == future
+
+
+@pytest.mark.usefixtures("fake_redis")
+def test_report_without_a_session_is_not_pregated_and_reaches_the_payment_gate(
+    store: InMemorySocialStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No bearer session -> no free pre-check is possible (the wallet is unknown pre-gate); the route proceeds straight to require_paid_request, exactly as every other paid S2/S1 route does."""
+    ms = _moderation_service(store)
+    monkeypatch.setattr(social_routes, "moderation_service", ms)
+    _register(store, _REPORTER)
+    _register(store, _OTHER_PAYER)
+
+    gate_called: list[bool] = []
+
+    def _gate(*_a: object, **_kw: object) -> x402_guard.PaymentResult:
+        gate_called.append(True)
+        return _settled_result(payer=_REPORTER, txid="TX-R")
+
+    monkeypatch.setattr(social_routes, "require_paid_request", _gate)
+    monkeypatch.setattr(social_routes, "mark_fulfilled", lambda *_a, **_kw: None)
+
+    response = social_routes.x402_social_report_create(
+        _request(
+            body=json.dumps(
+                {"target_type": "agent", "target_id": _OTHER_PAYER, "category": "spam"}
+            ).encode(),
+            path="/api/v1/x402/social/reports",
+        )
+    )
+    assert gate_called == [True]
+    assert response.status_code == 200
+
+
+# --------------------------------------------------------------------------- #
+# S2-2: open-report concurrency cap
+# --------------------------------------------------------------------------- #
+@pytest.mark.usefixtures("fake_redis")
+def test_third_open_report_while_two_are_open_is_caller_fault_payment_kept(
+    store: InMemorySocialStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The open-report concurrency cap (design doc section 5.4.1): a 3rd report while 2 are already open settles but is refused (409), payment kept, NO refund attempted -- mirrors the group-name-collision route test's exact shape."""
+    ms = _moderation_service(store)
+    monkeypatch.setattr(social_routes, "moderation_service", ms)
+    monkeypatch.setattr(settings, "x402_social_report_max_open", 2)
+    _register(store, _REPORTER)
+    targets = [_OTHER_PAYER, _VOTER_A, _VOTER_B]
+    for t in targets:
+        _register(store, t)
+
+    fulfilled: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        social_routes,
+        "mark_fulfilled",
+        lambda txid, *, resource: fulfilled.append((txid, resource)),
+    )
+    refund_calls: list[dict[str, object]] = []
+    monkeypatch.setattr(payment_service, "send_refund", lambda **kw: refund_calls.append(kw))
+
+    def _report(target: str, txid: str) -> Response:
+        monkeypatch.setattr(
+            social_routes,
+            "require_paid_request",
+            lambda *_a, **_kw: _settled_result(payer=_REPORTER, txid=txid),
+        )
+        body = json.dumps(
+            {"target_type": "agent", "target_id": target, "category": "spam"}
+        ).encode()
+        return social_routes.x402_social_report_create(
+            _request(body=body, path="/api/v1/x402/social/reports")
+        )
+
+    first = _report(targets[0], "TX-R1")
+    second = _report(targets[1], "TX-R2")
+    assert first.status_code == 200
+    assert second.status_code == 200
+
+    third = _report(targets[2], "TX-R3")
+
+    assert third.status_code == 409
+    body = json.loads(third.description)
+    assert body["error"]["code"] == "too_many_open_reports"
+    # Settlement headers (the receipt) are still attached -- the 3rd payment
+    # WAS settled on-chain, only the product write was refused.
+    assert third.headers.get("PAYMENT-RESPONSE") == "ok"
+    assert fulfilled == [("TX-R1", "x402-social-report"), ("TX-R2", "x402-social-report")]
+    assert refund_calls == []
+
+
+def test_open_report_on_an_already_open_target_releases_the_just_claimed_slot() -> None:
+    """A report that loses the one-open-case-per-target race never legitimately opened a case, so it must NOT count against the reporter's own concurrency cap -- the slot claimed for it is released again."""
+    store = InMemorySocialStore()
+    ms = _moderation_service(store)
+    _register(store, _REPORTER)
+    _register(store, _OTHER_PAYER)
+
+    first = ms.open_report(
+        reporter=_REPORTER,
+        target_type=TARGET_AGENT,
+        target_id=_OTHER_PAYER,
+        category="spam",
+        note="",
+        settlement_tx_id="TX-1",
+    )
+    with pytest.raises(SocialError) as exc_info:
+        ms.open_report(
+            reporter=_REPORTER,
+            target_type=TARGET_AGENT,
+            target_id=_OTHER_PAYER,
+            category="harassment",
+            note="",
+            settlement_tx_id="TX-2",
+        )
+    assert exc_info.value.code == "case_already_open"
+    assert first.case_id in exc_info.value.message
+
+    # The failed attempt released its slot -- the reporter still has room
+    # for a real 2nd report against a DIFFERENT target.
+    _register(store, _VOTER_A)
+    second = ms.open_report(
+        reporter=_REPORTER,
+        target_type=TARGET_AGENT,
+        target_id=_VOTER_A,
+        category="spam",
+        note="",
+        settlement_tx_id="TX-3",
+    )
+    assert second.case_id != first.case_id
+
+
+# --------------------------------------------------------------------------- #
+# S2-3: case resolution -- both category branches
+# --------------------------------------------------------------------------- #
+def test_case_resolution_upheld_non_illegal_content_tombstones_the_post() -> None:
+    """quorum+ratio met, category != illegal_content -> hidden_platform=true, never a row delete, no removal audit record (design doc section 5.3 step 4)."""
+    store = InMemorySocialStore()
+    ms = _moderation_service(store)
+    settings_quorum, settings_ratio = 3, 0.5
+
+    _register(store, _REPORTER)
+    _register(store, _OTHER_PAYER)  # post author
+    opened = _now_epoch()
+    for w in (_VOTER_A, _VOTER_B, _VOTER_C):
+        _register(store, w, created_at_epoch=opened - 100)
+
+    post = ms.post_service.create(
+        author=_OTHER_PAYER, body_md="spammy content", tags=[], group_id="", settlement_tx_id="TX-P"
+    )
+    case = ms.open_report(
+        reporter=_REPORTER,
+        target_type=TARGET_POST,
+        target_id=post.post_id,
+        category=CATEGORY_NOT_HELPFUL,
+        note="",
+        settlement_tx_id="TX-REP",
+    )
+
+    with (
+        patch.object(settings, "x402_social_case_quorum", settings_quorum),
+        patch.object(settings, "x402_social_case_uphold_ratio", settings_ratio),
+    ):
+        ms.cast_vote(
+            case_id=case.case_id, voter=_VOTER_A, verdict="uphold", settlement_tx_id="TX-VA"
+        )
+        ms.cast_vote(
+            case_id=case.case_id, voter=_VOTER_B, verdict="uphold", settlement_tx_id="TX-VB"
+        )
+        ms.cast_vote(
+            case_id=case.case_id, voter=_VOTER_C, verdict="reject", settlement_tx_id="TX-VC"
+        )
+        resolved = _resolve_now(ms, case)
+
+    assert resolved.state == CASE_STATE_UPHELD
+    stored_post = store.get_post(post.post_id)
+    assert stored_post is not None  # never a row delete for a non-illegal_content verdict
+    assert stored_post.hidden_platform is True
+    assert stored_post.deleted is False
+    assert store.get_removal(case.case_id) is None
+    assert resolved.content_snapshot == "spammy content"  # untouched, never scrubbed
+
+
+def test_case_resolution_upheld_illegal_content_hard_deletes_the_post() -> None:
+    """quorum+ratio met, category == illegal_content -> the ONE row-delete exception (design doc section 5.4.2): the post is gone, a removal audit record exists, and the case's content_snapshot is scrubbed to the fixed placeholder -- never the real reported text."""
+    store = InMemorySocialStore()
+    ms = _moderation_service(store)
+
+    _register(store, _REPORTER)
+    _register(store, _OTHER_PAYER)
+    opened = _now_epoch()
+    for w in (_VOTER_A, _VOTER_B, _VOTER_C):
+        _register(store, w, created_at_epoch=opened - 100)
+
+    post = ms.post_service.create(
+        author=_OTHER_PAYER,
+        body_md="genuinely illegal content",
+        tags=[],
+        group_id="",
+        settlement_tx_id="TX-P",
+    )
+    case = ms.open_report(
+        reporter=_REPORTER,
+        target_type=TARGET_POST,
+        target_id=post.post_id,
+        category=CATEGORY_ILLEGAL_CONTENT,
+        note="",
+        settlement_tx_id="TX-REP",
+    )
+
+    with (
+        patch.object(settings, "x402_social_case_quorum", 3),
+        patch.object(settings, "x402_social_case_uphold_ratio", 0.5),
+    ):
+        ms.cast_vote(
+            case_id=case.case_id, voter=_VOTER_A, verdict="uphold", settlement_tx_id="TX-VA"
+        )
+        ms.cast_vote(
+            case_id=case.case_id, voter=_VOTER_B, verdict="uphold", settlement_tx_id="TX-VB"
+        )
+        ms.cast_vote(
+            case_id=case.case_id, voter=_VOTER_C, verdict="uphold", settlement_tx_id="TX-VC"
+        )
+        resolved = _resolve_now(ms, case)
+
+    assert resolved.state == CASE_STATE_UPHELD
+    # The content is gone...
+    assert store.get_post(post.post_id) is None
+    # ...but the audit record survives it, per the store-before-mark
+    # discipline (design doc section 5.4.2: "the record that something was
+    # removed, and why, must survive even though the content does not").
+    removal = store.get_removal(case.case_id)
+    assert removal is not None
+    assert removal.removed_by == REMOVED_BY_COMMUNITY_VOTE
+    assert removal.target_type == TARGET_POST
+    assert removal.target_id == post.post_id
+    assert removal.category == CATEGORY_ILLEGAL_CONTENT
+    assert removal.uphold_votes == 3
+    assert removal.reject_votes == 0
+    # The case row itself never keeps archiving the removed material.
+    assert resolved.content_snapshot == HARD_DELETE_SNAPSHOT_PLACEHOLDER
+    assert "illegal content" not in resolved.content_snapshot
+
+
+# --------------------------------------------------------------------------- #
+# S2-4: quorum failure -- not-upheld with a worded resolution_note, reporter
+# throttle escalation
+# --------------------------------------------------------------------------- #
+def test_case_resolution_quorum_failure_is_not_upheld_with_a_worded_note_and_escalates_the_reporter() -> (
+    None
+):
+    """Window expires without reaching quorum -> rejected, a public resolution_note names the shortfall (design doc section 5.3/5.6 Q8), and the reporter's rejection streak + cooldown escalate (section 5.4.1)."""
+    store = InMemorySocialStore()
+    ms = _moderation_service(store)
+    _register(store, _REPORTER)
+    _register(store, _OTHER_PAYER)
+    opened = _now_epoch()
+    _register(store, _VOTER_A, created_at_epoch=opened - 100)
+
+    case = ms.open_report(
+        reporter=_REPORTER,
+        target_type=TARGET_AGENT,
+        target_id=_OTHER_PAYER,
+        category="spam",
+        note="",
+        settlement_tx_id="TX-REP",
+    )
+    with patch.object(settings, "x402_social_case_quorum", 3):
+        # Only ONE vote cast -- below quorum.
+        ms.cast_vote(
+            case_id=case.case_id, voter=_VOTER_A, verdict="uphold", settlement_tx_id="TX-VA"
+        )
+        resolved = _resolve_now(ms, case)
+
+    assert resolved.state == CASE_STATE_REJECTED
+    assert "did not reach quorum" in resolved.resolution_note
+    assert "1 of 3" in resolved.resolution_note
+
+    standing = store.get_standing(_REPORTER)
+    assert standing.rejected_report_count == 1
+    assert standing.report_rejection_streak == 1
+    # base 900s (15m) for the FIRST rejection (streak=1) -- section 5.4.1.
+    assert standing.report_cooldown_until_epoch == resolved.resolved_at_epoch + 900
+
+
+def test_report_cooldown_progression_matches_the_exact_15m_30m_1h_sequence_and_the_7day_cap() -> (
+    None
+):
+    """Pins the design doc section 5.4.1 worked sequence exactly: 15m, 30m, 1h, 2h, 4h, 8h, 16h, ~1.3d, ~2.7d, ~5.3d, 7d (cap, reached at the 10th consecutive rejection)."""
+    base, cap = 900, 604800
+    expected_seconds = [
+        900,
+        1800,
+        3600,
+        7200,
+        14400,
+        28800,
+        57600,
+        115200,
+        230400,
+        460800,
+    ]
+    for streak, expected in enumerate(expected_seconds, start=1):
+        got = compute_report_cooldown_seconds(
+            streak, base_seconds=base, multiplier=2, cap_seconds=cap
+        )
+        assert got == expected, f"streak={streak}"
+    # The 10th consecutive rejection is streak=10 -> 900*2**9 = 460800s
+    # (~5.3d), still under the 7-day cap; the NEXT one (streak=11) is where
+    # the formula would exceed it and gets clamped.
+    assert (
+        compute_report_cooldown_seconds(11, base_seconds=base, multiplier=2, cap_seconds=cap) == cap
+    )
+    assert (
+        compute_report_cooldown_seconds(50, base_seconds=base, multiplier=2, cap_seconds=cap) == cap
+    )
+
+
+def test_ban_formula_matches_the_exact_design_doc_sequence_and_the_30day_cap() -> None:
+    """Pins the design doc section 5.4 worked sequence exactly: 30m -> 2h -> 8h -> 32h -> ~5.3d -> ~21d -> 30d (cap)."""
+    base, multiplier, cap = 1800, 4, 2592000
+    expected = [1800, 7200, 28800, 115200, 460800, 1843200, cap]
+    for offenses_in_window, want in enumerate(expected):
+        got = compute_ban_seconds(
+            offenses_in_window, base_seconds=base, multiplier=multiplier, cap_seconds=cap
+        )
+        assert got == want, f"offenses_in_window={offenses_in_window}"
+
+
+# --------------------------------------------------------------------------- #
+# S2-5: an upheld report resets the reporter's rejection streak to 0
+# --------------------------------------------------------------------------- #
+def test_upheld_report_resets_the_reporters_rejection_streak_to_zero() -> None:
+    """Design doc section 5.4.1: an upheld report resets streak to 0, chosen over merely not-incrementing -- the reporter's lifetime rejected_report_count is untouched, only the streak."""
+    store = InMemorySocialStore()
+    ms = _moderation_service(store)
+    _register(store, _REPORTER)
+    # Pre-existing streak from earlier (unrelated) rejected reports.
+    store.upsert_standing(
+        StoredStanding(wallet=_REPORTER, report_rejection_streak=3, rejected_report_count=3)
+    )
+    _register(store, _OTHER_PAYER)
+    opened = _now_epoch()
+    for w in (_VOTER_A, _VOTER_B, _VOTER_C):
+        _register(store, w, created_at_epoch=opened - 100)
+
+    case = ms.open_report(
+        reporter=_REPORTER,
+        target_type=TARGET_AGENT,
+        target_id=_OTHER_PAYER,
+        category="harassment",
+        note="",
+        settlement_tx_id="TX-REP",
+    )
+    with (
+        patch.object(settings, "x402_social_case_quorum", 3),
+        patch.object(settings, "x402_social_case_uphold_ratio", 0.5),
+    ):
+        for voter in (_VOTER_A, _VOTER_B, _VOTER_C):
+            ms.cast_vote(
+                case_id=case.case_id, voter=voter, verdict="uphold", settlement_tx_id=f"TX-{voter}"
+            )
+        resolved = _resolve_now(ms, case)
+
+    assert resolved.state == CASE_STATE_UPHELD
+    standing = store.get_standing(_REPORTER)
+    assert standing.report_rejection_streak == 0
+    # The prior lifetime count is untouched -- only the STREAK resets
+    # (design doc section 5.4.1's own reset-vs-not argument).
+    assert standing.rejected_report_count == 3
+
+
+# --------------------------------------------------------------------------- #
+# S2-6: karma -- votes_cast / votes_matched_resolution
+# --------------------------------------------------------------------------- #
+def test_karma_votes_cast_and_matched_resolution_update_per_voter() -> None:
+    """Every voter's votes_cast increments by one; votes_matched_resolution increments too only for voters whose verdict matched the final outcome (design doc section 5.3's resolver bookkeeping note)."""
+    store = InMemorySocialStore()
+    ms = _moderation_service(store)
+    _register(store, _REPORTER)
+    _register(store, _OTHER_PAYER)
+    opened = _now_epoch()
+    for w in (_VOTER_A, _VOTER_B, _VOTER_C):
+        _register(store, w, created_at_epoch=opened - 100)
+
+    case = ms.open_report(
+        reporter=_REPORTER,
+        target_type=TARGET_AGENT,
+        target_id=_OTHER_PAYER,
+        category="spam",
+        note="",
+        settlement_tx_id="TX-REP",
+    )
+    with (
+        patch.object(settings, "x402_social_case_quorum", 3),
+        patch.object(settings, "x402_social_case_uphold_ratio", 0.5),
+    ):
+        ms.cast_vote(
+            case_id=case.case_id, voter=_VOTER_A, verdict="uphold", settlement_tx_id="TX-VA"
+        )
+        ms.cast_vote(
+            case_id=case.case_id, voter=_VOTER_B, verdict="uphold", settlement_tx_id="TX-VB"
+        )
+        ms.cast_vote(
+            case_id=case.case_id, voter=_VOTER_C, verdict="reject", settlement_tx_id="TX-VC"
+        )
+        resolved = _resolve_now(ms, case)
+
+    assert resolved.state == CASE_STATE_UPHELD
+    for matched_voter in (_VOTER_A, _VOTER_B):
+        standing = store.get_standing(matched_voter)
+        assert standing.votes_cast == 1
+        assert standing.votes_matched_resolution == 1
+    mismatched = store.get_standing(_VOTER_C)
+    assert mismatched.votes_cast == 1
+    assert mismatched.votes_matched_resolution == 0
+
+
+# --------------------------------------------------------------------------- #
+# S2-7: the section 8.1 admin lever
+# --------------------------------------------------------------------------- #
+def test_admin_lever_hard_deletes_and_writes_the_same_removals_shape() -> None:
+    """moderation_service.admin_remove(hard_delete=True) shares the exact hard-delete mechanics the community resolver uses -- same removals table shape, removed_by='admin_lever', 0/0 votes (design doc section 5.4.2's own schema note)."""
+    store = InMemorySocialStore()
+    ms = _moderation_service(store)
+    _register(store, _OTHER_PAYER)
+    post = ms.post_service.create(
+        author=_OTHER_PAYER,
+        body_md="csam-scope content",
+        tags=[],
+        group_id="",
+        settlement_tx_id="TX-P",
+    )
+
+    removal = ms.admin_remove(
+        target_type=TARGET_POST,
+        target_id=post.post_id,
+        category=CATEGORY_ILLEGAL_CONTENT,
+        hard_delete=True,
+    )
+
+    assert removal is not None
+    assert removal.removed_by == REMOVED_BY_ADMIN_LEVER
+    assert removal.uphold_votes == 0
+    assert removal.reject_votes == 0
+    assert removal.target_type == TARGET_POST
+    assert removal.target_id == post.post_id
+    assert store.get_post(post.post_id) is None
+    fetched = store.get_removal(removal.case_id)
+    assert fetched is not None
+    assert fetched.removed_by == REMOVED_BY_ADMIN_LEVER
+
+
+def test_admin_lever_hard_deletes_a_group_and_every_one_of_its_posts() -> None:
+    """Design doc section 5.4.2 -- the owner's incitement-to-genocide example: hard-deleting a group removes the group row, its name claim, its membership, and EVERY post in its feed, not just the group shell."""
+    store = InMemorySocialStore()
+    ms = _moderation_service(store)
+    _register(store, _OTHER_PAYER)
+    group = ms.group_service.create(
+        owner=_OTHER_PAYER, name="bad-group", description="", settlement_tx_id="TX-G"
+    )
+    posts = [
+        ms.post_service.create(
+            author=_OTHER_PAYER,
+            body_md=f"post {i}",
+            tags=[],
+            group_id=group.group_id,
+            settlement_tx_id=f"TX-P{i}",
+        )
+        for i in range(3)
+    ]
+
+    removal = ms.admin_remove(
+        target_type=TARGET_GROUP,
+        target_id=group.group_id,
+        category=CATEGORY_ILLEGAL_CONTENT,
+        hard_delete=True,
+    )
+
+    assert removal is not None
+    assert removal.removed_by == REMOVED_BY_ADMIN_LEVER
+    assert removal.target_type == TARGET_GROUP
+    assert store.get_group(group.group_id) is None
+    # The name is freed -- re-claiming it costs the full price again.
+    assert ms.group_service.store.try_claim_group_name(
+        name_norm="bad-group", group_id="some-other-id"
+    )
+    assert store.get_membership(group.group_id, _OTHER_PAYER) is None
+    for post in posts:
+        assert store.get_post(post.post_id) is None
+
+
+def test_admin_lever_route_requires_admin_wallet_and_refuses_hard_delete_outside_illegal_content() -> (
+    None
+):
+    """The admin lever ROUTE (backend/app/modules/admin/api/routes.py): refused without an admin session, and hard_delete=True is refused outside the illegal_content category scope -- design doc section 5.4.2 says there is no admin or voter discretion to hard-delete under any other category."""
+    store = InMemorySocialStore()
+    ms = _moderation_service(store)
+
+    with patch.object(admin_routes, "moderation_service", ms):
+        # No admin session at all.
+        denied = admin_routes.admin_x402_social_moderation_remove(
+            Request(
+                method="POST",
+                headers={},
+                query_params=QueryParams({}),
+                path_params={},
+                body=json.dumps(
+                    {"target_type": "agent", "target_id": _OTHER_PAYER, "category": "spam"}
+                ).encode(),
+                url=SimpleNamespace(
+                    scheme="http",
+                    host="localhost",
+                    path="/api/v1/admin/x402-social/moderation/remove",
+                ),
+            )
+        )
+        assert denied.status_code in (401, 403, 503)
+
+        # Admin session present, but hard_delete=True outside illegal_content.
+        with patch.object(admin_routes, "require_admin_wallet", return_value=None):
+            refused = admin_routes.admin_x402_social_moderation_remove(
+                Request(
+                    method="POST",
+                    headers={},
+                    query_params=QueryParams({}),
+                    path_params={},
+                    body=json.dumps(
+                        {
+                            "target_type": "agent",
+                            "target_id": _OTHER_PAYER,
+                            "category": "spam",
+                            "hard_delete": True,
+                        }
+                    ).encode(),
+                    url=SimpleNamespace(
+                        scheme="http",
+                        host="localhost",
+                        path="/api/v1/admin/x402-social/moderation/remove",
+                    ),
+                )
+            )
+            assert refused.status_code == 400
+
+
+def test_admin_lever_route_hard_deletes_a_post_end_to_end() -> None:
+    """The full admin route path, admin-authenticated, category=illegal_content, hard_delete=True -- the post is gone and a removal record with removed_by='admin_lever' is written."""
+    store = InMemorySocialStore()
+    ms = _moderation_service(store)
+    _register(store, _OTHER_PAYER)
+    post = ms.post_service.create(
+        author=_OTHER_PAYER, body_md="content", tags=[], group_id="", settlement_tx_id="TX-P"
+    )
+
+    with (
+        patch.object(admin_routes, "moderation_service", ms),
+        patch.object(admin_routes, "require_admin_wallet", return_value=None),
+        patch.object(admin_routes, "verified_admin_wallet", return_value=_PAYER),
+    ):
+        response = admin_routes.admin_x402_social_moderation_remove(
+            Request(
+                method="POST",
+                headers={},
+                query_params=QueryParams({}),
+                path_params={},
+                body=json.dumps(
+                    {
+                        "target_type": "post",
+                        "target_id": post.post_id,
+                        "category": "illegal_content",
+                        "hard_delete": True,
+                        "reason": "authority request",
+                    }
+                ).encode(),
+                url=SimpleNamespace(
+                    scheme="http",
+                    host="localhost",
+                    path="/api/v1/admin/x402-social/moderation/remove",
+                ),
+            )
+        )
+
+    assert response["hard_deleted"] is True
+    assert response["removed_by"] == REMOVED_BY_ADMIN_LEVER
+    assert store.get_post(post.post_id) is None
+
+
+# --------------------------------------------------------------------------- #
+# S2-8: x402_social_moderation_enabled=False keeps S2 routes unregistered
+# --------------------------------------------------------------------------- #
+_RouteHandler = Callable[..., object]
+
+
+class _FakeRouter:
+    """Just enough of app.core.http.Router to record every (method, path) registered -- see that Protocol's own definition."""
+
+    def __init__(self) -> None:
+        self.registered: list[tuple[str, str]] = []
+
+    def _record(self, method: str, path: str) -> Callable[[_RouteHandler], _RouteHandler]:
+        def _decorator(fn: _RouteHandler) -> _RouteHandler:
+            self.registered.append((method, path))
+            return fn
+
+        return _decorator
+
+    def get(self, path: str) -> Callable[[_RouteHandler], _RouteHandler]:
+        return self._record("GET", path)
+
+    def post(self, path: str) -> Callable[[_RouteHandler], _RouteHandler]:
+        return self._record("POST", path)
+
+    def patch(self, path: str) -> Callable[[_RouteHandler], _RouteHandler]:
+        return self._record("PATCH", path)
+
+    def delete(self, path: str) -> Callable[[_RouteHandler], _RouteHandler]:
+        return self._record("DELETE", path)
+
+    def put(self, path: str) -> Callable[[_RouteHandler], _RouteHandler]:
+        return self._record("PUT", path)
+
+    def head(self, path: str) -> Callable[[_RouteHandler], _RouteHandler]:
+        return self._record("HEAD", path)
+
+
+def test_moderation_disabled_keeps_s2_routes_unregistered_but_s0_s1_stay_up(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """settings.x402_social_moderation_enabled=False (the shipped default) means register_x402_social_routes never registers POST /reports, GET /cases, GET /cases/{id}, POST /cases/{id}/vote, or GET /agents/{wallet}/standing -- mirrors the x402_social_store gate's own shape in falcon_main.py -- while every S0/S1 route still registers."""
+    monkeypatch.setattr(settings, "x402_social_moderation_enabled", False)
+    router = _FakeRouter()
+    social_routes.register_x402_social_routes(router)
+
+    s2_paths = {
+        ("POST", "/api/v1/x402/social/reports"),
+        ("GET", "/api/v1/x402/social/cases"),
+        ("GET", "/api/v1/x402/social/cases/:case_id"),
+        ("POST", "/api/v1/x402/social/cases/:case_id/vote"),
+        ("GET", "/api/v1/x402/social/agents/:wallet/standing"),
+    }
+    assert s2_paths.isdisjoint(router.registered)
+    # S0/S1 unaffected by the S2 flag.
+    assert ("POST", "/api/v1/x402/social/register") in router.registered
+    assert ("POST", "/api/v1/x402/social/posts") in router.registered
+
+
+def test_moderation_enabled_registers_s2_routes(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The flip side: settings.x402_social_moderation_enabled=True registers every S2 route."""
+    monkeypatch.setattr(settings, "x402_social_moderation_enabled", True)
+    router = _FakeRouter()
+    social_routes.register_x402_social_routes(router)
+
+    s2_paths = {
+        ("POST", "/api/v1/x402/social/reports"),
+        ("GET", "/api/v1/x402/social/cases"),
+        ("GET", "/api/v1/x402/social/cases/:case_id"),
+        ("POST", "/api/v1/x402/social/cases/:case_id/vote"),
+        ("GET", "/api/v1/x402/social/agents/:wallet/standing"),
+    }
+    assert s2_paths.issubset(router.registered)

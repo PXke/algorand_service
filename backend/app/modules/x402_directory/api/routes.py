@@ -287,6 +287,7 @@ def x402_list(request: Request) -> Response:
             promo_wallet=promo_wallet,
             category=category,
         ),
+        request=request,
     )
     if isinstance(outcome, Response):
         return outcome
@@ -456,6 +457,7 @@ def x402_renew(request: Request) -> Response:
         product_write=lambda: _renew_product_write(
             normalized_url=normalized_url, result=result, promo_wallet=promo_wallet
         ),
+        request=request,
     )
     if isinstance(outcome, Response):
         return outcome

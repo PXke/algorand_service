@@ -223,7 +223,7 @@ def x402_news_search(request: Request) -> Response:
         return payload
 
     outcome = run_with_refund(
-        result, resource=_SEARCH_RESOURCE, product_write=_news_search_product_write
+        result, resource=_SEARCH_RESOURCE, product_write=_news_search_product_write, request=request
     )
     if isinstance(outcome, Response):
         return outcome

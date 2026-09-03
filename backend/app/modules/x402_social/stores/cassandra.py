@@ -10,15 +10,22 @@ from app.core.cassandra import execute_parallel_with_args, get_cassandra_session
 from app.core.statements import X402SocialStmts
 from app.modules.x402_social.models.domain import (
     AGENTS_PARTITION,
+    CASES_PARTITION,
     GRAPH_SCAN_LIMIT,
     GROUPS_PARTITION,
+    REPORTER_SLOT_CAS_RETRIES,
+    VERDICT_UPHOLD,
     AgentProfile,
+    CaseTally,
     FollowEdge,
     ReactionTotals,
+    RemovalRecord,
+    StoredCase,
     StoredComment,
     StoredGroup,
     StoredMembership,
     StoredPost,
+    StoredStanding,
 )
 
 
@@ -111,11 +118,12 @@ def _row_to_post(row: object) -> StoredPost:
         settlement_tx_id=row.settlement_tx_id or "",
         deleted=bool(row.deleted),
         hidden_group=bool(row.hidden_group),
+        hidden_platform=bool(row.hidden_platform),
     )
 
 
 def _row_to_post_from_author(row: object) -> StoredPost:
-    """x402_social_posts_by_author has no hidden_group column -- see the migration's own comment; it reads back at the dataclass default (False)."""
+    """x402_social_posts_by_author has no hidden_group column -- see the migration's own comment; it reads back at the dataclass default (False). hidden_platform IS a real column here (migration 108) -- see that migration's own note on why it differs from hidden_group."""
     return StoredPost(
         post_id=str(row.post_id),
         author=row.author or "",
@@ -124,6 +132,7 @@ def _row_to_post_from_author(row: object) -> StoredPost:
         tags=list(row.tags or []),
         created_at_epoch=_epoch(row.created_at),
         deleted=bool(row.deleted),
+        hidden_platform=bool(row.hidden_platform),
     )
 
 
@@ -137,6 +146,7 @@ def _row_to_post_from_group_feed(row: object) -> StoredPost:
         created_at_epoch=_epoch(row.created_at),
         deleted=bool(row.deleted),
         hidden_group=bool(row.hidden_group),
+        hidden_platform=bool(row.hidden_platform),
     )
 
 
@@ -160,6 +170,7 @@ def _row_to_group(row: object) -> StoredGroup:
         owner=row.owner or "",
         created_at_epoch=_epoch(row.created_at),
         settlement_tx_id=row.settlement_tx_id or "",
+        hidden_platform=bool(row.hidden_platform),
     )
 
 
@@ -170,6 +181,42 @@ def _row_to_group_from_recency(row: object) -> StoredGroup:
         description=row.description or "",
         owner=row.owner or "",
         created_at_epoch=_epoch(row.created_at),
+        hidden_platform=bool(row.hidden_platform),
+    )
+
+
+def _row_to_case(row: object) -> StoredCase:
+    return StoredCase(
+        case_id=str(row.case_id),
+        target_type=row.target_type or "",
+        target_id=row.target_id or "",
+        target_wallet=row.target_wallet or "",
+        category=row.category or "",
+        note=row.note or "",
+        reporter=row.reporter or "",
+        settlement_tx_id=row.settlement_tx_id or "",
+        content_snapshot=row.content_snapshot or "",
+        opened_at_epoch=_epoch(row.opened_at),
+        window_ends_at_epoch=_epoch(row.window_ends_at),
+        state=row.state or "",
+        resolved_at_epoch=_epoch(row.resolved_at),
+        resolution_note=row.resolution_note or "",
+    )
+
+
+def _row_to_standing(row: object) -> StoredStanding:
+    return StoredStanding(
+        wallet=row.wallet,
+        offense_count=int(row.offense_count or 0),
+        last_offense_at_epoch=_epoch(row.last_offense_at),
+        banned_until_epoch=_epoch(row.banned_until),
+        offenses=[_epoch(ts) for ts in (row.offenses or [])],
+        reported_count=int(row.reported_count or 0),
+        rejected_report_count=int(row.rejected_report_count or 0),
+        report_rejection_streak=int(row.report_rejection_streak or 0),
+        report_cooldown_until_epoch=_epoch(row.report_cooldown_until),
+        votes_cast=int(row.votes_cast or 0),
+        votes_matched_resolution=int(row.votes_matched_resolution or 0),
     )
 
 
@@ -311,6 +358,7 @@ class CassandraSocialStore:
                 item.settlement_tx_id,
                 item.deleted,
                 item.hidden_group,
+                item.hidden_platform,
             ),
         )
         session.execute(
@@ -323,6 +371,7 @@ class CassandraSocialStore:
                 item.body_md,
                 list(item.tags),
                 item.deleted,
+                item.hidden_platform,
             ),
         )
         if item.group_id:
@@ -337,6 +386,7 @@ class CassandraSocialStore:
                     list(item.tags),
                     item.deleted,
                     item.hidden_group,
+                    item.hidden_platform,
                 ),
             )
 
@@ -441,6 +491,45 @@ class CassandraSocialStore:
             X402SocialStmts.MARK_GROUP_FEED_POST_HIDDEN,
             (item.group_id, _dt(item.created_at_epoch), post_id),
         )
+
+    def mark_post_hidden_platform(self, item: StoredPost) -> None:
+        """Set hidden_platform=true EVERYWHERE this post is projected: the canonical row, the author feed row, and (if set) the group feed row -- all via UPDATE ... IF EXISTS (Phase S2, design doc section 5.3 step 4).
+
+        Unlike mark_post_hidden_in_group, the author feed row IS included:
+        an upheld case verdict tombstones a post everywhere, including the
+        author's own feed, not just one group's.
+        """
+        session = get_cassandra_session()
+        post_id = _uuid(item.post_id)
+        created = _dt(item.created_at_epoch)
+        session.execute(X402SocialStmts.MARK_POST_HIDDEN_PLATFORM, (post_id,))
+        session.execute(
+            X402SocialStmts.MARK_POST_BY_AUTHOR_HIDDEN_PLATFORM, (item.author, created, post_id)
+        )
+        if item.group_id:
+            session.execute(
+                X402SocialStmts.MARK_GROUP_FEED_POST_HIDDEN_PLATFORM,
+                (item.group_id, created, post_id),
+            )
+
+    def hard_delete_post(self, item: StoredPost) -> None:
+        """Real row removal: the canonical row, the author feed row, (if set) the group feed row, and the post's whole comment partition (Phase S2, design doc section 5.4.2 -- the one category-scoped, illegal_content-only exception to this module's tombstone-only rule).
+
+        Each DELETE is independently idempotent (deleting an absent row is a
+        no-op), so this is safe to call more than once for the same post --
+        the property moderation_service's bounded group-hard-delete scrub
+        loop relies on.
+        """
+        session = get_cassandra_session()
+        post_id = _uuid(item.post_id)
+        created = _dt(item.created_at_epoch)
+        session.execute(X402SocialStmts.DELETE_POST, (post_id,))
+        session.execute(X402SocialStmts.DELETE_POST_BY_AUTHOR, (item.author, created, post_id))
+        if item.group_id:
+            session.execute(
+                X402SocialStmts.DELETE_GROUP_FEED_POST, (item.group_id, created, post_id)
+            )
+        session.execute(X402SocialStmts.DELETE_COMMENTS_PARTITION, (post_id,))
 
     def insert_comment(self, item: StoredComment) -> None:
         """Append one comment to a post's thread."""
@@ -607,11 +696,20 @@ class CassandraSocialStore:
                 item.owner,
                 created,
                 item.settlement_tx_id,
+                item.hidden_platform,
             ),
         )
         session.execute(
             X402SocialStmts.INSERT_GROUP_RECENCY,
-            (GROUPS_PARTITION, created, item.group_id, item.name, item.description, item.owner),
+            (
+                GROUPS_PARTITION,
+                created,
+                item.group_id,
+                item.name,
+                item.description,
+                item.owner,
+                item.hidden_platform,
+            ),
         )
 
     def get_group(self, group_id: str) -> StoredGroup | None:
@@ -625,6 +723,43 @@ class CassandraSocialStore:
         session = get_cassandra_session()
         rows = session.execute(X402SocialStmts.LIST_GROUPS_RECENT, (GROUPS_PARTITION, limit))
         return [_row_to_group_from_recency(row) for row in rows]
+
+    def mark_group_hidden_platform(self, item: StoredGroup) -> None:
+        """Set hidden_platform=true on the canonical row and the recency projection row, both via UPDATE ... IF EXISTS (Phase S2, design doc section 5.3 step 4: hidden from discovery, still point-readable and still servable to existing members)."""
+        session = get_cassandra_session()
+        session.execute(X402SocialStmts.MARK_GROUP_HIDDEN_PLATFORM, (item.group_id,))
+        session.execute(
+            X402SocialStmts.MARK_GROUP_RECENCY_HIDDEN_PLATFORM,
+            (GROUPS_PARTITION, _dt(item.created_at_epoch), item.group_id),
+        )
+
+    def hard_delete_group_shell(self, item: StoredGroup, *, name_norm: str) -> None:
+        """Real row removal of the group's own rows ONLY: canonical row, recency projection, and the name claim (freed -- re-claiming costs the full price again) -- Phase S2, design doc section 5.4.2.
+
+        Does NOT touch membership rows or the group's posts -- see
+        list_group_member_wallets / delete_group_memberships_partition and
+        list_group_feed (already the group's own feed reader) for the rest
+        of moderation_service's group hard-delete walk. Each DELETE is
+        independently idempotent, same property as hard_delete_post.
+        """
+        session = get_cassandra_session()
+        session.execute(X402SocialStmts.DELETE_GROUP, (item.group_id,))
+        session.execute(
+            X402SocialStmts.DELETE_GROUP_RECENCY,
+            (GROUPS_PARTITION, _dt(item.created_at_epoch), item.group_id),
+        )
+        session.execute(X402SocialStmts.DELETE_GROUP_NAME_IF_OWNED, (name_norm, item.group_id))
+
+    def list_group_member_wallets(self, group_id: str, *, limit: int) -> list[str]:
+        """Bounded read of a group's member wallets, for moderation_service's group hard-delete walk."""
+        session = get_cassandra_session()
+        rows = session.execute(X402SocialStmts.LIST_GROUP_MEMBER_WALLETS, (group_id, limit))
+        return [row.wallet for row in rows]
+
+    def delete_group_memberships_partition(self, group_id: str) -> None:
+        """Delete every x402_social_group_members row for `group_id` (one partition delete) AND, per wallet already read via list_group_member_wallets, the caller is responsible for deleting the matching x402_social_memberships row (keyed by wallet, not group_id -- see delete_membership, already defined above)."""
+        session = get_cassandra_session()
+        session.execute(X402SocialStmts.DELETE_GROUP_MEMBERS_PARTITION, (group_id,))
 
     def upsert_membership(self, item: StoredMembership) -> None:
         """Create or replace one wallet's membership in one group (both directions)."""
@@ -662,3 +797,287 @@ class CassandraSocialStore:
         session = get_cassandra_session()
         session.execute(X402SocialStmts.UPDATE_GROUP_MEMBER_ROLE, (role, group_id, wallet))
         session.execute(X402SocialStmts.UPDATE_MEMBERSHIP_ROLE, (role, wallet, group_id))
+
+    # ----------------------------------------------------------------- #
+    # Phase S2: community moderation (design doc section 5). See
+    # services/moderation_service.py for the case lifecycle, resolution,
+    # and the hard-delete mechanics the section 8.1 admin lever also calls
+    # into.
+    # ----------------------------------------------------------------- #
+    def try_claim_open_case_for_target(self, *, target_id: str, case_id: str) -> bool:
+        """Claim the one-open-case-per-target guard for `target_id` IFF unclaimed (LWT). Returns True iff this call won it."""
+        session = get_cassandra_session()
+        result = session.execute(
+            X402SocialStmts.INSERT_OPEN_CASE_BY_TARGET_IF_ABSENT, (target_id, _uuid(case_id))
+        )
+        return bool(result.was_applied)
+
+    def get_open_case_id_for_target(self, target_id: str) -> str | None:
+        """The currently-open case_id for `target_id`, or None -- used only to report it in a caller-fault 409's message when try_claim_open_case_for_target loses."""
+        session = get_cassandra_session()
+        row = session.execute(X402SocialStmts.GET_OPEN_CASE_BY_TARGET, (target_id,)).one()
+        return None if row is None else str(row.case_id)
+
+    def insert_case(self, item: StoredCase) -> None:
+        """Store a newly-opened case: the canonical row and its GET /cases feed row. Canonical first (store before mark)."""
+        session = get_cassandra_session()
+        case_id = _uuid(item.case_id)
+        opened = _dt(item.opened_at_epoch)
+        session.execute(
+            X402SocialStmts.INSERT_CASE,
+            (
+                case_id,
+                item.target_type,
+                item.target_id,
+                item.target_wallet,
+                item.category,
+                item.note,
+                item.reporter,
+                item.settlement_tx_id,
+                item.content_snapshot,
+                opened,
+                _dt(item.window_ends_at_epoch),
+                item.state,
+                _dt(item.resolved_at_epoch) if item.resolved_at_epoch else None,
+                item.resolution_note,
+            ),
+        )
+        session.execute(
+            X402SocialStmts.INSERT_OPEN_CASE_FEED,
+            (CASES_PARTITION, opened, case_id, item.target_type, item.target_id, item.category),
+        )
+
+    def get_case(self, case_id: str) -> StoredCase | None:
+        """Return the canonical case for an id, or None if there is none (including a malformed, non-UUID id)."""
+        parsed = _try_uuid(case_id)
+        if parsed is None:
+            return None
+        session = get_cassandra_session()
+        row = session.execute(X402SocialStmts.GET_CASE, (parsed,)).one()
+        return None if row is None else _row_to_case(row)
+
+    def list_open_cases(self, *, limit: int) -> list[StoredCase]:
+        """Return open (not-yet-resolved-and-purged) cases newest-first, at most `limit` of them -- the free GET /cases 'jury duty' feed.
+
+        Reads the feed's own (thin) rows for ordering/paging, then point-reads
+        each case's full canonical row: the feed row's own columns are
+        already a subset of the canonical row's, and a case in this feed can
+        legitimately be past its window and awaiting lazy resolution on its
+        NEXT touch -- the caller (moderation_service.list_open_cases) is
+        responsible for running _resolve_if_due on any that are due, not
+        this store method.
+        """
+        session = get_cassandra_session()
+        rows = session.execute(X402SocialStmts.LIST_OPEN_CASES, (CASES_PARTITION, limit))
+        cases: list[StoredCase] = []
+        for row in rows:
+            case = self.get_case(str(row.case_id))
+            if case is not None:
+                cases.append(case)
+        return cases
+
+    def resolve_case(self, item: StoredCase) -> bool:
+        """Apply `item`'s already-computed verdict to the canonical case row IFF it is still 'open' -- this conditional UPDATE IS the "resolver slot" LWT (design doc section 5.3): exactly one concurrent caller ever sees it applied=True.
+
+        Returns True iff THIS call won the resolution (and is therefore
+        responsible for applying the case's actual consequences -- tombstone/
+        hard-delete/ban/karma, all in moderation_service.py). A losing
+        caller (False) must apply nothing further -- another process already
+        has, or is about to.
+
+        On a win, also removes the case from the open-cases feed and
+        releases the one-open-case-per-target guard (so the target becomes
+        reportable again), both best-effort cleanup of denormalized state
+        that the canonical row's own resolution already made authoritative.
+        """
+        session = get_cassandra_session()
+        case_id = _uuid(item.case_id)
+        result = session.execute(
+            X402SocialStmts.UPDATE_CASE_RESOLUTION,
+            (
+                item.state,
+                _dt(item.resolved_at_epoch),
+                item.resolution_note,
+                item.content_snapshot,
+                case_id,
+            ),
+        )
+        if not result.was_applied:
+            return False
+        session.execute(
+            X402SocialStmts.DELETE_OPEN_CASE_FEED,
+            (CASES_PARTITION, _dt(item.opened_at_epoch), case_id),
+        )
+        session.execute(
+            X402SocialStmts.DELETE_OPEN_CASE_BY_TARGET_IF_OWNED, (item.target_id, case_id)
+        )
+        return True
+
+    def try_add_case_vote(
+        self, *, case_id: str, voter: str, verdict: str, settlement_tx_id: str, voted_at_epoch: int
+    ) -> bool:
+        """Insert the (case_id, voter) vote row IFF absent (LWT). Returns True iff this call won it -- same reaction-log discipline as try_add_reaction."""
+        session = get_cassandra_session()
+        result = session.execute(
+            X402SocialStmts.INSERT_CASE_VOTE_IF_ABSENT,
+            (_uuid(case_id), voter, verdict, settlement_tx_id, _dt(voted_at_epoch)),
+        )
+        return bool(result.was_applied)
+
+    def increment_case_vote_total(self, case_id: str, *, verdict: str) -> None:
+        """Add one to a case's uphold or reject counter, atomically. Called EXACTLY ONCE, only after try_add_case_vote returned True for this call -- same "issued exactly once" contract as increment_reaction_total."""
+        session = get_cassandra_session()
+        stmt = (
+            X402SocialStmts.INCREMENT_CASE_UPHOLD
+            if verdict == VERDICT_UPHOLD
+            else X402SocialStmts.INCREMENT_CASE_REJECT
+        )
+        session.execute(stmt, (_uuid(case_id),))
+
+    def get_case_vote_totals(self, case_id: str) -> CaseTally:
+        """Return a case's current uphold/reject totals, (0, 0) if never voted on."""
+        session = get_cassandra_session()
+        row = session.execute(X402SocialStmts.GET_CASE_VOTE_TOTALS, (_uuid(case_id),)).one()
+        if row is None:
+            return CaseTally()
+        return CaseTally(uphold=int(row.uphold or 0), reject=int(row.reject or 0))
+
+    def list_case_votes(self, case_id: str, *, limit: int) -> list[tuple[str, str]]:
+        """Return (voter, verdict) pairs for one case, at most `limit` of them -- the resolver's own karma bookkeeping input (votes_cast/votes_matched_resolution on each voter's standing)."""
+        session = get_cassandra_session()
+        rows = session.execute(X402SocialStmts.LIST_CASE_VOTES, (_uuid(case_id), limit))
+        return [(row.voter, row.verdict) for row in rows]
+
+    def get_standing(self, wallet: str) -> StoredStanding | None:
+        """Return one wallet's full moderation standing row, or None if it has never been touched (a wallet with no row yet has no offenses/reports/votes -- moderation_service's own default-zero StoredStanding covers that case for callers)."""
+        session = get_cassandra_session()
+        row = session.execute(X402SocialStmts.GET_STANDING, (wallet,)).one()
+        return None if row is None else _row_to_standing(row)
+
+    def upsert_standing(self, item: StoredStanding) -> None:
+        """Full-row overwrite of one wallet's standing (CLAUDE.md section 3: never a partial UPDATE -- the articles_feed phantom-null-row class of bug). Callers always read-modify-write the WHOLE row (moderation_service.py)."""
+        session = get_cassandra_session()
+        session.execute(
+            X402SocialStmts.UPSERT_STANDING,
+            (
+                item.wallet,
+                item.offense_count,
+                _dt(item.last_offense_at_epoch) if item.last_offense_at_epoch else None,
+                _dt(item.banned_until_epoch) if item.banned_until_epoch else None,
+                [_dt(e) for e in item.offenses],
+                item.reported_count,
+                item.rejected_report_count,
+                item.report_rejection_streak,
+                (
+                    _dt(item.report_cooldown_until_epoch)
+                    if item.report_cooldown_until_epoch
+                    else None
+                ),
+                item.votes_cast,
+                item.votes_matched_resolution,
+            ),
+        )
+
+    def get_reporter_open_case_ids(self, reporter: str) -> frozenset[str]:
+        """The set of case ids currently claimed against `reporter`'s open-report concurrency cap (design doc section 5.4.1), empty if the reporter has never filed a report."""
+        session = get_cassandra_session()
+        row = session.execute(X402SocialStmts.GET_REPORTER_SLOTS, (reporter,)).one()
+        if row is None or not row.open_case_ids:
+            return frozenset()
+        return frozenset(str(cid) for cid in row.open_case_ids)
+
+    def try_claim_reporter_slot(self, *, reporter: str, case_id: str, max_open: int) -> bool:
+        """CAS-claim one of `reporter`'s open-report slots for `case_id` (design doc section 5.4.1's frozen<set> concurrency-cap table). Returns True iff this call won a slot; False if the reporter is already at `max_open` open reports, INCLUDING when a lost race under contention exhausts the retry budget -- "a lost race that fills the set => refuse", the design doc's own words, not an error.
+
+        First-ever claim for a reporter is a plain LWT insert (no prior row
+        to CAS against); every claim after that is a bounded-retry
+        read-then-compare-and-swap on the whole set value, since Cassandra
+        cannot CAS-compare or LWT-guard a counter and a plain int would race
+        under concurrent opens (see the migration's own note).
+        """
+        session = get_cassandra_session()
+        case_uuid = _uuid(case_id)
+        first = session.execute(
+            X402SocialStmts.INSERT_REPORTER_SLOTS_IF_ABSENT, (reporter, {case_uuid})
+        )
+        if first.was_applied:
+            return True
+        for _ in range(REPORTER_SLOT_CAS_RETRIES):
+            row = session.execute(X402SocialStmts.GET_REPORTER_SLOTS, (reporter,)).one()
+            current = set(row.open_case_ids) if row and row.open_case_ids else set()
+            if case_uuid in current:
+                return True  # already holds this exact slot (retry after a prior partial failure)
+            if len(current) >= max_open:
+                return False
+            updated = current | {case_uuid}
+            result = session.execute(
+                X402SocialStmts.UPDATE_REPORTER_SLOTS_IF_MATCH, (updated, reporter, current)
+            )
+            if result.was_applied:
+                return True
+        return False
+
+    def release_reporter_slot(self, *, reporter: str, case_id: str) -> None:
+        """Best-effort CAS-remove of one of `reporter`'s open-report slots -- idempotent (membership-based: removing an absent element from the compared set is simply a no-op return), so a repeated release from a retried _resolve_if_due touch cannot double-decrement (design doc section 5.4.1)."""
+        session = get_cassandra_session()
+        case_uuid = _uuid(case_id)
+        for _ in range(REPORTER_SLOT_CAS_RETRIES):
+            row = session.execute(X402SocialStmts.GET_REPORTER_SLOTS, (reporter,)).one()
+            if row is None or not row.open_case_ids:
+                return
+            current = set(row.open_case_ids)
+            if case_uuid not in current:
+                return
+            updated = current - {case_uuid}
+            result = session.execute(
+                X402SocialStmts.UPDATE_REPORTER_SLOTS_IF_MATCH, (updated, reporter, current)
+            )
+            if result.was_applied:
+                return
+        logger.warning(
+            "x402 social moderation: failed to release reporter slot for reporter=%s "
+            "case_id=%s after %d CAS retries -- this reporter's open-report count may stay "
+            "stale (overcounted) until a future release attempt succeeds",
+            reporter,
+            case_id,
+            REPORTER_SLOT_CAS_RETRIES,
+        )
+
+    def insert_removal(self, item: RemovalRecord) -> None:
+        """Append-only hard-delete audit record (design doc sections 5.4.2/8.1) -- never mutated after insert."""
+        session = get_cassandra_session()
+        session.execute(
+            X402SocialStmts.INSERT_REMOVAL,
+            (
+                _uuid(item.case_id),
+                item.target_type,
+                item.target_id,
+                item.target_wallet,
+                item.category,
+                item.removed_by,
+                _dt(item.resolved_at_epoch),
+                item.uphold_votes,
+                item.reject_votes,
+            ),
+        )
+
+    def get_removal(self, case_id: str) -> RemovalRecord | None:
+        """Point read of one hard-delete audit record, or None. Not part of the design doc's public endpoint table -- see GET_REMOVAL's own comment."""
+        parsed = _try_uuid(case_id)
+        if parsed is None:
+            return None
+        session = get_cassandra_session()
+        row = session.execute(X402SocialStmts.GET_REMOVAL, (parsed,)).one()
+        if row is None:
+            return None
+        return RemovalRecord(
+            case_id=str(row.case_id),
+            target_type=row.target_type or "",
+            target_id=row.target_id or "",
+            target_wallet=row.target_wallet or "",
+            category=row.category or "",
+            removed_by=row.removed_by or "",
+            resolved_at_epoch=_epoch(row.resolved_at),
+            uphold_votes=int(row.uphold_votes or 0),
+            reject_votes=int(row.reject_votes or 0),
+        )

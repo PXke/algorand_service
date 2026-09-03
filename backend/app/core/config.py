@@ -235,6 +235,48 @@ class Settings(msgspec.Struct, kw_only=True):
     x402_refund_daily_budget_atomic: int = 100_000_000
     # ── end auto-refund ──────────────────────────────────────────────────────
 
+    # ── Signed fulfillment receipts (owner conversation 2026-09-03, see
+    # docs/x402-execution-trust-evaluation.md item 1) ───────────────────────
+    # A route wired through modules/x402/paid_request.run_with_refund gets a
+    # server-signed receipt attached to its response, binding exactly what
+    # was delivered to exactly what was paid for:
+    # sig(H(request body) || H(response body) || settlement_tx_id || ts).
+    # This is evidence, not a guarantee -- see the evaluation doc, do not
+    # re-derive the reasoning here. A FRESH, DEDICATED signing key, never
+    # x402_refund_mnemonic/kyc_payout_mnemonic/x402_pay_to_address -- it never
+    # holds funds and is never asked to. Signed via algosdk.util.sign_bytes
+    # (the same "MX"-domain-separated primitive workers/app/modules/wallet/
+    # signer.py already uses for algo_signData), so a receipt signature can
+    # never be replayed as authorization for a real on-chain transaction --
+    # safe to keep on a network-facing service. Empty = receipt generation is
+    # skipped (logged at debug, never blocks or fails the paid route) until
+    # configured -- same "empty is inert" convention as x402_refund_mnemonic.
+    x402_receipt_signing_mnemonic: str = ""
+    # Cassandra ("memory" = dev/test only, invisible across gunicorn workers,
+    # same convention as every other product's store gate). NEVER the
+    # settlement ledger (x402_settlements/x402_settlements_by_tx) -- a
+    # dedicated table so stored receipt content can be removed independently
+    # of the ledger, which CLAUDE.md section 9 treats as permanent. Joins
+    # back to the ledger via the settlement_tx_id column the receipt already
+    # carries -- no new column added to the ledger side.
+    x402_receipts_store: str = "memory"
+    # Bounds ONE stored receipt's response-output text (same order of
+    # magnitude as admin_source_max_chars above for "cap a stored blob" --
+    # this codebase's existing convention). The signature always covers the
+    # FULL response hash regardless of this cap; only the retained copy of
+    # the content itself is truncated past this, with a truncated flag set
+    # so a reader is never told a partial copy is complete.
+    x402_receipt_output_max_chars: int = 100_000
+    # Retention window (owner ask): a receipt is deliberately temporary
+    # evidence, not a permanent record -- Cassandra default_time_to_live on
+    # the table (migration 108), not enforced in application code.
+    x402_receipt_ttl_days: int = 90
+    # Free-endpoint abuse gate (CLAUDE.md section 9) for GET
+    # /api/v1/x402/receipts/:receipt_id, same per-IP Redis incr/expire shape
+    # as every other free x402 read.
+    x402_receipts_rate_limit_per_hour: int = 120
+    # ── end signed fulfillment receipts ─────────────────────────────────────
+
     # Know Your Agent (KYA, the x402 challenge's actual product): free wallet
     # enrollment + trust-signal computation, then a paid x402 lookup that
     # splits its fee with the enrolled wallet. The module lives in
@@ -573,6 +615,64 @@ class Settings(msgspec.Struct, kw_only=True):
     # 2.4). The response reports "truncated_to" when either cap bites.
     x402_social_feed_fanout_limit: int = 50
     # ── end x402 agent social network (Phase S1) ──────────────────────────────
+
+    # ── x402 agent social network, Phase S2: community moderation (design
+    # doc section 5, owner sign-off 2026-09-03; section 8.1's admin
+    # emergency lever shares this same audit trail but has no settings of
+    # its own -- it is require_admin_wallet-gated, not priced). Master flag:
+    # the whole S2 surface (POST /reports, GET /cases, GET /cases/{id},
+    # POST /cases/{id}/vote, the standing karma fields) stays unregistered
+    # until this is flipped, separate from and in addition to
+    # x402_social_store's own "memory" gate -- see
+    # api/routes.py.register_x402_social_routes and falcon_main.py.
+    x402_social_moderation_enabled: bool = False
+    # The most expensive recurring action on the platform (design doc
+    # section 5.2): a report conscripts other agents' attention and puts a
+    # target's standing at stake, so it is deliberately priced above the
+    # post it attacks (5x x402_social_post_price).
+    x402_social_report_price: str = "$0.05"
+    # Low, because quorum needs volunteers -- but paid, because a free vote
+    # is a free sybil lever; combined with the registration-predates-the-
+    # case eligibility rule (moderation_service.py), stuffing a vote costs
+    # real, ledger-visible money.
+    x402_social_case_vote_price: str = "$0.005"
+    # Voting window (design doc section 5.3): _resolve_if_due resolves a
+    # case lazily, on the next read or write that touches it after this many
+    # seconds have elapsed since it opened -- no scheduler, no Celery here.
+    x402_social_case_window_seconds: int = 86400
+    # Minimum distinct eligible voters for a case to resolve upheld (design
+    # doc section 5.3) -- below this, the window expiring resolves
+    # not-upheld regardless of the ratio.
+    x402_social_case_quorum: int = 5
+    # uphold / total >= this ratio, AND quorum met, resolves a case upheld
+    # (design doc section 5.3).
+    x402_social_case_uphold_ratio: float = 0.667
+    # The section 5.4 ban formula's three knobs: ban_seconds =
+    # min(base x multiplier**offenses_in_window, cap). Base 30 min, x4,
+    # cap 30 days pins the "30m -> 2h -> 8h -> 32h -> ~5.3d -> ~21d -> 30d
+    # (cap)" sequence the design doc documents and moderation_service's
+    # regression tests pin exactly.
+    x402_social_ban_base_seconds: int = 1800
+    x402_social_ban_multiplier: int = 4
+    x402_social_ban_cap_seconds: int = 2592000
+    # Offenses older than this stop counting toward the ban formula's
+    # offenses_in_window (design doc section 5.4) -- bans rehabilitate,
+    # they do not accumulate eternally. The LIFETIME offense_count on
+    # x402_social_standing is never decremented by this; only ban severity
+    # decays.
+    x402_social_offense_decay_days: int = 90
+    # Section 5.4.1's two independent false-report throttles. Concurrency
+    # cap: at most this many unresolved reports per reporter at once
+    # (caller-fault, payment kept, 409, enforced by an LWT slot claim on
+    # x402_social_reporter_slots). Cooldown: escalating filing throttle on
+    # every rejected resolution, base 15 min doubling per consecutive
+    # rejection, capped at 7 days, streak reset to 0 on an upheld report --
+    # refused pre-gate, free, 403, while active (a platform-imposed throttle
+    # the caller could not have avoided by paying more).
+    x402_social_report_max_open: int = 2
+    x402_social_report_cooldown_base_seconds: int = 900
+    x402_social_report_cooldown_cap_seconds: int = 604800
+    # ── end x402 agent social network (Phase S2) ──────────────────────────────
 
     # x402 catalog (GET /x402, free): the machine-readable index of every
     # x402 product route currently registered. See app/modules/x402_catalog/.

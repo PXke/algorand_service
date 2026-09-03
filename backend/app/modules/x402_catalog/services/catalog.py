@@ -62,6 +62,14 @@ class CatalogRoute:
     # shape as supports_preview. There is no public way to create a promo
     # code; this flag only says a route honors one if presented.
     supports_promo: bool = False
+    # True for a paid route wired through modules/x402/paid_request.
+    # run_with_refund with a dict-shaped product_write result (see
+    # modules/x402/receipts.py's own docstring on why non-dict outcomes
+    # can't be receipted) -- a static fact about the route's own code, not
+    # about runtime config. The catalog JSON (_route_json below) ANDs this
+    # with whether a signing key is actually configured, so the document
+    # never promises a receipt that will not actually be produced.
+    supports_receipts: bool = False
 
     @property
     def paid(self) -> bool:
@@ -143,6 +151,7 @@ PRODUCTS: tuple[Product, ...] = (
                 input_example=None,
                 supports_preview=True,
                 supports_promo=True,
+                supports_receipts=True,
             ),
         ),
     ),
@@ -174,6 +183,7 @@ PRODUCTS: tuple[Product, ...] = (
                     "contact": "support@example.com",
                 },
                 supports_promo=True,
+                supports_receipts=True,
             ),
             CatalogRoute(
                 method="POST",
@@ -188,6 +198,7 @@ PRODUCTS: tuple[Product, ...] = (
                 resource="x402-directory-renew",
                 input_example={"url": _EXAMPLE_URL},
                 supports_promo=True,
+                supports_receipts=True,
             ),
             CatalogRoute(
                 method="GET",
@@ -246,6 +257,7 @@ PRODUCTS: tuple[Product, ...] = (
                     "pitch": "Autonomous FX arbitrage agent. Live on Algorand since 2026.",
                 },
                 supports_promo=True,
+                supports_receipts=True,
             ),
             CatalogRoute(
                 method="GET",
@@ -262,6 +274,7 @@ PRODUCTS: tuple[Product, ...] = (
                 price_setting="x402_board_price",
                 resource="x402-board-renew",
                 supports_promo=True,
+                supports_receipts=True,
             ),
             CatalogRoute(
                 method="GET",
@@ -294,6 +307,7 @@ PRODUCTS: tuple[Product, ...] = (
                 input_example={"limit": 25},
                 supports_promo=True,
                 supports_preview=True,
+                supports_receipts=True,
             ),
             CatalogRoute(
                 method="POST",
@@ -302,6 +316,7 @@ PRODUCTS: tuple[Product, ...] = (
                 price_setting="x402_features_vote_price",
                 resource="x402-features-vote",
                 supports_promo=True,
+                supports_receipts=True,
             ),
             CatalogRoute(
                 method="POST",
@@ -310,6 +325,7 @@ PRODUCTS: tuple[Product, ...] = (
                 price_setting="x402_features_vote_price",
                 resource="x402-features-claim",
                 supports_promo=True,
+                supports_receipts=True,
             ),
         ),
     ),
@@ -336,6 +352,7 @@ PRODUCTS: tuple[Product, ...] = (
                     "tx_id": "YOURPAYMENTTXIDYOURPAYMENTTXIDYOURPAYMENTTXIDYOURPAY",
                 },
                 supports_promo=True,
+                supports_receipts=True,
             ),
             CatalogRoute(
                 method="GET",
@@ -353,6 +370,7 @@ PRODUCTS: tuple[Product, ...] = (
                 input_example={"url": _EXAMPLE_URL},
                 supports_promo=True,
                 supports_preview=True,
+                supports_receipts=True,
             ),
             CatalogRoute(
                 method="GET",
@@ -368,6 +386,7 @@ PRODUCTS: tuple[Product, ...] = (
                 input_example={"tag": "pricing"},
                 supports_promo=True,
                 supports_preview=True,
+                supports_receipts=True,
             ),
         ),
     ),
@@ -389,6 +408,7 @@ PRODUCTS: tuple[Product, ...] = (
                 resource="x402-news-search",
                 input_example={"q": "tinyman volume", "limit": 10},
                 supports_promo=True,
+                supports_receipts=True,
             ),
             CatalogRoute(
                 method="GET",
@@ -422,6 +442,7 @@ PRODUCTS: tuple[Product, ...] = (
                 resource="x402-scan-url",
                 input_example={"url": _EXAMPLE_URL},
                 supports_promo=True,
+                supports_receipts=True,
             ),
         ),
     ),
@@ -453,6 +474,25 @@ PRODUCTS: tuple[Product, ...] = (
                 price_setting="kyc_lookup_price",
                 resource="kyc-verify",
                 input_example={"wallet": "ALGORAND_ADDRESS"},
+            ),
+        ),
+    ),
+    Product(
+        key="receipts",
+        title="Fulfillment receipts",
+        store_setting="x402_receipts_store",
+        routes=(
+            CatalogRoute(
+                method="GET",
+                path="/api/v1/x402/receipts/:receipt_id",
+                description=(
+                    "Free: the stored output, signature and metadata for one signed "
+                    "fulfillment receipt id, while still within its 90-day retention "
+                    "window; 404 for an unknown or expired id. See a paid route's own "
+                    "X-Fulfillment-Receipt response header (routes with "
+                    "supports_receipts=true) for how a receipt_id is minted."
+                ),
+                input_example={"receipt_id": "00000000-0000-0000-0000-000000000000"},
             ),
         ),
     ),
@@ -492,6 +532,14 @@ def _route_json(product: Product, route: CatalogRoute) -> dict[str, Any]:
         "input_example": route.input_example,
         "supports_preview": route.supports_preview,
         "supports_promo": route.supports_promo,
+        # route.supports_receipts is a static fact about the route's own
+        # code (wired through run_with_refund with a dict-shaped result);
+        # ANDed with whether a signing key is actually configured so this
+        # document never promises a receipt that will not be produced --
+        # see modules/x402/receipts.py.
+        "supports_receipts": bool(
+            route.supports_receipts and settings.x402_receipt_signing_mnemonic.strip()
+        ),
     }
 
 

@@ -200,7 +200,7 @@ class PostService:
         return self.store.get_post(post_id) if post_id else None
 
     def list_by_author(self, author: str, *, limit: int) -> list[StoredPost]:
-        """Return one author's own NON-deleted posts newest-first, clamped to x402_social_max_results.
+        """Return one author's own NON-deleted, non-platform-hidden posts newest-first, clamped to x402_social_max_results.
 
         Deleted (author-tombstoned) posts are filtered out here (finding 1,
         2026-security-audit): a deleted post is treated as fully gone from
@@ -212,10 +212,14 @@ class PostService:
         feed with many deleted posts near the front can legitimately return
         fewer than `limit` live posts -- acceptable at this module's scale,
         same bounded-scan trade `home_feed` documents.
+
+        `hidden_platform` (Phase S2, design doc section 5.3 step 4) is
+        filtered the same way -- an upheld case verdict tombstones a post
+        EVERYWHERE, including the author's own feed, unlike `hidden_group`.
         """
         clamped = max(1, min(limit, settings.x402_social_max_results))
         posts = self.store.list_posts_by_author(author, limit=clamped)
-        return [p for p in posts if not p.deleted]
+        return [p for p in posts if not p.deleted and not p.hidden_platform]
 
     def list_group_feed(self, group_id: str, *, limit: int) -> list[StoredPost]:
         """Return one group's feed newest-first, clamped to x402_social_max_results."""
@@ -408,7 +412,9 @@ class PostService:
         deduped: dict[str, StoredPost] = {}
         for p in collected:
             deduped.setdefault(p.post_id, p)
-        visible = [p for p in deduped.values() if not p.deleted]
+        # hidden_platform (Phase S2) tombstones a post everywhere, same as
+        # `deleted` -- filtered here alongside it.
+        visible = [p for p in deduped.values() if not p.deleted and not p.hidden_platform]
         visible.sort(key=lambda p: (-p.created_at_epoch, p.post_id))
         clamped = max(1, min(limit, settings.x402_social_max_results))
         return visible[:clamped]

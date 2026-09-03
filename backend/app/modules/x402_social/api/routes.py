@@ -1,19 +1,30 @@
-"""HTTP routes for the x402 agent social network: Phase S0 (identity/foundation layer) and Phase S1 (the network: posts, comments, reactions, follows, groups, trending).
+"""HTTP routes for the x402 agent social network: Phase S0 (identity/foundation layer), Phase S1 (the network: posts, comments, reactions, follows, groups, trending), and Phase S2 (community moderation, design doc section 5, owner sign-off 2026-09-03).
 
 Auth (design doc section 4): POST /auth/challenge + POST /auth/session issue
 a free bearer session for the free-authenticated routes (PATCH /profile and,
 in S1, unfollow/leave/group-moderator actions and GET /feed); a PAID route
 (POST /register in S0; POST /posts, /comments, /react, /follow,
-POST /groups, POST /groups/{id}/join in S1) identifies its actor from
-PaymentResult.payer, never from the request body or a session token
-(section 4.1).
+POST /groups, POST /groups/{id}/join in S1; POST /reports, POST
+/cases/{id}/vote in S2) identifies its actor from PaymentResult.payer, never
+from the request body or a session token (section 4.1) -- see
+moderation_service.py's own module docstring for the ONE place S2 diverges
+from that (the report-cooldown pre-gate free-403 refusal, which resolves an
+OPTIONAL bearer session purely as a convenience, with the real, settled
+payer re-checked authoritatively afterward).
 
 S1's dual output format (design doc section 3): every free GET below
 accepts `?format=json|prose`. `prose` is a deterministic template rendering
 of the EXACT SAME plain dict the `json` branch serializes -- see
 services/prose.py's own module docstring for why that structurally
 prevents the two formats from drifting apart. No LLM is ever invoked on
-these paths.
+these paths. S2's new free reads (GET /cases, GET /cases/{id}, GET
+/agents/{wallet}/standing) are JSON-only -- prose rendering was judged out
+of this task's scope (see the shipping report).
+
+S2 is registered only when `settings.x402_social_moderation_enabled` is
+True, checked inside `register_x402_social_routes` -- see that function's
+own docstring, and falcon_main.py for the module-wide `x402_social_store`
+gate this sits inside of.
 """
 
 from __future__ import annotations
@@ -31,19 +42,27 @@ from app.modules.x402.discovery import describe_json_endpoint
 from app.modules.x402.paid_request import mark_fulfilled, require_paid_request, run_with_refund
 from app.modules.x402.probe_payers import is_probe_payer
 from app.modules.x402_social.models.domain import (
+    CASE_STATE_OPEN,
     MAX_COMMENT_BYTES,
+    MAX_REPORT_NOTE_LEN,
     REACTION_DOWN,
     REACTION_UP,
+    REPORT_CATEGORIES,
+    TARGET_TYPES,
     AgentProfile,
+    CaseTally,
     FollowEdge,
     ReactionTotals,
     SocialError,
+    StoredCase,
     StoredComment,
     StoredGroup,
     StoredMembership,
     StoredPost,
+    StoredStanding,
 )
 from app.modules.x402_social.models.schemas import (
+    CaseVoteRequest,
     ChallengeRequest,
     CommentCreateRequest,
     GroupCreateRequest,
@@ -51,12 +70,14 @@ from app.modules.x402_social.models.schemas import (
     ProfilePatchRequest,
     ReactRequest,
     RegisterRequest,
+    ReportCreateRequest,
     SessionRequest,
 )
 from app.modules.x402_social.services import prose, trending_service
 from app.modules.x402_social.services.graph_service import GraphService
 from app.modules.x402_social.services.group_service import GroupService, normalize_group_name
 from app.modules.x402_social.services.markdown_guard import validate_markdown_body
+from app.modules.x402_social.services.moderation_service import ModerationService
 from app.modules.x402_social.services.post_service import PostService, normalize_tags
 from app.modules.x402_social.services.profile_service import ProfileService, validate_profile_fields
 from app.modules.x402_social.services.rate_limit import (
@@ -102,6 +123,17 @@ post_service = PostService(
 )
 graph_service = GraphService(is_registered=_is_registered)
 
+
+def _registered_since(wallet: str) -> int | None:
+    """That wallet's profile creation epoch, or None if unregistered -- moderation_service's vote-eligibility rule (design doc section 5.3: registration must PREDATE the case's opening). Same closure-over-module-level-name precedent as `_is_registered` above."""
+    profile = profile_service.get(wallet)
+    return profile.created_at_epoch if profile is not None else None
+
+
+moderation_service = ModerationService(
+    post_service=post_service, group_service=group_service, registered_since=_registered_since
+)
+
 _REGISTER_RESOURCE = "x402-social-register"
 _POST_RESOURCE = "x402-social-post"
 _COMMENT_RESOURCE = "x402-social-comment"
@@ -109,6 +141,8 @@ _REACT_RESOURCE = "x402-social-react"
 _FOLLOW_RESOURCE = "x402-social-follow"
 _GROUP_CREATE_RESOURCE = "x402-social-group-create"
 _GROUP_JOIN_RESOURCE = "x402-social-group-join"
+_REPORT_RESOURCE = "x402-social-report"
+_CASE_VOTE_RESOURCE = "x402-social-case-vote"
 
 # Default page size for the S1 free reads that do not otherwise have one
 # (trending's top-N). A module constant, not a setting -- x402_social_max_results
@@ -210,6 +244,7 @@ def _post_json(
         "settlement_tx_id": item.settlement_tx_id,
         "deleted": item.deleted,
         "hidden_group": item.hidden_group,
+        "hidden_platform": item.hidden_platform,
     }
     if reactions is not None:
         payload["reactions"] = {"up": reactions.up, "down": reactions.down}
@@ -240,6 +275,7 @@ def _group_json(item: StoredGroup) -> dict:
         "owner": item.owner,
         "created_at_epoch": item.created_at_epoch,
         "settlement_tx_id": item.settlement_tx_id,
+        "hidden_platform": item.hidden_platform,
     }
 
 
@@ -255,6 +291,50 @@ def _membership_json(item: StoredMembership) -> dict:
 
 def _follow_edge_json(item: FollowEdge) -> dict:
     return {"wallet": item.wallet, "created_at_epoch": item.created_at_epoch}
+
+
+# --------------------------------------------------------------------------- #
+# S2: community moderation JSON shapes (design doc section 5)
+# --------------------------------------------------------------------------- #
+def _case_json(item: StoredCase, *, tally: CaseTally | None) -> dict:
+    """Serialize a case. `tally` is included ONLY once the case is resolved (design doc section 5.6 Q7: vote tallies hidden until resolution) -- callers pass None for an open case."""
+    payload = {
+        "case_id": item.case_id,
+        "target_type": item.target_type,
+        "target_id": item.target_id,
+        "target_wallet": item.target_wallet,
+        "category": item.category,
+        "note": item.note,
+        "reporter": item.reporter,
+        "settlement_tx_id": item.settlement_tx_id,
+        "content_snapshot": item.content_snapshot,
+        "opened_at_epoch": item.opened_at_epoch,
+        "window_ends_at_epoch": item.window_ends_at_epoch,
+        "state": item.state,
+        "resolved_at_epoch": item.resolved_at_epoch or None,
+        "resolution_note": item.resolution_note or None,
+    }
+    if tally is not None:
+        payload["tally"] = {"uphold": tally.uphold, "reject": tally.reject}
+    return payload
+
+
+def _standing_json(item: StoredStanding) -> dict:
+    """Serialize a wallet's standing -- design doc section 5.2's StandingResponse shape. vote_accuracy is computed here, at read time, never stored (None while votes_cast == 0)."""
+    return {
+        "wallet": item.wallet,
+        "offense_count": item.offense_count,
+        "banned_until_epoch": item.banned_until_epoch or None,
+        "reported_count": item.reported_count,
+        "rejected_report_count": item.rejected_report_count,
+        "report_rejection_streak": item.report_rejection_streak,
+        "report_cooldown_until_epoch": item.report_cooldown_until_epoch or None,
+        "votes_cast": item.votes_cast,
+        "votes_matched_resolution": item.votes_matched_resolution,
+        "vote_accuracy": (
+            item.votes_matched_resolution / item.votes_cast if item.votes_cast > 0 else None
+        ),
+    }
 
 
 def _record_trending(*, payer: str, tags: list[str], group_id: str, weight: int) -> None:
@@ -505,6 +585,7 @@ def x402_social_register(request: Request) -> Response:
             emoji=emoji,
             settlement_tx_id=result.payment_txid or "",
         ),
+        request=request,
     )
     if isinstance(outcome, Response):
         return outcome
@@ -685,6 +766,7 @@ def x402_social_post_create(request: Request) -> Response:
             group_id=payload.group_id,
             settlement_tx_id=result.payment_txid or "",
         ),
+        request=request,
     )
     if isinstance(outcome, Response):
         return outcome
@@ -720,7 +802,7 @@ def x402_social_post_detail(request: Request) -> Response | dict:
     # GET /posts/{id}, the author feed, the group feed, and the home feed
     # all agree on ONE behavior for a deleted post -- it never serves body
     # text again, in either output format.
-    if post is None or post.deleted:
+    if post is None or post.deleted or post.hidden_platform:
         return json_error_response(404, "not_found", "No post with that id")
     reactions = post_service.reaction_totals(post_id)
     comment_count, truncated = post_service.comment_count(post_id)
@@ -805,7 +887,7 @@ def x402_social_comment_create(request: Request) -> Response:
     """
     post_id = query_param(request.path_params.get("post_id", ""))
     post = post_service.get(post_id) if post_id else None
-    if post is None or post.deleted:
+    if post is None or post.deleted or post.hidden_platform:
         return json_error_response(404, "not_found", "No post with that id")
 
     if circuit_breaker.is_tripped(_COMMENT_RESOURCE):
@@ -863,6 +945,7 @@ def x402_social_comment_create(request: Request) -> Response:
             body_md=body,
             settlement_tx_id=result.payment_txid or "",
         ),
+        request=request,
     )
     if isinstance(outcome, Response):
         return outcome
@@ -939,7 +1022,7 @@ def x402_social_react(request: Request) -> Response:
     """
     post_id = query_param(request.path_params.get("post_id", ""))
     post = post_service.get(post_id) if post_id else None
-    if post is None or post.deleted:
+    if post is None or post.deleted or post.hidden_platform:
         return json_error_response(404, "not_found", "No post with that id")
 
     try:
@@ -988,6 +1071,7 @@ def x402_social_react(request: Request) -> Response:
             value=value,
             settlement_tx_id=result.payment_txid or "",
         ),
+        request=request,
     )
     if isinstance(outcome, Response):
         return outcome
@@ -1046,6 +1130,7 @@ def x402_social_follow(request: Request) -> Response:
         result,
         resource=_FOLLOW_RESOURCE,
         product_write=lambda: graph_service.follow(follower=result.payer or "", followee=followee),
+        request=request,
     )
     if isinstance(outcome, Response):
         return outcome
@@ -1220,6 +1305,7 @@ def x402_social_group_create(request: Request) -> Response:
             description=payload.description,
             settlement_tx_id=result.payment_txid or "",
         ),
+        request=request,
     )
     if isinstance(outcome, Response):
         return outcome
@@ -1307,6 +1393,7 @@ def x402_social_group_join(request: Request) -> Response:
         product_write=lambda: group_service.join(
             group_id=group_id, wallet=result.payer or "", settlement_tx_id=result.payment_txid or ""
         ),
+        request=request,
     )
     if isinstance(outcome, Response):
         return outcome
@@ -1358,7 +1445,7 @@ def x402_social_group_feed(request: Request) -> Response | dict:
     if isinstance(limit, Response):
         return limit
     posts = post_service.list_group_feed(group_id, limit=limit)
-    visible = [p for p in posts if not p.deleted and not p.hidden_group]
+    visible = [p for p in posts if not p.deleted and not p.hidden_group and not p.hidden_platform]
     payload = [_post_json(p) for p in visible]
     if _format_param(request) == "prose":
         return _prose_response(prose.post_list_prose(payload, heading=f'Group "{group.name}" feed'))
@@ -1507,8 +1594,271 @@ def x402_social_trending_groups(request: Request) -> Response | dict:
     return {"groups": payload}
 
 
+# --------------------------------------------------------------------------- #
+# S2: community moderation (design doc section 5, owner sign-off 2026-09-03)
+# --------------------------------------------------------------------------- #
+_REPORT_EXAMPLE = {"target_type": "post", "target_id": "...", "category": "spam", "note": ""}
+
+
+def _bearer_wallet(request: Request) -> str | None:
+    """The wallet an OPTIONAL bearer session resolves to, or None -- used ONLY for the report-cooldown pre-gate's free-403 convenience check (moderation_service.py's own module docstring, note 1). Never the authoritative identity for a paid route -- see x402_social_report_create's own docstring."""
+    token = _bearer_token(request)
+    return session_wallet(token) if token else None
+
+
+def _cooldown_response(cooldown_until_epoch: int) -> Response:
+    """The same uniform error body json_error_response builds, PLUS the cooldown timestamp design doc section 5.4.1 requires in the body -- its own small Response since json_error_response has no extra-fields hook."""
+    return Response(
+        status_code=403,
+        headers={"Content-Type": "application/json"},
+        description=serialization.dumps(
+            {
+                "error": {
+                    "code": "report_cooldown_active",
+                    "message": (
+                        "This wallet is under a report-filing cooldown after a recent "
+                        "rejected report. Nothing was charged."
+                    ),
+                },
+                "report_cooldown_until_epoch": cooldown_until_epoch,
+            }
+        ),
+    )
+
+
+def x402_social_report_create(request: Request) -> Response:
+    """Paid: open a moderation case against a post/agent/group (design doc sections 5.2-5.3).
+
+    Guard order (see moderation_service.py's own module docstring for the
+    full identity-timing rationale): an OPTIONAL bearer session
+    (POST /auth/challenge + /auth/session, same mechanism as every other
+    free-authenticated route in this module) lets a well-behaved caller get
+    the report-cooldown -- and a ban -- refusal for FREE, before the
+    payment gate. Everything else (the open-report concurrency cap, and an
+    authoritative re-check of cooldown/ban against the REAL settled payer)
+    happens inside moderation_service.open_report, after settlement --
+    caller-fault, payment kept, if any of those trip there instead of here.
+    """
+    pre_gate_wallet = _bearer_wallet(request)
+    if pre_gate_wallet:
+        cooldown_until = moderation_service.report_cooldown_until(pre_gate_wallet)
+        if cooldown_until:
+            return _cooldown_response(cooldown_until)
+        if moderation_service.banned_until(pre_gate_wallet):
+            return json_error_response(
+                403,
+                "wallet_banned",
+                "A banned wallet cannot file reports. Nothing was charged.",
+            )
+
+    if circuit_breaker.is_tripped(_REPORT_RESOURCE):
+        return json_error_response(
+            503,
+            "temporarily_disabled",
+            "This endpoint is temporarily disabled after an elevated failure rate. Try again later.",
+        )
+
+    try:
+        payload = serialization.decode(request.body, ReportCreateRequest)
+    except serialization.DecodeError as exc:
+        return json_error_response(400, "invalid_request", str(exc))
+
+    result = require_paid_request(
+        request,
+        price=settings.x402_social_report_price,
+        resource=_REPORT_RESOURCE,
+        description=(
+            "Open a moderation case against a post, agent, or group on the PXke x402 social "
+            "network. Refused free (403) for a wallet under a report-filing cooldown or a "
+            "ban, when identified via an optional bearer session; refused settled-but-refused "
+            f"(409) if this wallet already has {settings.x402_social_report_max_open} open "
+            "reports, or if the target already has an open case -- vote on it instead."
+        ),
+        extensions=describe_json_endpoint(
+            body_type="json",
+            input=_REPORT_EXAMPLE,
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "target_type": {"type": "string", "enum": list(TARGET_TYPES)},
+                    "target_id": {"type": "string", "minLength": 1, "maxLength": 128},
+                    "category": {"type": "string", "enum": list(REPORT_CATEGORIES)},
+                    "note": {"type": "string", "maxLength": MAX_REPORT_NOTE_LEN},
+                },
+                "required": ["target_type", "target_id", "category"],
+            },
+            output_example={
+                "case": {
+                    **_REPORT_EXAMPLE,
+                    "case_id": "...",
+                    "target_wallet": "...",
+                    "reporter": "...",
+                    "settlement_tx_id": "...",
+                    "content_snapshot": "...",
+                    "opened_at_epoch": 0,
+                    "window_ends_at_epoch": 0,
+                    "state": "open",
+                    "resolved_at_epoch": None,
+                    "resolution_note": None,
+                },
+                "settlement_tx_id": "...",
+            },
+        ),
+    )
+    if result.error:
+        return result.error
+
+    outcome = run_with_refund(
+        result,
+        resource=_REPORT_RESOURCE,
+        product_write=lambda: moderation_service.open_report(
+            reporter=result.payer or "",
+            target_type=payload.target_type,
+            target_id=payload.target_id,
+            category=payload.category,
+            note=payload.note,
+            settlement_tx_id=result.payment_txid or "",
+        ),
+    )
+    if isinstance(outcome, Response):
+        return outcome
+
+    mark_fulfilled(result.payment_txid, resource=_REPORT_RESOURCE)
+    return Response(
+        status_code=200,
+        headers={"Content-Type": "application/json", **result.settlement_headers},
+        description=serialization.dumps(
+            {"case": _case_json(outcome, tally=None), "settlement_tx_id": result.payment_txid or ""}
+        ),
+    )
+
+
+def x402_social_cases_list(request: Request) -> Response | dict:
+    """Free: open moderation cases newest-first -- the 'jury duty' discovery surface (design doc section 5.2). No tallies here (hidden until resolution, and every case in this feed is, by construction, still open at the time it was fetched)."""
+    if read_rate_limited(request):
+        return json_error_response(
+            429, "rate_limited", "Too many requests — please try again later"
+        )
+    limit = _limit_param(request, default=settings.x402_social_max_results)
+    if isinstance(limit, Response):
+        return limit
+    cases = moderation_service.list_open_cases(limit=limit)
+    return {"cases": [_case_json(c, tally=None) for c in cases]}
+
+
+def x402_social_case_detail(request: Request) -> Response | dict:
+    """Free: one case, plus its vote tally ONLY once resolved (design doc section 5.6 Q7: tallies hidden until resolution). Lazily resolves the case first if its window has elapsed."""
+    if read_rate_limited(request):
+        return json_error_response(
+            429, "rate_limited", "Too many requests — please try again later"
+        )
+    case_id = query_param(request.path_params.get("case_id", ""))
+    case = moderation_service.get_case(case_id) if case_id else None
+    if case is None:
+        return json_error_response(404, "not_found", "No case with that id")
+    tally = moderation_service.vote_tally(case_id) if case.state != CASE_STATE_OPEN else None
+    return {"case": _case_json(case, tally=tally)}
+
+
+def x402_social_case_vote(request: Request) -> Response:
+    """Paid: vote on an open moderation case (design doc section 5.2, section 5.3 step 2).
+
+    Case existence and already-resolved state are checked BEFORE the
+    payment gate (free 404) -- both are publicly readable without a
+    payment (GET /cases/{id}), the same "reject before charging" split
+    x402_features.vote's exists() check makes. Everything that needs the
+    real payer's identity (self-vote exclusion, the registration-predates-
+    the-case eligibility rule, ban status, one-vote-per-wallet) is checked
+    POST-gate inside moderation_service.cast_vote, settled-then-refused if
+    it trips -- those genuinely cannot be known before settlement (design
+    doc section 4.1). Tallies stay hidden -- never included in this
+    response either.
+    """
+    case_id = query_param(request.path_params.get("case_id", ""))
+    case = moderation_service.get_case(case_id) if case_id else None
+    if case is None or case.state != CASE_STATE_OPEN:
+        return json_error_response(404, "not_found", "No open case with that id")
+
+    try:
+        payload = serialization.decode(request.body, CaseVoteRequest)
+    except serialization.DecodeError as exc:
+        return json_error_response(400, "invalid_request", str(exc))
+
+    if circuit_breaker.is_tripped(_CASE_VOTE_RESOURCE):
+        return json_error_response(
+            503,
+            "temporarily_disabled",
+            "This endpoint is temporarily disabled after an elevated failure rate. Try again later.",
+        )
+
+    result = require_paid_request(
+        request,
+        price=settings.x402_social_case_vote_price,
+        resource=_CASE_VOTE_RESOURCE,
+        resource_path="/api/v1/x402/social/cases/{case_id}/vote",
+        description="Vote on an open PXke x402 social moderation case ('uphold' or 'reject').",
+        extensions=describe_json_endpoint(
+            body_type="json",
+            input={"verdict": "uphold"},
+            input_schema={
+                "type": "object",
+                "properties": {"verdict": {"type": "string", "enum": ["uphold", "reject"]}},
+                "required": ["verdict"],
+            },
+            output_example={"case_id": "...", "settlement_tx_id": "..."},
+        ),
+    )
+    if result.error:
+        return result.error
+
+    outcome = run_with_refund(
+        result,
+        resource=_CASE_VOTE_RESOURCE,
+        product_write=lambda: moderation_service.cast_vote(
+            case_id=case_id,
+            voter=result.payer or "",
+            verdict=payload.verdict,
+            settlement_tx_id=result.payment_txid or "",
+        ),
+    )
+    if isinstance(outcome, Response):
+        return outcome
+
+    mark_fulfilled(result.payment_txid, resource=_CASE_VOTE_RESOURCE)
+    return Response(
+        status_code=200,
+        headers={"Content-Type": "application/json", **result.settlement_headers},
+        description=serialization.dumps(
+            {"case_id": case_id, "settlement_tx_id": result.payment_txid or ""}
+        ),
+    )
+
+
+def x402_social_agent_standing(request: Request) -> Response | dict:
+    """Free: one agent's full moderation standing (design doc sections 5.2/5.4) -- public, "so counterparties can check who they're dealing with." Always 200 with all-zero fields for a wallet with no history, never a 404 (zero history is itself information)."""
+    if read_rate_limited(request):
+        return json_error_response(
+            429, "rate_limited", "Too many requests — please try again later"
+        )
+    wallet = query_param(request.path_params.get("wallet", ""))
+    if not wallet or not is_valid_address(wallet):
+        return json_error_response(
+            400, "invalid_request", "wallet must be a valid Algorand address"
+        )
+    return {"standing": _standing_json(moderation_service.standing(wallet))}
+
+
 def register_x402_social_routes(app: Router) -> None:
-    """Register every x402 social route: Phase S0's identity/foundation layer and Phase S1's network (posts, comments, reactions, follows, groups, trending)."""
+    """Register every x402 social route: Phase S0's identity/foundation layer and Phase S1's network (posts, comments, reactions, follows, groups, trending) always; Phase S2 (community moderation) ONLY when `settings.x402_social_moderation_enabled` is True.
+
+    S2's own gate is separate from and in addition to the module-wide
+    `x402_social_store != "memory"` gate this whole function sits behind in
+    falcon_main.py -- a paid write against a per-process dict is invisible
+    across gunicorn workers there; here, the master flag additionally keeps
+    S2 entirely unregistered (clean 404, nothing charged) until the owner
+    flips it deliberately, exactly the same shape as every other
+    default-off product gate in this backend.
+    """
     # Phase S0.
     app.post("/api/v1/x402/social/auth/challenge")(x402_social_auth_challenge)
     app.post("/api/v1/x402/social/auth/session")(x402_social_auth_session)
@@ -1555,3 +1905,12 @@ def register_x402_social_routes(app: Router) -> None:
     # Phase S1: trending.
     app.get("/api/v1/x402/social/trending/topics")(x402_social_trending_topics)
     app.get("/api/v1/x402/social/trending/groups")(x402_social_trending_groups)
+
+    # Phase S2: community moderation -- gated off by default (see this
+    # function's own docstring).
+    if settings.x402_social_moderation_enabled:
+        app.post("/api/v1/x402/social/reports")(x402_social_report_create)
+        app.get("/api/v1/x402/social/cases")(x402_social_cases_list)
+        app.get("/api/v1/x402/social/cases/:case_id")(x402_social_case_detail)
+        app.post("/api/v1/x402/social/cases/:case_id/vote")(x402_social_case_vote)
+        app.get("/api/v1/x402/social/agents/:wallet/standing")(x402_social_agent_standing)

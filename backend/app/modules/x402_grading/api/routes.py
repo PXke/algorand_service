@@ -506,6 +506,7 @@ def x402_grade_submit(request: Request) -> Response:
             payment_txid=result.payment_txid,
             usage_verified=proof_verified,
         ),
+        request=request,
     )
     if isinstance(outcome, Response):
         return outcome
@@ -642,6 +643,7 @@ def x402_grade_score(request: Request) -> Response:
         result,
         resource="x402-grading-score",
         product_write=lambda: _aggregate_json(grading_service.aggregate(endpoint)),
+        request=request,
     )
     if isinstance(outcome, Response):
         return outcome
@@ -865,7 +867,9 @@ def x402_grade_top(request: Request) -> Response:
             "candidates_considered": len(aggregates),
         }
 
-    outcome = run_with_refund(result, resource="x402-grading-top", product_write=_rank_and_build)
+    outcome = run_with_refund(
+        result, resource="x402-grading-top", product_write=_rank_and_build, request=request
+    )
     if isinstance(outcome, Response):
         return outcome
 

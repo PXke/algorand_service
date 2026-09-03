@@ -1,19 +1,21 @@
-"""Domain types for the x402 agent social network (Phase S0 identity/foundation layer, Phase S1 the network: posts, comments, reactions, follows, groups, trending).
+"""Domain types for the x402 agent social network (Phase S0 identity/foundation layer, Phase S1 the network: posts, comments, reactions, follows, groups, trending, Phase S2 community moderation).
 
 The settlement ledger's SettlementRecord lives in modules/x402/settlement.py
 (shared across every x402 product, see that module's docstring) -- this
 module never defines its own.
 
-Phase S2 (community moderation, design doc section 5) is explicitly NOT
-approved for implementation -- see that section's own owner-sign-off block.
-Nothing in this module defines a `hidden_platform` field or any case/vote/
-standing type: the design doc's own S1 table sketch ties `hidden_platform`
-to section 5 (a case verdict) and section 8.1 (an admin emergency lever),
-neither of which is in scope here, and CLAUDE.md's Phase-S1 task brief is
-explicit that S2 must not even be scaffolded. `deleted` (author tombstone)
-and `hidden_group` (group-owner/moderator scoped hide, section 2.7 -- this
-one does NOT wait on section 5, see GroupService) are the only tombstone
-flags Phase S1 needs.
+Phase S2 (community moderation, design doc section 5) received owner
+sign-off 2026-09-03 and is implemented here, gated behind
+`settings.x402_social_moderation_enabled` (default False -- see
+api/routes.py's register_x402_social_routes and falcon_main.py). `deleted`
+(author tombstone) and `hidden_group` (group-owner/moderator scoped hide,
+section 2.7 -- does NOT wait on section 5, see GroupService) are the S1
+tombstone flags; `hidden_platform` (below, on StoredPost/StoredGroup) is the
+S2 one -- set by an upheld non-illegal_content case verdict or the section
+8.1 admin lever, tombstone-hidden EVERYWHERE (unlike `hidden_group`, which
+only scopes out of one group's own feed). An upheld illegal_content case (or
+the admin lever acting within that same three-category legal scope) hard-
+deletes instead -- the one deliberate row-delete exception, section 5.4.2.
 """
 
 from __future__ import annotations
@@ -181,6 +183,14 @@ class StoredPost:
     at its dataclass default (False) -- that table has no such column (see
     the migration's own comment) -- callers needing the real value use the
     canonical point read or the group_feed projection instead.
+
+    `hidden_platform` (migration 108, Phase S2) is an upheld non-illegal_content
+    case verdict or the section 8.1 admin lever's scoped hide -- unlike
+    `hidden_group`, it is set on EVERY projection (canonical row,
+    posts_by_author, group_feed) and tombstones the post everywhere,
+    including the author's own feed (design doc section 5.3 step 4:
+    "hidden_platform=true (tombstone-hidden everywhere...)"). An upheld
+    illegal_content case hard-deletes instead -- see moderation_service.py.
     """
 
     post_id: str
@@ -192,6 +202,7 @@ class StoredPost:
     settlement_tx_id: str = ""
     deleted: bool = False
     hidden_group: bool = False
+    hidden_platform: bool = False
 
 
 @dataclass
@@ -232,6 +243,14 @@ class StoredGroup:
     "hash the thing that must be unique" precedent as x402_board's
     placement_id, so the id is reproducible from the name alone and never a
     random uuid a client would have to be told.
+
+    `hidden_platform` (migration 108, Phase S2) is an upheld
+    non-illegal_content case verdict against the group, or the section 8.1
+    admin lever's scoped hide: hidden from GET /groups and trending, but
+    still point-readable (GET /groups/{id}) and still servable to existing
+    members (design doc section 5.3 step 4: "existing members can still
+    read it"). An upheld illegal_content case hard-deletes the group and
+    every one of its posts instead -- see moderation_service.py.
     """
 
     group_id: str
@@ -240,6 +259,7 @@ class StoredGroup:
     owner: str
     created_at_epoch: int = 0
     settlement_tx_id: str = ""
+    hidden_platform: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -251,3 +271,180 @@ class StoredMembership:
     role: str
     joined_at_epoch: int
     settlement_tx_id: str = ""
+
+
+# --------------------------------------------------------------------------- #
+# Phase S2: community moderation (design doc section 5, owner sign-off
+# 2026-09-03) and the section 8.1 admin emergency lever, which shares this
+# exact machinery (same x402_social_removals audit table, removed_by=
+# 'admin_lever', no vote -- see moderation_service.admin_remove). Ships
+# behind settings.x402_social_moderation_enabled (default False).
+# --------------------------------------------------------------------------- #
+
+MAX_REPORT_NOTE_LEN = 512
+
+# Constant partition key for x402_social_open_cases -- same "bounded
+# product, one partition, LIMITed reads" precedent as AGENTS_PARTITION /
+# GROUPS_PARTITION above.
+CASES_PARTITION = "default"
+
+# Bounded scans for the S2 store methods that read a whole partition/case's
+# worth of rows (design doc section 5.4.1's "bounded retries on contention"
+# spirit extended to plain bounded reads): votes on one case, and a group's
+# member wallets during a hard-delete walk.
+CASE_VOTE_SCAN_LIMIT = 2000
+GROUP_MEMBER_SCAN_LIMIT = 5000
+# Per-touch cap on moderation_service's group-hard-delete post walk (design
+# doc section 5.4.2: "Group scrubs walk the feed in LIMITed pages,
+# idempotently"). Each page is this many posts; GROUP_HARD_DELETE_MAX_PAGES
+# bounds the total pages one _resolve_if_due touch will walk before
+# stopping (safe to call again -- every delete is idempotent).
+GROUP_HARD_DELETE_PAGE_SIZE = 200
+GROUP_HARD_DELETE_MAX_PAGES = 50
+# Bounded CAS-retry budget for the reporter-slot frozen<set> compare-and-
+# swap (design doc section 5.4.1: "bounded retries on contention; a lost
+# race that fills the set => refuse").
+REPORTER_SLOT_CAS_RETRIES = 5
+
+TARGET_POST = "post"
+TARGET_AGENT = "agent"
+TARGET_GROUP = "group"
+TARGET_TYPES: tuple[str, ...] = (TARGET_POST, TARGET_AGENT, TARGET_GROUP)
+
+# Bounded report-category enum (design doc section 5.1). illegal_content has
+# a LEGAL, not editorial, bar (scoped to French law: apologie du terrorisme,
+# incitation au meurtre, pedopornographie/CSAM) -- the only category whose
+# upheld verdict hard-deletes rather than tombstone-hides (section 5.4.2).
+CATEGORY_SPAM = "spam"
+CATEGORY_SCAM_OR_FRAUD = "scam_or_fraud"
+CATEGORY_MALWARE_OR_EXPLOIT = "malware_or_exploit"
+CATEGORY_HARASSMENT = "harassment"
+CATEGORY_PERSONAL_INFORMATION = "personal_information"
+CATEGORY_IMPERSONATION = "impersonation"
+CATEGORY_ILLEGAL_CONTENT = "illegal_content"
+CATEGORY_NOT_HELPFUL = "not_helpful"
+REPORT_CATEGORIES: tuple[str, ...] = (
+    CATEGORY_SPAM,
+    CATEGORY_SCAM_OR_FRAUD,
+    CATEGORY_MALWARE_OR_EXPLOIT,
+    CATEGORY_HARASSMENT,
+    CATEGORY_PERSONAL_INFORMATION,
+    CATEGORY_IMPERSONATION,
+    CATEGORY_ILLEGAL_CONTENT,
+    CATEGORY_NOT_HELPFUL,
+)
+
+CASE_STATE_OPEN = "open"
+CASE_STATE_UPHELD = "upheld"
+CASE_STATE_REJECTED = "rejected"
+
+VERDICT_UPHOLD = "uphold"
+VERDICT_REJECT = "reject"
+CASE_VERDICTS: tuple[str, ...] = (VERDICT_UPHOLD, VERDICT_REJECT)
+
+REMOVED_BY_COMMUNITY_VOTE = "community_vote"
+REMOVED_BY_ADMIN_LEVER = "admin_lever"
+
+# Fixed placeholder that overwrites a case's content_snapshot on an upheld
+# illegal_content hard-delete (design doc section 5.4.2) -- so the case row
+# itself never keeps archiving the removed material.
+HARD_DELETE_SNAPSHOT_PLACEHOLDER = "[removed — illegal_content; see removal record]"
+
+
+@dataclass
+class StoredCase:
+    """One moderation case (x402_social_cases, migration 108), design doc sections 5.3-5.4.
+
+    `content_snapshot` freezes the reported content's display text at open
+    time, so a later edit/delete cannot dodge the verdict -- overwritten
+    with HARD_DELETE_SNAPSHOT_PLACEHOLDER on an upheld illegal_content
+    hard-delete (section 5.4.2), never otherwise. `resolution_note` is set
+    by every resolution (mandatory public why-this-outcome text, even on a
+    quorum failure -- section 5.3, section 5.6 Q8).
+    """
+
+    case_id: str
+    target_type: str
+    target_id: str
+    target_wallet: str
+    category: str
+    note: str
+    reporter: str
+    settlement_tx_id: str
+    content_snapshot: str
+    opened_at_epoch: int
+    window_ends_at_epoch: int
+    state: str = CASE_STATE_OPEN
+    resolved_at_epoch: int = 0
+    resolution_note: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class CaseTally:
+    """A case's current uphold/reject vote counts (hidden from GET /cases/{id} until resolution, design doc section 5.6 Q7 -- see moderation_service.get_case)."""
+
+    uphold: int = 0
+    reject: int = 0
+
+
+@dataclass
+class StoredStanding:
+    """One wallet's platform-wide moderation standing (x402_social_standing, migration 108) -- design doc section 5.4/5.4.1's full karma field set. Public (GET /agents/{wallet}/standing).
+
+    `offenses` holds the epoch of every upheld case against this wallet, used
+    only to compute the decay-windowed count the ban formula needs (see
+    offenses_in_decay_window / compute_ban_seconds below) -- never pruned in
+    place: a decayed offense stops counting toward ban SEVERITY but still
+    counts toward the lifetime `offense_count` (design doc section 5.4: decay
+    exists so "one bad week two years ago doesn't put an agent one offense
+    from a 30-day ban forever", which is about severity, not about
+    forgetting the offense happened).
+    """
+
+    wallet: str
+    offense_count: int = 0
+    last_offense_at_epoch: int = 0
+    banned_until_epoch: int = 0
+    offenses: list[int] = field(default_factory=list)
+    reported_count: int = 0
+    rejected_report_count: int = 0
+    report_rejection_streak: int = 0
+    report_cooldown_until_epoch: int = 0
+    votes_cast: int = 0
+    votes_matched_resolution: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class RemovalRecord:
+    """One hard-delete audit record (x402_social_removals, migration 108) -- design doc sections 5.4.2/8.1. Append-only, never mutated; the settlement ledger is never touched (CLAUDE.md section 9's bookkeeping mandate)."""
+
+    case_id: str
+    target_type: str
+    target_id: str
+    target_wallet: str
+    category: str
+    removed_by: str  # REMOVED_BY_COMMUNITY_VOTE | REMOVED_BY_ADMIN_LEVER
+    resolved_at_epoch: int
+    uphold_votes: int = 0
+    reject_votes: int = 0
+
+
+def offenses_in_decay_window(offenses: list[int], *, now_epoch: int, decay_days: int) -> int:
+    """Count of `offenses` (epoch seconds) still within `decay_days` of `now_epoch` -- the ban formula's own input (design doc section 5.4)."""
+    window_seconds = decay_days * 86400
+    return sum(1 for at in offenses if now_epoch - at <= window_seconds)
+
+
+def compute_ban_seconds(
+    offenses_in_window: int, *, base_seconds: int, multiplier: int, cap_seconds: int
+) -> int:
+    """The section 5.4 ban formula: min(base x multiplier**offenses_in_window, cap). Pure, so regression tests can pin the exact 30m/2h/8h/... sequence without touching a store."""
+    return min(base_seconds * (multiplier**offenses_in_window), cap_seconds)
+
+
+def compute_report_cooldown_seconds(
+    streak: int, *, base_seconds: int, multiplier: int, cap_seconds: int
+) -> int:
+    """The section 5.4.1 escalating report-cooldown formula: min(base x multiplier**(streak-1), cap) for streak >= 1. Pure, same regression-pinning rationale as compute_ban_seconds."""
+    exponent = max(0, streak - 1)
+    return min(base_seconds * (multiplier**exponent), cap_seconds)

@@ -6,13 +6,19 @@ import threading
 from dataclasses import replace
 
 from app.modules.x402_social.models.domain import (
+    CASE_STATE_OPEN,
+    VERDICT_UPHOLD,
     AgentProfile,
+    CaseTally,
     FollowEdge,
     ReactionTotals,
+    RemovalRecord,
+    StoredCase,
     StoredComment,
     StoredGroup,
     StoredMembership,
     StoredPost,
+    StoredStanding,
 )
 
 
@@ -56,6 +62,18 @@ class InMemorySocialStore:
         self._group_names: dict[str, str] = {}  # name_norm -> group_id
         self._groups_recency: dict[str, StoredGroup] = {}
         self._memberships: dict[tuple[str, str], StoredMembership] = {}  # (group_id, wallet)
+
+        # Phase S2 (design doc section 5).
+        self._cases: dict[str, StoredCase] = {}
+        self._open_case_by_target: dict[str, str] = {}  # target_id -> case_id
+        self._case_votes: dict[
+            str, dict[str, tuple[str, str, int]]
+        ] = {}  # case_id -> voter -> (verdict, tx, at)
+        self._case_vote_totals: dict[str, CaseTally] = {}
+        self._standing: dict[str, StoredStanding] = {}
+        self._reporter_slots: dict[str, set[str]] = {}  # reporter -> {case_id, ...}
+        self._removals: dict[str, RemovalRecord] = {}  # case_id -> record
+
         # Guards every read-modify-write below (reaction/follow/membership
         # dict mutation is not atomic under CPython's bytecode the same way
         # a bare `+=` on a counter is not -- see InMemoryFeatureStore's own
@@ -170,6 +188,37 @@ class InMemorySocialStore:
                 if row.post_id == item.post_id:
                     row.hidden_group = True
 
+    def mark_post_hidden_platform(self, item: StoredPost) -> None:
+        """Set hidden_platform=True EVERYWHERE this post is projected: canonical row, author feed row, and (if set) the group feed row (Phase S2). Unlike mark_post_hidden_in_group, the author feed row IS included."""
+        with self._lock:
+            canonical = self._posts.get(item.post_id)
+            if canonical is not None:
+                canonical.hidden_platform = True
+            for row in self._posts_by_author.get(item.author, []):
+                if row.post_id == item.post_id:
+                    row.hidden_platform = True
+            if item.group_id:
+                for row in self._group_feed.get(item.group_id, []):
+                    if row.post_id == item.post_id:
+                        row.hidden_platform = True
+
+    def hard_delete_post(self, item: StoredPost) -> None:
+        """Real row removal: canonical row, author feed row, (if set) group feed row, and the post's whole comment list (Phase S2, design doc section 5.4.2). Idempotent: removing an absent entry is a no-op."""
+        with self._lock:
+            self._posts.pop(item.post_id, None)
+            self._posts_by_author[item.author] = [
+                row
+                for row in self._posts_by_author.get(item.author, [])
+                if row.post_id != item.post_id
+            ]
+            if item.group_id:
+                self._group_feed[item.group_id] = [
+                    row
+                    for row in self._group_feed.get(item.group_id, [])
+                    if row.post_id != item.post_id
+                ]
+            self._comments.pop(item.post_id, None)
+
     def insert_comment(self, item: StoredComment) -> None:
         """Append one comment to a post's thread."""
         with self._lock:
@@ -283,6 +332,36 @@ class InMemorySocialStore:
             )
             return [replace(g) for g in ordered[: max(0, limit)]]
 
+    def mark_group_hidden_platform(self, item: StoredGroup) -> None:
+        """Set hidden_platform=True on the canonical row and the recency projection row (Phase S2)."""
+        with self._lock:
+            canonical = self._groups.get(item.group_id)
+            if canonical is not None:
+                canonical.hidden_platform = True
+            recency = self._groups_recency.get(item.group_id)
+            if recency is not None:
+                recency.hidden_platform = True
+
+    def hard_delete_group_shell(self, item: StoredGroup, *, name_norm: str) -> None:
+        """Real row removal of the group's own rows only: canonical row, recency projection, and the name claim (freed). Idempotent."""
+        with self._lock:
+            self._groups.pop(item.group_id, None)
+            self._groups_recency.pop(item.group_id, None)
+            if self._group_names.get(name_norm) == item.group_id:
+                del self._group_names[name_norm]
+
+    def list_group_member_wallets(self, group_id: str, *, limit: int) -> list[str]:
+        """Bounded read of a group's member wallets, for the group hard-delete walk."""
+        with self._lock:
+            wallets = [w for (gid, w) in self._memberships if gid == group_id]
+            return wallets[: max(0, limit)]
+
+    def delete_group_memberships_partition(self, group_id: str) -> None:
+        """Remove every membership row for `group_id` (both directions -- the in-memory store has no separate per-group partition to bulk-delete, unlike Cassandra's x402_social_group_members, so this also removes the wallet-keyed x402_social_memberships-equivalent rows directly)."""
+        with self._lock:
+            for key in [k for k in self._memberships if k[0] == group_id]:
+                del self._memberships[key]
+
     def upsert_membership(self, item: StoredMembership) -> None:
         """Create or replace one wallet's membership in one group."""
         with self._lock:
@@ -310,3 +389,123 @@ class InMemorySocialStore:
             existing = self._memberships.get((group_id, wallet))
             if existing is not None:
                 self._memberships[(group_id, wallet)] = replace(existing, role=role)
+
+    # ----------------------------------------------------------------- #
+    # Phase S2: community moderation (design doc section 5) and the section
+    # 8.1 admin lever, which shares this exact hard-delete/removal-audit
+    # machinery.
+    # ----------------------------------------------------------------- #
+    def try_claim_open_case_for_target(self, *, target_id: str, case_id: str) -> bool:
+        """Claim the one-open-case-per-target guard for `target_id` IFF unclaimed. Returns True iff this call won it."""
+        with self._lock:
+            if target_id in self._open_case_by_target:
+                return False
+            self._open_case_by_target[target_id] = case_id
+            return True
+
+    def get_open_case_id_for_target(self, target_id: str) -> str | None:
+        """The currently-open case_id for `target_id`, or None."""
+        with self._lock:
+            return self._open_case_by_target.get(target_id)
+
+    def insert_case(self, item: StoredCase) -> None:
+        """Store a newly-opened case's canonical row (the in-memory store has no separate GET /cases feed row -- list_open_cases reads self._cases directly)."""
+        with self._lock:
+            self._cases[item.case_id] = replace(item)
+
+    def get_case(self, case_id: str) -> StoredCase | None:
+        """Return the canonical case for an id, or None if there is none."""
+        with self._lock:
+            found = self._cases.get(case_id)
+            return None if found is None else replace(found)
+
+    def list_open_cases(self, *, limit: int) -> list[StoredCase]:
+        """Return cases whose state is still 'open' (not-yet-resolved), newest-first, at most `limit` of them -- mirrors the Cassandra store's feed-row-deleted-on-resolution behavior by filtering on state here instead."""
+        with self._lock:
+            open_cases = [c for c in self._cases.values() if c.state == CASE_STATE_OPEN]
+            ordered = sorted(open_cases, key=lambda c: (-c.opened_at_epoch, c.case_id))
+            return [replace(c) for c in ordered[: max(0, limit)]]
+
+    def resolve_case(self, item: StoredCase) -> bool:
+        """Apply `item`'s verdict to the canonical case row IFF it is still 'open' -- this check-then-set IS the in-memory equivalent of the Cassandra store's conditional-update "resolver slot" (guarded by the store-wide lock, so it is exactly as exclusive as the real LWT). Returns True iff THIS call won the resolution; also releases the one-open-case-per-target guard on a win."""
+        with self._lock:
+            current = self._cases.get(item.case_id)
+            if current is None or current.state != CASE_STATE_OPEN:
+                return False
+            self._cases[item.case_id] = replace(item)
+            if self._open_case_by_target.get(item.target_id) == item.case_id:
+                del self._open_case_by_target[item.target_id]
+            return True
+
+    def try_add_case_vote(
+        self, *, case_id: str, voter: str, verdict: str, settlement_tx_id: str, voted_at_epoch: int
+    ) -> bool:
+        """Insert the (case_id, voter) vote row IFF absent. Returns True iff this call won it."""
+        with self._lock:
+            voters = self._case_votes.setdefault(case_id, {})
+            if voter in voters:
+                return False
+            voters[voter] = (verdict, settlement_tx_id, voted_at_epoch)
+            return True
+
+    def increment_case_vote_total(self, case_id: str, *, verdict: str) -> None:
+        """Add one to a case's uphold or reject counter, atomically."""
+        with self._lock:
+            current = self._case_vote_totals.get(case_id, CaseTally())
+            if verdict == VERDICT_UPHOLD:
+                self._case_vote_totals[case_id] = replace(current, uphold=current.uphold + 1)
+            else:
+                self._case_vote_totals[case_id] = replace(current, reject=current.reject + 1)
+
+    def get_case_vote_totals(self, case_id: str) -> CaseTally:
+        """Return a case's current uphold/reject totals, (0, 0) if never voted on."""
+        with self._lock:
+            return self._case_vote_totals.get(case_id, CaseTally())
+
+    def list_case_votes(self, case_id: str, *, limit: int) -> list[tuple[str, str]]:
+        """Return (voter, verdict) pairs for one case, at most `limit` of them."""
+        with self._lock:
+            items = list(self._case_votes.get(case_id, {}).items())
+            return [(voter, verdict) for voter, (verdict, _tx, _at) in items[: max(0, limit)]]
+
+    def get_standing(self, wallet: str) -> StoredStanding | None:
+        """Return one wallet's full moderation standing row, or None if it has never been touched."""
+        with self._lock:
+            found = self._standing.get(wallet)
+            return None if found is None else replace(found, offenses=list(found.offenses))
+
+    def upsert_standing(self, item: StoredStanding) -> None:
+        """Full-row overwrite of one wallet's standing."""
+        with self._lock:
+            self._standing[item.wallet] = replace(item, offenses=list(item.offenses))
+
+    def get_reporter_open_case_ids(self, reporter: str) -> frozenset[str]:
+        """The set of case ids currently claimed against `reporter`'s open-report concurrency cap, empty if never filed."""
+        with self._lock:
+            return frozenset(self._reporter_slots.get(reporter, set()))
+
+    def try_claim_reporter_slot(self, *, reporter: str, case_id: str, max_open: int) -> bool:
+        """Claim one of `reporter`'s open-report slots for `case_id`. Returns True iff this call won a slot; False if the reporter is already at `max_open`."""
+        with self._lock:
+            current = self._reporter_slots.setdefault(reporter, set())
+            if case_id in current:
+                return True
+            if len(current) >= max_open:
+                return False
+            current.add(case_id)
+            return True
+
+    def release_reporter_slot(self, *, reporter: str, case_id: str) -> None:
+        """Remove one of `reporter`'s open-report slots. Idempotent -- a no-op if the slot was already released."""
+        with self._lock:
+            self._reporter_slots.get(reporter, set()).discard(case_id)
+
+    def insert_removal(self, item: RemovalRecord) -> None:
+        """Append-only hard-delete audit record -- never mutated after insert."""
+        with self._lock:
+            self._removals[item.case_id] = item
+
+    def get_removal(self, case_id: str) -> RemovalRecord | None:
+        """Point read of one hard-delete audit record, or None."""
+        with self._lock:
+            return self._removals.get(case_id)

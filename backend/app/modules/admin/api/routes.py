@@ -7,7 +7,7 @@ from dataclasses import asdict
 
 from app.core import serialization
 from app.core.http import Request, Response, Router
-from app.core.http_errors import json_error_response
+from app.core.http_errors import json_error_from_platform, json_error_response
 from app.core.query_params import query_param
 from app.modules.admin.auth import require_admin_wallet, verified_admin_wallet
 from app.modules.admin.schemas import (
@@ -25,6 +25,13 @@ from app.modules.admin.schemas import (
     SourceUpsertRequest,
 )
 from app.modules.admin.stores.cassandra import AdminCassandraStore
+from app.modules.x402_social.api.routes import moderation_service
+from app.modules.x402_social.models.domain import (
+    CATEGORY_ILLEGAL_CONTENT,
+    TARGET_TYPES,
+    SocialError,
+)
+from app.modules.x402_social.models.schemas import AdminModerationRemoveRequest
 
 logger = logging.getLogger(__name__)
 
@@ -1985,6 +1992,92 @@ def admin_get_artifact_content(request: Request) -> Response | dict:
     return result
 
 
+def admin_x402_social_moderation_remove(request: Request) -> Response | dict:
+    """The section 8.1 admin emergency lever for the x402 agent social network (docs/x402-social-design.md sections 5.4.2/8.1) -- immediate, no vote, payment status irrelevant ("we don't care if the bot paid, we will act upon it").
+
+    Exactly two legitimate triggers, per the design doc: a real authority/
+    legal request, or content within the three named illegal_content
+    categories (apologie du terrorisme, incitation au meurtre,
+    pedopornographie/CSAM). Ordinary expression, opinion, or marketing --
+    however crude or poorly received -- must NEVER trigger this: the bar is
+    legality, not taste or quality. This route does not and cannot verify
+    that judgment call was made correctly; it is a lever an admin operates
+    with that constraint in mind, same as every other admin write in this
+    file trusts the authenticated admin's own judgment.
+
+    `hard_delete=True` is refused outside the illegal_content category --
+    design doc section 5.4.2 is explicit that hard delete has NO admin or
+    voter discretion under any other category; the route enforces that
+    scope check, moderation_service.admin_remove does exactly what it is
+    told. `hard_delete=False` sets `hidden_platform` (a scoped, reversible-
+    in-principle tombstone -- same mechanism an upheld non-illegal_content
+    community case verdict uses), available for any category, matching
+    "content illegal under French law" not being the only thing this lever
+    may need to act on quickly.
+
+    Both branches share the EXACT SAME hard-delete/tombstone mechanics the
+    community case resolver uses (moderation_service.py) -- this route
+    never re-implements the deletion/hide logic itself, only the
+    admin-auth gate and the category-scope policy check.
+    """
+    denied = require_admin_wallet(request)
+    if denied is not None:
+        return denied
+
+    try:
+        payload = serialization.decode(request.body, AdminModerationRemoveRequest)
+    except serialization.DecodeError as exc:
+        return json_error_response(400, "invalid_request", str(exc))
+
+    if payload.target_type not in TARGET_TYPES:
+        return json_error_response(400, "invalid_request", "target_type is not a recognized type")
+    if payload.hard_delete and payload.category != CATEGORY_ILLEGAL_CONTENT:
+        return json_error_response(
+            400,
+            "invalid_request",
+            "hard_delete is only permitted for category=illegal_content -- there is no admin "
+            "discretion to hard-delete under any other category (design doc section 5.4.2).",
+        )
+
+    admin_wallet = verified_admin_wallet(request)
+    logger.warning(
+        "x402 social admin lever: %s target_type=%s target_id=%s category=%s reason=%r "
+        "admin_wallet=%s",
+        "hard-delete" if payload.hard_delete else "hide",
+        payload.target_type,
+        payload.target_id,
+        payload.category,
+        payload.reason,
+        admin_wallet or "unknown",
+    )
+
+    try:
+        removal = moderation_service.admin_remove(
+            target_type=payload.target_type,
+            target_id=payload.target_id,
+            category=payload.category,
+            hard_delete=payload.hard_delete,
+        )
+    except SocialError as exc:
+        return json_error_from_platform(exc)
+
+    if removal is None:
+        return {
+            "hard_deleted": False,
+            "target_type": payload.target_type,
+            "target_id": payload.target_id,
+        }
+    return {
+        "hard_deleted": True,
+        "target_type": removal.target_type,
+        "target_id": removal.target_id,
+        "target_wallet": removal.target_wallet,
+        "category": removal.category,
+        "removed_by": removal.removed_by,
+        "resolved_at_epoch": removal.resolved_at_epoch,
+    }
+
+
 def register_admin_routes(app: Router) -> None:
     """Register all admin API endpoints on the given Robyn app."""
     app.get("/api/v1/admin/analytics")(admin_analytics)
@@ -2054,3 +2147,12 @@ def register_admin_routes(app: Router) -> None:
         admin_pin_artifact_for_tomorrow
     )
     app.get("/api/v1/admin/artifacts/:artifact_id/content")(admin_get_artifact_content)
+
+    # x402 agent social network -- section 8.1 admin emergency lever
+    # (docs/x402-social-design.md sections 5.4.2/8.1). Registered
+    # unconditionally, like every other admin write in this file --
+    # protected by require_admin_wallet, not a feature flag -- but only
+    # ever meaningfully durable once x402_social_store is flipped off
+    # "memory" (same product-store gate every x402_social route sits
+    # behind, see app/modules/x402_social/api/routes.py and falcon_main.py).
+    app.post("/api/v1/admin/x402-social/moderation/remove")(admin_x402_social_moderation_remove)

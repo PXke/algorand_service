@@ -38,6 +38,7 @@ from app.modules.x402_directory.api.routes import register_x402_directory_routes
 from app.modules.x402_features.api.routes import register_x402_features_routes
 from app.modules.x402_grading.api.routes import register_x402_grading_routes
 from app.modules.x402_news.api.routes import register_x402_news_routes
+from app.modules.x402_receipts.api.routes import register_x402_receipts_routes
 from app.modules.x402_scan.api.routes import register_x402_scan_routes
 from app.modules.x402_social.api.routes import register_x402_social_routes
 from app.modules.x402_wellknown.api.routes import register_x402_wellknown_routes
@@ -198,6 +199,16 @@ def _register_x402_routes(router: FalconRouter) -> None:
     # to something durable.
     if settings.x402_social_store != "memory":
         register_x402_social_routes(router)
+    # Signed fulfillment receipts (docs/x402-execution-trust-evaluation.md
+    # item 1): the free read side, GET /api/v1/x402/receipts/{receipt_id}.
+    # Generation itself (modules/x402/receipts.py, hooked into every
+    # run_with_refund caller above) is gated separately, on whether
+    # x402_receipt_signing_mnemonic is configured -- this gate is only
+    # about whether the READ route is reachable, same "memory" reasoning as
+    # every other product store above (a receipt written to a per-process
+    # dict would be invisible to a read landing on another gunicorn worker).
+    if settings.x402_receipts_store != "memory":
+        register_x402_receipts_routes(router)
     # The catalog lists whichever of the products above were registered (it
     # re-evaluates the same gates), so it comes last and is gated only on
     # the shared switch.

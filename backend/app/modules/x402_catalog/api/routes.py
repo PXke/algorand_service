@@ -148,7 +148,9 @@ def x402_ping(request: Request) -> Response:
             ),
         )
 
-    outcome = run_with_refund(result, resource=_RESOURCE, product_write=_ping_product_write)
+    outcome = run_with_refund(
+        result, resource=_RESOURCE, product_write=_ping_product_write, request=request
+    )
     if isinstance(outcome, Response):
         # run_with_refund's own failure-path Response (refunded, or refund
         # pending) -- return it directly, and do NOT call mark_fulfilled,

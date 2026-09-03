@@ -2,9 +2,12 @@
 
 Section 2.7 is explicit that group-owner moderation of a group's own space
 (hiding a post from that group's feed, removing a member) does NOT wait on
-section 5's (unapproved) community moderation design -- it never touches
-anything platform-wide and never touches a `hidden_platform`/standing
-concept that does not exist in this codebase yet.
+section 5's community moderation design -- it never touches anything
+platform-wide and never touches `hidden_platform` or a wallet's
+`x402_social_standing`. Phase S2 (design doc section 5, owner sign-off
+2026-09-03) is implemented in services/moderation_service.py, which is the
+only module that ever sets `hidden_platform` on a group or mutates a
+wallet's standing.
 """
 
 from __future__ import annotations
@@ -188,13 +191,27 @@ class GroupService:
         return group
 
     def get(self, group_id: str) -> StoredGroup | None:
-        """Return the canonical group for an id, or None if there is none."""
+        """Return the canonical group for an id, or None if there is none.
+
+        Deliberately does NOT filter on `hidden_platform` (Phase S2, design
+        doc section 5.3 step 4: "existing members can still read it") --
+        unlike a hard-deleted group, which is genuinely gone, a
+        platform-hidden group is only hidden from DISCOVERY (list_recent
+        below); the point read stays available.
+        """
         return self.store.get_group(group_id) if group_id else None
 
     def list_recent(self, *, limit: int) -> list[StoredGroup]:
-        """Return groups newest-first, clamped to x402_social_max_results."""
+        """Return groups newest-first, clamped to x402_social_max_results.
+
+        `hidden_platform` groups (Phase S2) are filtered out here -- design
+        doc section 5.3 step 4: hidden from GET /groups (and trending),
+        never from the point read (`get`, above) or an existing member's
+        own group feed.
+        """
         clamped = max(1, min(limit, settings.x402_social_max_results))
-        return self.store.list_groups_recent(limit=clamped)
+        groups = self.store.list_groups_recent(limit=clamped)
+        return [g for g in groups if not g.hidden_platform]
 
     def get_membership(self, group_id: str, wallet: str) -> StoredMembership | None:
         """Return one wallet's membership in one group, or None if they are not a member."""

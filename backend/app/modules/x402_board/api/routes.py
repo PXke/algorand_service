@@ -197,6 +197,7 @@ def x402_board_place(request: Request) -> Response:
             ),
             "term_days": term_days,
         },
+        request=request,
     )
     if isinstance(outcome, Response):
         return outcome
@@ -377,6 +378,7 @@ def x402_board_renew(request: Request) -> Response:
             ),
             "term_days": term_days,
         },
+        request=request,
     )
     if isinstance(outcome, Response):
         return outcome

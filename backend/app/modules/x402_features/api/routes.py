@@ -228,6 +228,7 @@ def x402_features_vote(request: Request) -> Response:
                 settlement_tx_id=result.payment_txid or "",
             )
         },
+        request=request,
     )
     if isinstance(outcome, Response):
         return outcome
@@ -348,6 +349,7 @@ def x402_features_claim(request: Request) -> Response:
                 settlement_tx_id=result.payment_txid or "",
             )
         },
+        request=request,
     )
     if isinstance(outcome, Response):
         return outcome
@@ -486,6 +488,7 @@ def x402_features_demand(request: Request) -> Response:
         result,
         resource=_DEMAND_RESOURCE,
         product_write=lambda: _demand_product_write(limit),
+        request=request,
     )
     if isinstance(outcome, Response):
         return outcome

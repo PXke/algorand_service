@@ -134,6 +134,7 @@ def _operation(route: dict[str, Any]) -> dict[str, Any]:
         operation["x-x402-price-usd"] = route["price_usd"]
         operation["x-x402-resource"] = route["resource"]
         operation["x-x402-supports-preview"] = route["supports_preview"]
+        operation["x-x402-supports-receipts"] = route["supports_receipts"]
     if parameters:
         operation["parameters"] = parameters
     if request_body is not None:

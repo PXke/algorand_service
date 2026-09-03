@@ -32,6 +32,7 @@ from app.modules.x402_social.models.domain import (
     MAX_LOCATION_LEN,
     MAX_MISSION_LEN,
     MAX_NAME_LEN,
+    MAX_REPORT_NOTE_LEN,
 )
 
 # Same shape as app.schemas.WalletAddress -- not imported from there to keep
@@ -146,3 +147,62 @@ class GroupCreateRequest(msgspec.Struct, kw_only=True):
 
     name: Annotated[str, Meta(min_length=1, max_length=MAX_GROUP_NAME_LEN)]
     description: Annotated[str, Meta(max_length=MAX_GROUP_DESCRIPTION_LEN)] = ""
+
+
+# --------------------------------------------------------------------------- #
+# Phase S2: community moderation (design doc section 5). The `Literal`
+# members below are hardcoded to match models/domain.py's TARGET_TYPES /
+# REPORT_CATEGORIES / CASE_VERDICTS string constants exactly -- same
+# hardcoded-Literal-mirroring-a-domain-constant-set precedent as
+# ReactionValue/ProofMethod above (msgspec.Meta bounds must be compile-time
+# constants, so these cannot be built from the tuples dynamically); a
+# mismatch between the two would be caught immediately by any test that
+# round-trips every domain constant through decode.
+# --------------------------------------------------------------------------- #
+ReportTargetType = Literal["post", "agent", "group"]
+ReportCategory = Literal[
+    "spam",
+    "scam_or_fraud",
+    "malware_or_exploit",
+    "harassment",
+    "personal_information",
+    "impersonation",
+    "illegal_content",
+    "not_helpful",
+]
+CaseVerdict = Literal["uphold", "reject"]
+
+
+class ReportCreateRequest(msgspec.Struct, kw_only=True):
+    """Request body for POST /reports (design doc section 5.2)."""
+
+    target_type: ReportTargetType
+    target_id: Annotated[str, Meta(min_length=1, max_length=128)]
+    category: ReportCategory
+    note: Annotated[str, Meta(max_length=MAX_REPORT_NOTE_LEN)] = ""
+
+
+class CaseVoteRequest(msgspec.Struct, kw_only=True):
+    """Request body for POST /cases/{case_id}/vote (design doc section 5.2)."""
+
+    verdict: CaseVerdict
+
+
+class AdminModerationRemoveRequest(msgspec.Struct, kw_only=True):
+    """Request body for the section 8.1 admin emergency lever (backend/app/modules/admin/api/routes.py).
+
+    `hard_delete` selects the section 5.4.2 hard-delete path (only ever
+    legitimate within the illegal_content scope -- the route itself refuses
+    hard_delete=True for any other category, there is no admin discretion to
+    hard-delete outside that scope, section 5.4.2's own text). `reason` is a
+    free-text operator note (real authority request vs. a direct
+    illegal_content finding), logged but not stored on the removal record
+    itself (x402_social_removals' schema, section 5.4.2, has no reason
+    column -- it is not part of the design doc's sketch).
+    """
+
+    target_type: ReportTargetType
+    target_id: Annotated[str, Meta(min_length=1, max_length=128)]
+    category: ReportCategory
+    hard_delete: bool = False
+    reason: Annotated[str, Meta(max_length=512)] = ""
