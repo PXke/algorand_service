@@ -39,6 +39,7 @@ _STORE_GATES = {
     "grading": "x402_grading_store",
     "news": "news_store",
     "kya": "kyc_store",
+    "social": "x402_social_store",
 }
 
 # Same idea for a product gated on a plain boolean instead of a store setting
@@ -49,6 +50,21 @@ _STORE_GATES = {
 _BOOL_GATES = {
     "scan": "x402_scan_enabled",
 }
+
+# A THIRD gating shape, distinct from both dicts above: a bool setting that
+# gates individual ROUTES within an already-gated product (CatalogRoute.
+# extra_bool_setting), not a whole product (Product.bool_setting). Added
+# 2026-09-03 for x402_social's Phase S2 (community moderation) routes, which
+# sit inside the "social" product (x402_social_store, already in
+# _STORE_GATES above) but additionally require x402_social_moderation_enabled.
+# Not keyed by product -- flipping it doesn't add a new product key to the
+# catalog's product list, only more routes under the existing "social" key --
+# so it is reset/enabled by _configure/_all_gates_on like the dicts above but
+# deliberately left out of the product-set assertions that iterate
+# _STORE_GATES/_BOOL_GATES. Exact repeat of the same lesson: this file's
+# gate-enabling helpers must know about every gate shape a product can use,
+# or the cross-check tests pass vacuously without exercising the gated routes.
+_EXTRA_ROUTE_BOOL_GATES = {"x402_social_moderation_enabled"}
 
 
 class _FakeRedis:
@@ -99,6 +115,8 @@ def _configure(monkeypatch: pytest.MonkeyPatch, *, enabled: bool = True, **store
         monkeypatch.setattr(settings, setting, "memory")
     for setting in _BOOL_GATES.values():
         monkeypatch.setattr(settings, setting, False)
+    for setting in _EXTRA_ROUTE_BOOL_GATES:
+        monkeypatch.setattr(settings, setting, False)
     for setting, value in stores.items():
         monkeypatch.setattr(settings, setting, value)
 
@@ -109,6 +127,7 @@ def _all_gates_on(monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch,
         **dict.fromkeys(_STORE_GATES.values(), "cassandra"),
         **dict.fromkeys(_BOOL_GATES.values(), True),
+        **dict.fromkeys(_EXTRA_ROUTE_BOOL_GATES, True),
     )
 
 
@@ -200,6 +219,39 @@ def test_each_bool_gated_product_matches_create_app(
             continue
         for route in other.routes:
             assert route.method not in _registered_methods(app, route.path), route.path
+
+
+def test_social_moderation_routes_need_their_own_extra_gate_on_top_of_the_store_gate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """S2 (extra_bool_setting=x402_social_moderation_enabled) is a second, route-level gate.
+
+    Layered on top of "social"'s own x402_social_store gate -- neither gate alone is enough.
+    """
+    social_routes = next(p for p in catalog_service.PRODUCTS if p.key == "social").routes
+    s2_paths = {r.path for r in social_routes if r.extra_bool_setting is not None}
+    assert s2_paths, "expected at least one S2 route with extra_bool_setting set"
+    s0_s1_paths = {r.path for r in social_routes if r.extra_bool_setting is None}
+    assert s0_s1_paths, "expected at least one S0/S1 route with no extra gate"
+
+    # Store gate on, moderation off: S0/S1 routes present, S2 routes absent from both
+    # the catalog and the real router.
+    _configure(monkeypatch, x402_social_store="cassandra")
+    app = create_app()
+    listed_paths = {route["path"] for route in _catalog_routes(monkeypatch)}
+    assert s0_s1_paths <= listed_paths
+    assert listed_paths.isdisjoint(s2_paths)
+    for route in social_routes:
+        registered = bool(_registered_methods(app, route.path))
+        assert registered == (route.path not in s2_paths), route.path
+
+    # Both gates on: S2 routes now present too.
+    _configure(monkeypatch, x402_social_store="cassandra", x402_social_moderation_enabled=True)
+    app = create_app()
+    listed_paths = {route["path"] for route in _catalog_routes(monkeypatch)}
+    assert s2_paths <= listed_paths
+    for route in social_routes:
+        assert _registered_methods(app, route.path), route.path
 
 
 # --------------------------------------------------------------------------- #
@@ -294,23 +346,42 @@ def test_owner_only_renew_routes_say_a_non_owner_payment_is_still_taken() -> Non
         assert "refused" in text, route.path
 
 
-def test_every_paid_route_supports_promo_except_the_unwired_kya_lookup(
+_PROMO_UNWIRED_RESOURCES = {
+    # kyc-verify triggers a real payout to the looked-up wallet on a hit
+    # (services/payout_service.py) -- a promo bypass there would need its
+    # own review of what a $0-amount lookup does to that payout path, so it
+    # is deliberately left unwired rather than assumed safe by copying the
+    # same pattern as every other paid route.
+    "kyc-verify",
+    # Every x402_social paid write, REVERSED 2026-09-03: promo was wired,
+    # then deliberately removed the same day when a security review found
+    # PaymentResult.payer -- unproven under a promo bypass, per
+    # modules/x402/promo.py's own docstring -- is fed straight in as the
+    # ACTING IDENTITY on every one of these routes (register/post/comment/
+    # react/follow/group-create/group-join/report/case-vote). See
+    # x402_social/api/routes.py's own module docstring for the incident.
+    "x402-social-register",
+    "x402-social-post",
+    "x402-social-comment",
+    "x402-social-react",
+    "x402-social-follow",
+    "x402-social-group-create",
+    "x402-social-group-join",
+    "x402-social-report",
+    "x402-social-case-vote",
+}
+
+
+def test_every_paid_route_supports_promo_except_the_unwired_ones(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """supports_promo is opt-in per route, but wired everywhere by now except kyc-verify.
-
-    kyc-verify triggers a real payout to the looked-up wallet on a hit
-    (services/payout_service.py) -- a promo bypass there would need its own
-    review of what a $0-amount lookup does to that payout path, so it is
-    deliberately left unwired rather than assumed safe by copying the same
-    pattern as every other paid route.
-    """
+    """supports_promo is opt-in per route -- wired everywhere except _PROMO_UNWIRED_RESOURCES."""
     _all_gates_on(monkeypatch)
     routes = _catalog_routes(monkeypatch)
     by_resource = {route["resource"]: route for route in routes if route["resource"]}
     assert by_resource
     for resource, route in by_resource.items():
-        if resource == "kyc-verify":
+        if resource in _PROMO_UNWIRED_RESOURCES:
             assert route["supports_promo"] is False, resource
         else:
             assert route["supports_promo"] is True, resource

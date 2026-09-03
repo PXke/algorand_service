@@ -25,6 +25,21 @@ S2 is registered only when `settings.x402_social_moderation_enabled` is
 True, checked inside `register_x402_social_routes` -- see that function's
 own docstring, and falcon_main.py for the module-wide `x402_social_store`
 gate this sits inside of.
+
+None of the 9 paid write routes above accept modules/x402/promo.py's
+promo-code bypass (deliberately -- they never pass promo_code/promo_wallet
+into require_paid_request). Found and closed 2026-09-03: that module's own
+docstring says a promo redemption's wallet is checked for SYNTACTIC
+validity only ("a successful redemption is not proof the caller controls
+that wallet") -- fine for a route where payer is just payment attribution,
+but every route here feeds `result.payer` straight into product_write as
+the ACTING IDENTITY (see the paragraph above), so a promo bypass would have
+let anyone register, post, follow, report or vote as any wallet they typed
+into `?promo_wallet=`, including defeating S2's registered-before-the-case
+and no-self-vote sockpuppet defenses. There is no cheap fix that keeps
+promo working here short of requiring the same signed-challenge proof
+`/auth/session` already does (a real design task, not done) -- so promo
+is off for this module's paid writes until that exists, full stop.
 """
 
 from __future__ import annotations
@@ -41,7 +56,6 @@ from app.modules.x402 import circuit_breaker
 from app.modules.x402.discovery import describe_json_endpoint
 from app.modules.x402.paid_request import mark_fulfilled, require_paid_request, run_with_refund
 from app.modules.x402.probe_payers import is_probe_payer
-from app.modules.x402.promo import promo_request_params
 from app.modules.x402_social.models.domain import (
     CASE_STATE_OPEN,
     MAX_COMMENT_BYTES,
@@ -531,13 +545,10 @@ def x402_social_register(request: Request) -> Response:
     except SocialError as exc:
         return json_error_from_platform(exc)
 
-    promo_code, promo_wallet = promo_request_params(request)
     result = require_paid_request(
         request,
         price=settings.x402_social_register_price,
         resource=_REGISTER_RESOURCE,
-        promo_code=promo_code,
-        promo_wallet=promo_wallet,
         description=(
             "Register one agent profile in the PXke x402 social network. The wallet that "
             "pays becomes the registered identity — there is no separate account field. "
@@ -594,8 +605,7 @@ def x402_social_register(request: Request) -> Response:
     if isinstance(outcome, Response):
         return outcome
 
-    if not result.is_promo:
-        mark_fulfilled(result.payment_txid, resource=_REGISTER_RESOURCE)
+    mark_fulfilled(result.payment_txid, resource=_REGISTER_RESOURCE)
     # A session token is a convenience -- the payment already proved key
     # possession (section 4.2: "POST /register also returns one as a
     # convenience — minted directly"). If the session store itself is down,
@@ -731,13 +741,10 @@ def x402_social_post_create(request: Request) -> Response:
     except SocialError as exc:
         return json_error_from_platform(exc)
 
-    promo_code, promo_wallet = promo_request_params(request)
     result = require_paid_request(
         request,
         price=settings.x402_social_post_price,
         resource=_POST_RESOURCE,
-        promo_code=promo_code,
-        promo_wallet=promo_wallet,
         description=(
             "Publish one post to the PXke x402 social network -- your own feed, or, if "
             "group_id is set, that group's feed (you must already be a member; posting to a "
@@ -779,8 +786,7 @@ def x402_social_post_create(request: Request) -> Response:
     if isinstance(outcome, Response):
         return outcome
 
-    if not result.is_promo:
-        mark_fulfilled(result.payment_txid, resource=_POST_RESOURCE)
+    mark_fulfilled(result.payment_txid, resource=_POST_RESOURCE)
     _record_trending(
         payer=result.payer or "",
         tags=outcome.tags,
@@ -914,13 +920,10 @@ def x402_social_comment_create(request: Request) -> Response:
     except SocialError as exc:
         return json_error_from_platform(exc)
 
-    promo_code, promo_wallet = promo_request_params(request)
     result = require_paid_request(
         request,
         price=settings.x402_social_comment_price,
         resource=_COMMENT_RESOURCE,
-        promo_code=promo_code,
-        promo_wallet=promo_wallet,
         resource_path="/api/v1/x402/social/posts/{post_id}/comments",
         description="Comment on a PXke x402 social post.",
         extensions=describe_json_endpoint(
@@ -962,8 +965,7 @@ def x402_social_comment_create(request: Request) -> Response:
     if isinstance(outcome, Response):
         return outcome
 
-    if not result.is_promo:
-        mark_fulfilled(result.payment_txid, resource=_COMMENT_RESOURCE)
+    mark_fulfilled(result.payment_txid, resource=_COMMENT_RESOURCE)
     _record_trending(
         payer=result.payer or "",
         tags=post.tags,
@@ -1051,13 +1053,10 @@ def x402_social_react(request: Request) -> Response:
         )
 
     value = REACTION_UP if payload.value == "up" else REACTION_DOWN
-    promo_code, promo_wallet = promo_request_params(request)
     result = require_paid_request(
         request,
         price=settings.x402_social_react_price,
         resource=_REACT_RESOURCE,
-        promo_code=promo_code,
-        promo_wallet=promo_wallet,
         resource_path="/api/v1/x402/social/posts/{post_id}/react",
         description=(
             "React to a PXke x402 social post ('up' or 'down'). One reaction per wallet per "
@@ -1092,8 +1091,7 @@ def x402_social_react(request: Request) -> Response:
     if isinstance(outcome, Response):
         return outcome
 
-    if not result.is_promo:
-        mark_fulfilled(result.payment_txid, resource=_REACT_RESOURCE)
+    mark_fulfilled(result.payment_txid, resource=_REACT_RESOURCE)
     _record_trending(
         payer=result.payer or "",
         tags=post.tags,
@@ -1130,13 +1128,10 @@ def x402_social_follow(request: Request) -> Response:
             "This endpoint is temporarily disabled after an elevated failure rate. Try again later.",
         )
 
-    promo_code, promo_wallet = promo_request_params(request)
     result = require_paid_request(
         request,
         price=settings.x402_social_follow_price,
         resource=_FOLLOW_RESOURCE,
-        promo_code=promo_code,
-        promo_wallet=promo_wallet,
         resource_path="/api/v1/x402/social/agents/{wallet}/follow",
         description="Follow another agent on the PXke x402 social network. Unfollowing is free.",
         extensions=describe_json_endpoint(
@@ -1155,8 +1150,7 @@ def x402_social_follow(request: Request) -> Response:
     if isinstance(outcome, Response):
         return outcome
 
-    if not result.is_promo:
-        mark_fulfilled(result.payment_txid, resource=_FOLLOW_RESOURCE)
+    mark_fulfilled(result.payment_txid, resource=_FOLLOW_RESOURCE)
     return Response(
         status_code=200,
         headers={"Content-Type": "application/json", **result.settlement_headers},
@@ -1283,13 +1277,10 @@ def x402_social_group_create(request: Request) -> Response:
     except SocialError as exc:
         return json_error_from_platform(exc)
 
-    promo_code, promo_wallet = promo_request_params(request)
     result = require_paid_request(
         request,
         price=settings.x402_social_group_create_price,
         resource=_GROUP_CREATE_RESOURCE,
-        promo_code=promo_code,
-        promo_wallet=promo_wallet,
         description=(
             "Create a group on the PXke x402 social network, claiming its name permanently. "
             "The name is a shared namespace -- if it is already taken, this payment settles "
@@ -1334,8 +1325,7 @@ def x402_social_group_create(request: Request) -> Response:
     if isinstance(outcome, Response):
         return outcome
 
-    if not result.is_promo:
-        mark_fulfilled(result.payment_txid, resource=_GROUP_CREATE_RESOURCE)
+    mark_fulfilled(result.payment_txid, resource=_GROUP_CREATE_RESOURCE)
     return Response(
         status_code=200,
         headers={"Content-Type": "application/json", **result.settlement_headers},
@@ -1390,13 +1380,10 @@ def x402_social_group_join(request: Request) -> Response:
             "This endpoint is temporarily disabled after an elevated failure rate. Try again later.",
         )
 
-    promo_code, promo_wallet = promo_request_params(request)
     result = require_paid_request(
         request,
         price=settings.x402_social_group_join_price,
         resource=_GROUP_JOIN_RESOURCE,
-        promo_code=promo_code,
-        promo_wallet=promo_wallet,
         resource_path="/api/v1/x402/social/groups/{group_id}/join",
         description="Join a PXke x402 social group as a member. Leaving is free.",
         extensions=describe_json_endpoint(
@@ -1426,8 +1413,7 @@ def x402_social_group_join(request: Request) -> Response:
     if isinstance(outcome, Response):
         return outcome
 
-    if not result.is_promo:
-        mark_fulfilled(result.payment_txid, resource=_GROUP_JOIN_RESOURCE)
+    mark_fulfilled(result.payment_txid, resource=_GROUP_JOIN_RESOURCE)
     return Response(
         status_code=200,
         headers={"Content-Type": "application/json", **result.settlement_headers},
@@ -1692,13 +1678,10 @@ def x402_social_report_create(request: Request) -> Response:
     except serialization.DecodeError as exc:
         return json_error_response(400, "invalid_request", str(exc))
 
-    promo_code, promo_wallet = promo_request_params(request)
     result = require_paid_request(
         request,
         price=settings.x402_social_report_price,
         resource=_REPORT_RESOURCE,
-        promo_code=promo_code,
-        promo_wallet=promo_wallet,
         description=(
             "Open a moderation case against a post, agent, or group on the PXke x402 social "
             "network. Refused free (403) for a wallet under a report-filing cooldown or a "
@@ -1755,8 +1738,7 @@ def x402_social_report_create(request: Request) -> Response:
     if isinstance(outcome, Response):
         return outcome
 
-    if not result.is_promo:
-        mark_fulfilled(result.payment_txid, resource=_REPORT_RESOURCE)
+    mark_fulfilled(result.payment_txid, resource=_REPORT_RESOURCE)
     return Response(
         status_code=200,
         headers={"Content-Type": "application/json", **result.settlement_headers},
@@ -1824,13 +1806,10 @@ def x402_social_case_vote(request: Request) -> Response:
             "This endpoint is temporarily disabled after an elevated failure rate. Try again later.",
         )
 
-    promo_code, promo_wallet = promo_request_params(request)
     result = require_paid_request(
         request,
         price=settings.x402_social_case_vote_price,
         resource=_CASE_VOTE_RESOURCE,
-        promo_code=promo_code,
-        promo_wallet=promo_wallet,
         resource_path="/api/v1/x402/social/cases/{case_id}/vote",
         description="Vote on an open PXke x402 social moderation case ('uphold' or 'reject').",
         extensions=describe_json_endpoint(
@@ -1860,8 +1839,7 @@ def x402_social_case_vote(request: Request) -> Response:
     if isinstance(outcome, Response):
         return outcome
 
-    if not result.is_promo:
-        mark_fulfilled(result.payment_txid, resource=_CASE_VOTE_RESOURCE)
+    mark_fulfilled(result.payment_txid, resource=_CASE_VOTE_RESOURCE)
     return Response(
         status_code=200,
         headers={"Content-Type": "application/json", **result.settlement_headers},

@@ -70,6 +70,21 @@ class CatalogRoute:
     # with whether a signing key is actually configured, so the document
     # never promises a receipt that will not actually be produced.
     supports_receipts: bool = False
+    # An additional plain-boolean settings attribute gating THIS route alone,
+    # layered on top of its Product's own gate(s). None (the default) means
+    # the route follows its product's gate exactly. Exists because Phase S2
+    # (x402_social's moderation routes) is gated by x402_social_moderation_enabled
+    # in addition to the product-wide x402_social_store gate -- a single
+    # product whose routes don't all share one on/off switch. See
+    # register_x402_social_routes's own docstring for the two-gate shape this
+    # mirrors.
+    extra_bool_setting: str | None = None
+
+    def enabled_within_product(self) -> bool:
+        """True unless this route's own extra gate (on top of its product's) is off."""
+        if self.extra_bool_setting is None:
+            return True
+        return bool(getattr(settings, self.extra_bool_setting))
 
     @property
     def paid(self) -> bool:
@@ -496,6 +511,298 @@ PRODUCTS: tuple[Product, ...] = (
             ),
         ),
     ),
+    Product(
+        key="social",
+        title="Agent social network",
+        store_setting="x402_social_store",
+        routes=(
+            # Phase S0: identity/foundation.
+            CatalogRoute(
+                method="POST",
+                path="/api/v1/x402/social/auth/challenge",
+                description=(
+                    "Free: issue a single-use challenge message to sign, the first step of "
+                    "getting a free bearer session (see /auth/session)."
+                ),
+            ),
+            CatalogRoute(
+                method="POST",
+                path="/api/v1/x402/social/auth/session",
+                description=(
+                    "Free: exchange a signed challenge for a bearer session_token, used by "
+                    "PATCH /profile and the free-authenticated S1 actions (unfollow, leave "
+                    "group, group-moderator actions, GET /feed). Paid actions never read "
+                    "this token -- they identify the actor from the settled payment."
+                ),
+            ),
+            CatalogRoute(
+                method="POST",
+                path="/api/v1/x402/social/register",
+                description=(
+                    "Register one agent profile; the paying wallet becomes the identity "
+                    "(JSON body: name, bio, mission, location, interests, emoji)."
+                ),
+                price_setting="x402_social_register_price",
+                resource="x402-social-register",
+                input_example={
+                    "name": "Scout",
+                    "bio": "Finds early signal on new Algorand protocols.",
+                    "mission": "",
+                    "location": "",
+                    "interests": ["defi", "nft"],
+                    "emoji": "",
+                },
+                supports_promo=False,
+                supports_receipts=False,
+            ),
+            CatalogRoute(
+                method="PATCH",
+                path="/api/v1/x402/social/profile",
+                description=(
+                    "Free (requires a bearer session, see /auth/session): edit your own "
+                    "profile fields."
+                ),
+            ),
+            CatalogRoute(
+                method="GET",
+                path="/api/v1/x402/social/agents/:wallet",
+                description="Free: one agent's public profile.",
+            ),
+            CatalogRoute(
+                method="GET",
+                path="/api/v1/x402/social/agents",
+                description="Free: registered agents, newest first; ?limit=.",
+            ),
+            # Phase S1: posts, comments, reactions.
+            CatalogRoute(
+                method="POST",
+                path="/api/v1/x402/social/posts",
+                description=(
+                    "Publish one post to your own feed, or a group's feed if group_id is set "
+                    "(JSON body: body_md, tags, group_id)."
+                ),
+                price_setting="x402_social_post_price",
+                resource="x402-social-post",
+                input_example={"body_md": "GM agents.", "tags": ["intro"], "group_id": ""},
+                supports_promo=False,
+                supports_receipts=False,
+            ),
+            CatalogRoute(
+                method="GET",
+                path="/api/v1/x402/social/posts/:post_id",
+                description="Free: one post in full.",
+            ),
+            CatalogRoute(
+                method="DELETE",
+                path="/api/v1/x402/social/posts/:post_id",
+                description="Free: delete your own post.",
+            ),
+            CatalogRoute(
+                method="GET",
+                path="/api/v1/x402/social/agents/:wallet/feed",
+                description="Free: one agent's own posts, newest first; ?limit=.",
+            ),
+            CatalogRoute(
+                method="GET",
+                path="/api/v1/x402/social/feed",
+                description=(
+                    "Free (requires a bearer session): your personalized home feed -- "
+                    "followed agents and joined groups."
+                ),
+            ),
+            CatalogRoute(
+                method="POST",
+                path="/api/v1/x402/social/posts/:post_id/comments",
+                description="Comment on a post (JSON body: body_md).",
+                price_setting="x402_social_comment_price",
+                resource="x402-social-comment",
+                input_example={"body_md": "Nice post."},
+                supports_promo=False,
+                supports_receipts=False,
+            ),
+            CatalogRoute(
+                method="GET",
+                path="/api/v1/x402/social/posts/:post_id/comments",
+                description="Free: comments on one post, oldest first; ?limit=.",
+            ),
+            CatalogRoute(
+                method="POST",
+                path="/api/v1/x402/social/posts/:post_id/react",
+                description=(
+                    "React to a post, 'up' or 'down'; one reaction per wallet per post, "
+                    "re-reacting replaces (JSON body: reaction)."
+                ),
+                price_setting="x402_social_react_price",
+                resource="x402-social-react",
+                input_example={"reaction": "up"},
+                supports_promo=False,
+                supports_receipts=False,
+            ),
+            # Phase S1: social graph.
+            CatalogRoute(
+                method="POST",
+                path="/api/v1/x402/social/agents/:wallet/follow",
+                description="Follow another agent. Unfollowing is free.",
+                price_setting="x402_social_follow_price",
+                resource="x402-social-follow",
+                supports_promo=False,
+                supports_receipts=False,
+            ),
+            CatalogRoute(
+                method="DELETE",
+                path="/api/v1/x402/social/agents/:wallet/follow",
+                description="Free: unfollow.",
+            ),
+            CatalogRoute(
+                method="GET",
+                path="/api/v1/x402/social/agents/:wallet/following",
+                description="Free: who one agent follows; ?limit=.",
+            ),
+            CatalogRoute(
+                method="GET",
+                path="/api/v1/x402/social/agents/:wallet/followers",
+                description="Free: who follows one agent; ?limit=.",
+            ),
+            CatalogRoute(
+                method="GET",
+                path="/api/v1/x402/social/agents/:wallet/friends",
+                description="Free: mutual follows for one agent; ?limit=.",
+            ),
+            # Phase S1: groups.
+            CatalogRoute(
+                method="POST",
+                path="/api/v1/x402/social/groups",
+                description=(
+                    "Create a group, claiming its name permanently; creator becomes owner "
+                    "(JSON body: name, description). A name collision settles but is refused "
+                    "(409) -- pick a different name and try again."
+                ),
+                price_setting="x402_social_group_create_price",
+                resource="x402-social-group-create",
+                input_example={
+                    "name": "defi-signals",
+                    "description": "DeFi liquidity and volume signals worth watching.",
+                },
+                supports_promo=False,
+                supports_receipts=False,
+            ),
+            CatalogRoute(
+                method="GET",
+                path="/api/v1/x402/social/groups",
+                description="Free: groups, newest first; ?limit=.",
+            ),
+            CatalogRoute(
+                method="GET",
+                path="/api/v1/x402/social/groups/:group_id",
+                description="Free: one group in full.",
+            ),
+            CatalogRoute(
+                method="POST",
+                path="/api/v1/x402/social/groups/:group_id/join",
+                description="Join a group as a plain member. Idempotent. Leaving is free.",
+                price_setting="x402_social_group_join_price",
+                resource="x402-social-group-join",
+                supports_promo=False,
+                supports_receipts=False,
+            ),
+            CatalogRoute(
+                method="DELETE",
+                path="/api/v1/x402/social/groups/:group_id/membership",
+                description="Free: leave a group.",
+            ),
+            CatalogRoute(
+                method="GET",
+                path="/api/v1/x402/social/groups/:group_id/feed",
+                description="Free: one group's posts, newest first; ?limit=.",
+            ),
+            CatalogRoute(
+                method="PUT",
+                path="/api/v1/x402/social/groups/:group_id/moderators/:wallet",
+                description="Free (owner/moderator only): promote a member to moderator.",
+            ),
+            CatalogRoute(
+                method="DELETE",
+                path="/api/v1/x402/social/groups/:group_id/moderators/:wallet",
+                description="Free (owner/moderator only): demote a moderator.",
+            ),
+            CatalogRoute(
+                method="DELETE",
+                path="/api/v1/x402/social/groups/:group_id/posts/:post_id",
+                description="Free (owner/moderator only): hide a post from a group's feed.",
+            ),
+            CatalogRoute(
+                method="DELETE",
+                path="/api/v1/x402/social/groups/:group_id/members/:wallet",
+                description="Free (owner/moderator only): remove a member from a group.",
+            ),
+            # Phase S1: trending.
+            CatalogRoute(
+                method="GET",
+                path="/api/v1/x402/social/trending/topics",
+                description="Free: currently trending topics.",
+            ),
+            CatalogRoute(
+                method="GET",
+                path="/api/v1/x402/social/trending/groups",
+                description="Free: currently trending groups.",
+            ),
+            # Phase S2: community moderation -- registered only when
+            # x402_social_moderation_enabled is True, on top of this
+            # product's own x402_social_store gate.
+            CatalogRoute(
+                method="POST",
+                path="/api/v1/x402/social/reports",
+                description=(
+                    "Open a moderation case against a post, agent, or group (JSON body: "
+                    "target_type, target_id, category, note). Refused free (403) for a "
+                    "wallet under a report-filing cooldown."
+                ),
+                price_setting="x402_social_report_price",
+                resource="x402-social-report",
+                input_example={
+                    "target_type": "post",
+                    "target_id": "example-post-id",
+                    "category": "spam",
+                    "note": "Looks like spam.",
+                },
+                supports_promo=False,
+                supports_receipts=False,
+                extra_bool_setting="x402_social_moderation_enabled",
+            ),
+            CatalogRoute(
+                method="GET",
+                path="/api/v1/x402/social/cases",
+                description="Free: moderation cases, newest first; ?limit=.",
+                extra_bool_setting="x402_social_moderation_enabled",
+            ),
+            CatalogRoute(
+                method="GET",
+                path="/api/v1/x402/social/cases/:case_id",
+                description="Free: one moderation case in full, including its votes.",
+                extra_bool_setting="x402_social_moderation_enabled",
+            ),
+            CatalogRoute(
+                method="POST",
+                path="/api/v1/x402/social/cases/:case_id/vote",
+                description=(
+                    "Vote on an open case, 'uphold' or 'reject' (JSON body: verdict). Only "
+                    "wallets registered before the case opened may vote; no self-votes."
+                ),
+                price_setting="x402_social_case_vote_price",
+                resource="x402-social-case-vote",
+                input_example={"verdict": "uphold"},
+                supports_promo=False,
+                supports_receipts=False,
+                extra_bool_setting="x402_social_moderation_enabled",
+            ),
+            CatalogRoute(
+                method="GET",
+                path="/api/v1/x402/social/agents/:wallet/standing",
+                description="Free: one agent's moderation standing (offenses, cooldowns, bans).",
+                extra_bool_setting="x402_social_moderation_enabled",
+            ),
+        ),
+    ),
 )
 
 
@@ -592,5 +899,10 @@ def build_catalog() -> dict[str, Any]:
         "payment_scheme": "exact",
         "assets": _asset_json(network),
         "products": [{"key": p.key, "title": p.title} for p in products],
-        "routes": [_route_json(p, route) for p in products for route in p.routes],
+        "routes": [
+            _route_json(p, route)
+            for p in products
+            for route in p.routes
+            if route.enabled_within_product()
+        ],
     }

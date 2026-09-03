@@ -102,6 +102,16 @@ _VOTER_B = encode_address(bytes([6]) + bytes(31))
 _VOTER_C = encode_address(bytes([7]) + bytes(31))
 _VOTER_D = encode_address(bytes([8]) + bytes(31))
 
+_RESOURCE_BY_ROUTE = {
+    "x402_social_register": social_routes._REGISTER_RESOURCE,
+    "x402_social_post_create": social_routes._POST_RESOURCE,
+    "x402_social_comment_create": social_routes._COMMENT_RESOURCE,
+    "x402_social_react": social_routes._REACT_RESOURCE,
+    "x402_social_follow": social_routes._FOLLOW_RESOURCE,
+    "x402_social_group_create": social_routes._GROUP_CREATE_RESOURCE,
+    "x402_social_group_join": social_routes._GROUP_JOIN_RESOURCE,
+}
+
 
 def _always_registered(_wallet: str) -> bool:
     """is_registered stub for tests that are not themselves exercising finding 4's registration gate -- every wallet is treated as already registered."""
@@ -2744,11 +2754,17 @@ def test_moderation_enabled_registers_s2_routes(monkeypatch: pytest.MonkeyPatch)
 
 
 # --------------------------------------------------------------------------- #
-# Promo-code wiring (root-caused 2026-09-03): every S0/S1 write route must
-# forward ?promo=/?promo_wallet= into require_paid_request -- these were
-# silently never wired in, so a valid admin-issued promo code for e.g.
-# x402-social-register fell straight through to a real payment demand with
-# no error and no indication anything was wrong.
+# Promo-code wiring, REVERSED 2026-09-03 (see routes.py's own module
+# docstring): every S0/S1 write route used to forward ?promo=/?promo_wallet=
+# into require_paid_request (root-caused 2026-09-03, same day) until a
+# security review found that a promo-bypassed PaymentResult.payer is only
+# SYNTACTICALLY checked (modules/x402/promo.py's own docstring: "not proof
+# the caller controls that wallet"), but every route below feeds payer
+# straight in as the ACTING IDENTITY -- letting anyone register, post,
+# follow, report or vote as any wallet via `?promo_wallet=<victim>`. Closed
+# the same day by simply never reading promo params here at all. These
+# tests now lock in the opposite invariant: promo params in the query
+# string are ignored, not honored.
 # --------------------------------------------------------------------------- #
 @pytest.mark.usefixtures("fake_redis")
 @pytest.mark.parametrize(
@@ -2763,12 +2779,12 @@ def test_moderation_enabled_registers_s2_routes(monkeypatch: pytest.MonkeyPatch)
         "x402_social_group_join",
     ],
 )
-def test_every_s0_s1_write_route_forwards_promo_params(
+def test_every_s0_s1_write_route_never_forwards_promo_params(
     store: InMemorySocialStore,
     monkeypatch: pytest.MonkeyPatch,
     route_name: str,
 ) -> None:
-    """Every S0/S1 paid write route must pass ?promo=/?promo_wallet= from the request straight into require_paid_request's promo_code/promo_wallet kwargs."""
+    """No S0/S1 paid write route may pass ?promo=/?promo_wallet= into require_paid_request, even when present in the query string -- payer is an identity here, and promo cannot prove wallet ownership (see the section comment above)."""
     post_service = PostService(store, is_registered=_always_registered)
     group_service = GroupService(store, is_registered=_always_registered)
     monkeypatch.setattr(social_routes, "profile_service", ProfileService(store))
@@ -2833,8 +2849,8 @@ def test_every_s0_s1_write_route_forwards_promo_params(
         )
     )
 
-    assert captured.get("promo_code") == "LAUNCH1000-TEST"
-    assert captured.get("promo_wallet") == _PAYER
+    assert "promo_code" not in captured
+    assert "promo_wallet" not in captured
 
 
 @pytest.mark.usefixtures("fake_redis")
@@ -2850,19 +2866,17 @@ def test_every_s0_s1_write_route_forwards_promo_params(
         "x402_social_group_join",
     ],
 )
-def test_every_s0_s1_write_route_skips_mark_fulfilled_on_promo(
+def test_every_s0_s1_write_route_calls_mark_fulfilled_unconditionally(
     store: InMemorySocialStore,
     monkeypatch: pytest.MonkeyPatch,
     route_name: str,
 ) -> None:
-    """A promo-bypassed result must never reach mark_fulfilled.
+    """mark_fulfilled runs on every successful write -- there is no is_promo guard any more.
 
-    Root-caused 2026-09-03: every S0/S1 write route called
-    mark_fulfilled(result.payment_txid, ...) unconditionally, so a successful promo redemption
-    (real payer, real product write, no real settlement -- payment_txid is deliberately empty)
-    still triggered mark_fulfilled's own "called with no settlement txid" ERROR log on every
-    single promo-covered call, matching the established is_promo guard every other promo-wired
-    product (grading, directory, news) already has.
+    The guard (skip mark_fulfilled when result.is_promo) was removed along with promo wiring
+    itself (see the section comment above): a real require_paid_request can never return
+    is_promo=True here, since promo_code is never passed to it. This test uses a plain settled
+    (non-promo) result, matching what the route can actually receive in production.
     """
     post_service = PostService(store, is_registered=_always_registered)
     group_service = GroupService(store, is_registered=_always_registered)
@@ -2870,9 +2884,8 @@ def test_every_s0_s1_write_route_skips_mark_fulfilled_on_promo(
     monkeypatch.setattr(social_routes, "profile_service", profile_service)
     monkeypatch.setattr(social_routes, "post_service", post_service)
     monkeypatch.setattr(social_routes, "group_service", group_service)
-    # _PAYER (the promo-bypassed caller below) must itself be registered for
-    # every route except register itself, which would otherwise 409 as
-    # already-registered.
+    # _PAYER (the caller below) must itself be registered for every route
+    # except register itself, which would otherwise 409 as already-registered.
     if route_name != "x402_social_register":
         profile_service.register(
             wallet=_PAYER,
@@ -2926,7 +2939,7 @@ def test_every_s0_s1_write_route_skips_mark_fulfilled_on_promo(
     monkeypatch.setattr(
         social_routes,
         "require_paid_request",
-        lambda *_a, **_kw: _settled_result(payer=_PAYER, txid="", is_promo=True),
+        lambda *_a, **_kw: _settled_result(payer=_PAYER, txid="TX-REAL"),
     )
     mark_fulfilled_calls: list[tuple[str, str]] = []
     monkeypatch.setattr(
@@ -2939,23 +2952,25 @@ def test_every_s0_s1_write_route_skips_mark_fulfilled_on_promo(
     response = route(_request(path=path, **extra_kwargs))
 
     assert response.status_code == 200
-    assert mark_fulfilled_calls == []
+    assert mark_fulfilled_calls == [("TX-REAL", _RESOURCE_BY_ROUTE[route_name])]
 
 
 # --------------------------------------------------------------------------- #
-# S2 promo wiring: the exact same gap as the S0/S1 fix above, but for
-# report/case-vote specifically -- caught live 2026-09-03 (minutes after
-# turning x402_social_moderation_enabled on for the first time): the
-# earlier fix only covered the 7 S0/S1 routes, deliberately skipping
-# report/case-vote since S2 was still gated off at the time. Once flipped
-# on, a real promo=LAUNCH1000-REPORT attempt fell straight through to a
-# real payment demand, same symptom as the original S0/S1 bug.
+# S2 promo wiring, REVERSED 2026-09-03: same reversal as the S0/S1 section
+# above, for report/case-vote specifically. Both used to forward
+# ?promo=/?promo_wallet= (root-caused, then re-caught live minutes after
+# x402_social_moderation_enabled was first flipped on, same day) until the
+# same security review found result.payer feeding cast_vote's `voter` and
+# open_report's `reporter` directly -- a promo bypass there would have let
+# anyone vote or file reports as an unproven wallet, defeating S2's whole
+# anti-sockpuppet design (registered-before-the-case, no self-votes). Closed
+# the same way: promo params are never read here at all any more.
 # --------------------------------------------------------------------------- #
 @pytest.mark.usefixtures("fake_redis")
-def test_report_create_forwards_promo_params(
+def test_report_create_never_forwards_promo_params(
     store: InMemorySocialStore, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """x402_social_report_create must pass ?promo=/?promo_wallet= into require_paid_request."""
+    """x402_social_report_create must never pass ?promo=/?promo_wallet= into require_paid_request."""
     ms = _moderation_service(store)
     monkeypatch.setattr(social_routes, "moderation_service", ms)
     _register(store, _REPORTER)
@@ -2980,15 +2995,15 @@ def test_report_create_forwards_promo_params(
         )
     )
 
-    assert captured.get("promo_code") == "LAUNCH1000-TEST"
-    assert captured.get("promo_wallet") == _REPORTER
+    assert "promo_code" not in captured
+    assert "promo_wallet" not in captured
 
 
 @pytest.mark.usefixtures("fake_redis")
-def test_case_vote_forwards_promo_params(
+def test_case_vote_never_forwards_promo_params(
     store: InMemorySocialStore, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """x402_social_case_vote must pass ?promo=/?promo_wallet= into require_paid_request."""
+    """x402_social_case_vote must never pass ?promo=/?promo_wallet= into require_paid_request."""
     ms = _moderation_service(store)
     monkeypatch.setattr(social_routes, "moderation_service", ms)
     _register(store, _REPORTER)
@@ -3020,8 +3035,8 @@ def test_case_vote_forwards_promo_params(
         )
     )
 
-    assert captured.get("promo_code") == "LAUNCH1000-TEST"
-    assert captured.get("promo_wallet") == _PAYER
+    assert "promo_code" not in captured
+    assert "promo_wallet" not in captured
 
 
 def test_cassandra_epoch_treats_a_naive_driver_datetime_as_utc() -> None:
