@@ -15,6 +15,17 @@ logger = logging.getLogger(__name__)
 _USER_AGENT = "algorand-platform-newspaper/1.0 (+https://algorand.pxke.me)"
 
 
+class TranscriptFetchError(Exception):
+    """Raised when the metered third-party transcript API call itself failed (network error, timeout, non-2xx response).
+
+    Distinct from a successful call that legitimately found no captions --
+    that case returns "". Callers must not treat this the same as a
+    confirmed no-transcript result (CLAUDE.md invariant 8): a transient
+    failure should leave the video eligible for a retried fetch, not
+    permanently forfeit an already-paid-for transcript.
+    """
+
+
 def _client() -> redis.Redis:
     return get_redis()
 
@@ -92,8 +103,13 @@ def _extract_transcript_text(data: Any) -> str:  # noqa: ANN401 -- arbitrary thi
 def _fetch_via_third_party_api(video_id: str) -> str:
     """Fetch a video transcript via the configured third-party API.
 
-    Returns plain text, or "" when disabled/unconfigured/unavailable. Never
-    raises — transcript is best-effort enrichment, not required for publishing.
+    Returns plain text, or "" when disabled/unconfigured, or when the API
+    call succeeded but genuinely found no transcript for this video. Raises
+    ``TranscriptFetchError`` when the request itself failed (network error,
+    timeout, non-2xx status) -- a transient failure must not be silently
+    coerced to the same "" a confirmed no-transcript result returns, or a
+    video's transcript is forfeited forever the moment the caller marks it
+    attempted (CLAUDE.md invariant 8).
     """
     from app.core.config import (
         YOUTUBE_TRANSCRIPT_API_KEY,
@@ -126,13 +142,18 @@ def _fetch_via_third_party_api(video_id: str) -> str:
 
         resp = httpx.get(url, headers=headers, timeout=float(YOUTUBE_TRANSCRIPT_TIMEOUT))
         resp.raise_for_status()
-        try:
-            return _extract_transcript_text(resp.json())
-        except ValueError:
-            # Non-JSON provider (plain text / VTT) — return the body as-is.
-            return resp.text.strip()
-    except Exception:
-        return ""
+    except Exception as exc:
+        # The request itself failed (network blip, timeout, rate limit, 5xx,
+        # etc) -- distinguish this from a successful call that found nothing,
+        # so the caller can retry instead of forfeiting the transcript.
+        logger.warning("transcript API request failed for %s", video_id, exc_info=True)
+        raise TranscriptFetchError(f"transcript API request failed: {exc}") from exc
+
+    try:
+        return _extract_transcript_text(resp.json())
+    except ValueError:
+        # Non-JSON provider (plain text / VTT) — return the body as-is.
+        return resp.text.strip()
 
 
 def _fetch_via_local_pipeline(video_id: str) -> str:
@@ -165,8 +186,12 @@ def _fetch_via_local_pipeline(video_id: str) -> str:
 def fetch_video_transcript(video_id: str) -> str:
     """Best-effort transcript: local yt-dlp+Voxtral pipeline first (if enabled), falling back to the legacy third-party API (if configured).
 
-    Returns plain text, or "" when unavailable. Never raises — transcript is
-    best-effort enrichment, not required for publishing.
+    Returns plain text, or "" when genuinely unavailable (disabled/unconfigured,
+    or a successful call found no captions). The local pipeline stays fully
+    best-effort (never raises -- see `_fetch_via_local_pipeline`). Raises
+    ``TranscriptFetchError`` if the third-party API fallback's request itself
+    failed -- callers must not mark the video as a completed transcript
+    attempt on that path (CLAUDE.md invariant 8).
     """
     if not video_id:
         return ""

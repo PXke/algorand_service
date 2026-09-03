@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import logging
+
 from app.celery_app import celery_app
 from app.modules.chain_tail.registry_cache import clear_registry_cache, load_enabled_services
 from app.modules.newspaper.ingest_signal import ingest_publish_signal
 from app.modules.newspaper.snapshot_store import get_latest_snapshot, source_id_for_service
 from app.modules.scraper.core.youtube_scraper import fetch_channel_videos
 from app.modules.scraper.core.youtube_transcript import (
+    TranscriptFetchError,
     fetch_video_transcript,
     mark_transcript_attempted,
     transcript_attempted,
@@ -15,6 +18,34 @@ from app.modules.scraper.core.youtube_transcript import (
 from app.modules.scraper.core.youtube_urls import is_youtube_scrape_url, parse_youtube_target
 from app.modules.scraper.crawler_registry import is_crawler_enabled
 from app.modules.scraper.crawler_types import CrawlerType
+
+logger = logging.getLogger(__name__)
+
+
+def _fetch_transcript_once(video_id: str) -> str:
+    """Fetch a video's transcript at most once (best-effort, metered API), leaving it eligible for a later retry on a transient failure.
+
+    A new video on a monitored channel is on-topic by definition; pay at
+    most once per video, even when a skip path leaves no snapshot to dedup
+    next poll -- EXCEPT a TRANSIENT fetch failure (network blip, rate limit,
+    5xx), which must NOT be stamped as "attempted": that would permanently
+    forfeit an already-paid-for transcript with no retry (CLAUDE.md
+    invariant 8). Only a genuine result (found text, or a confirmed
+    no-transcript "") gets marked attempted.
+    """
+    if transcript_attempted(video_id):
+        return ""
+    try:
+        transcript = fetch_video_transcript(video_id)
+    except TranscriptFetchError:
+        logger.warning(
+            "transient transcript fetch failure for %s, leaving eligible for retry",
+            video_id,
+            exc_info=True,
+        )
+        return ""
+    mark_transcript_attempted(video_id)
+    return transcript
 
 
 @celery_app.task(name="app.tasks.scrape.poll_youtube_sources")
@@ -59,13 +90,7 @@ def poll_youtube_sources() -> dict[str, object]:
             if get_latest_snapshot(source_id_for_service(service_id)) is not None:
                 results.append({"video_id": video.video_id, "status": "unchanged"})
                 continue
-            # Best-effort transcript (metered third-party API). A new video on a
-            # monitored channel is on-topic by definition; pay at most once per
-            # video, even when a skip path leaves no snapshot to dedup next poll.
-            transcript = ""
-            if not transcript_attempted(video.video_id):
-                transcript = fetch_video_transcript(video.video_id)
-                mark_transcript_attempted(video.video_id)
+            transcript = _fetch_transcript_once(video.video_id)
             outcome = ingest_publish_signal(
                 service_id=service_id,
                 display_name=entry.display_name,

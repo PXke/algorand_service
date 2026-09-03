@@ -5,6 +5,7 @@ from __future__ import annotations
 from app.celery_app import celery_app
 from app.core.config import CHAIN_TAIL_MAX_ROUNDS_PER_RUN
 from app.core.redis_client import get_redis
+from app.core.redis_lock import single_flight
 from app.modules.chain_tail.chain_reader import (
     get_algod_head_round,
     get_conduit_head_round,
@@ -19,6 +20,19 @@ CHAIN_TAIL_LAST_PROCESSED_KEY = "chain_tail:last_processed_round"
 
 
 @celery_app.task(name="app.tasks.chain_tail.process_new_rounds")
+# Beat fires every CHAIN_TAIL_POLL_SECONDS (default 60s); a run can process up
+# to CHAIN_TAIL_MAX_ROUNDS_PER_RUN rounds, each round paying for its own algod
+# call, so a slow run can easily outrun the beat interval. Without
+# single_flight the next tick overlaps it: both runs re-process the same
+# rounds (double-dispatching publish_from_chain_event for the same on-chain
+# event), and whichever run's final `client.set` lands last silently rewinds
+# the cursor, undoing the other run's progress (CLAUDE.md invariant 5). Lock
+# TTL pinned to the celery-wide hard task_time_limit -- this task has no
+# per-task override -- matching drain_url_queue/drain_to_compose's precedent
+# so the lock always outlives the run even past a hard SIGKILL.
+@single_flight(
+    lambda *_a, **_kw: "chain_tail:process_new_rounds", ttl=celery_app.conf.task_time_limit
+)
 def process_new_rounds() -> dict[str, int | str | bool]:
     """Tail new Conduit-indexed rounds and enqueue newspaper work for registry matches."""
     chain_off = chain_crawl_disabled_reason()
