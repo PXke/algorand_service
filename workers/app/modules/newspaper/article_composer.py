@@ -205,6 +205,7 @@ def compose_scrape_article(
         confirmed_alert=getattr(fields, "confirmed_alert", None),
         defunct_domains=getattr(fields, "defunct_domains", ()),
         unsourced_hold_reason=getattr(fields, "unsourced_hold_reason", ""),
+        broken_link_hold_reason=getattr(fields, "broken_link_hold_reason", ""),
         regrade_unconfirmed_hold_reason=getattr(fields, "regrade_unconfirmed_hold_reason", ""),
     )
 

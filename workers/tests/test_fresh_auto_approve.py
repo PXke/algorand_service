@@ -9,6 +9,10 @@ these tests pin the logic, not the numbers.
 
 from __future__ import annotations
 
+import logging
+
+import pytest
+
 from app.modules.gatekeeper.live import DeterministicGate
 from app.modules.newspaper.article_grader import headline_violations
 
@@ -182,3 +186,39 @@ def test_regrade_unconfirmed_blocks_auto_approve_before_any_grading() -> None:
     assert passed is False
     assert meta["auto_applied"] == "0"
     assert "SoftTimeLimitExceeded" in meta["regrade_unconfirmed_hold_reason"]
+
+
+def test_gate_draft_error_fails_closed_not_open(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """2026-09-03 fix: gate_draft used to collapse 'gatekeeper disabled' and 'gatekeeper errored' into the same None return, so a genuine internal error (e.g. a Cassandra blip) read exactly like a deliberate no-op and _fresh_auto_approve_passes's `else: gate_ok = True` branch (meant only for the disabled case) silently fired on the error too -- fail OPEN on error, the opposite of this gate's whole purpose. gate_draft now raises on a real error instead of returning None for it; this function's own try/except (gate_ok initialized False before the try, and the except clause never sets it True) must end up with gate_ok=False, not True, for an otherwise-perfect draft.
+
+    Exercises the REAL gate_draft (not a mock of it) by making the thing it
+    calls internally raise -- load_investigation_trace -- so this proves the
+    full chain: gate_draft must actually propagate the error for this
+    caller's existing fail-closed try/except to have anything to catch.
+    """
+    from app.modules.newspaper.tasks.publish_tasks import _fresh_auto_approve_passes
+
+    monkeypatch.setattr("app.core.config.FRESH_AUTO_APPROVE_ENABLED", True, raising=False)
+    monkeypatch.setattr("app.core.config.FRESH_AUTO_APPROVE_GRADE_FLOOR", 8.0, raising=False)
+    monkeypatch.setattr("app.core.config.GATEKEEPER_ENABLED", True, raising=False)
+
+    def _boom(_sid: str) -> str:
+        raise RuntimeError("cassandra blip loading investigation trace")
+
+    monkeypatch.setattr("app.modules.newspaper.investigation_store.load_investigation_trace", _boom)
+
+    with caplog.at_level(logging.WARNING):
+        passed, meta = _fresh_auto_approve_passes(
+            title=_GOOD_TITLE,
+            body="body",
+            page_text="source",
+            source_url="https://example.com",
+            heuristic_grade={"grade": 9.5, "subscores": {}, "issues": []},
+        )
+    # Grade and headline both clear -- gate_ok is the only thing that can be
+    # blocking this, proving the error was NOT treated as "disabled, no signal".
+    assert passed is False
+    assert meta["auto_applied"] == "0"
+    assert any("fresh auto-approve gatekeeper check failed" in r.message for r in caplog.records)

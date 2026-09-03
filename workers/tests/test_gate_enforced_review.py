@@ -1,5 +1,7 @@
 """Step 3: the deterministic gatekeeper diverts an auto-publishable draft into human review only when GATEKEEPER_ENFORCE is on (default off = shadow)."""
 
+import logging
+
 import pytest
 
 from app.modules.gatekeeper.live import DeterministicGate
@@ -53,6 +55,21 @@ def test_no_divert_when_gate_none(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("app.core.config.GATEKEEPER_ENFORCE", True, raising=False)
     monkeypatch.setattr("app.modules.gatekeeper.live.gate_draft", lambda **_: None)
     assert _gate_enforces_review(clf_decision=True, **_args()) is False
+
+
+def test_diverts_when_gate_draft_errors(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A genuine gate_draft error must NOT read the same as a disabled gate (2026-09-03 fix): with enforcement on, an exception out of gate_draft now diverts to review (fail closed) and logs a warning, instead of silently falling through to no-divert the way a real error used to when gate_draft collapsed 'disabled' and 'errored' into the same None."""
+    monkeypatch.setattr("app.core.config.GATEKEEPER_ENFORCE", True, raising=False)
+
+    def _boom(**_: object) -> None:
+        raise RuntimeError("cassandra blip")
+
+    monkeypatch.setattr("app.modules.gatekeeper.live.gate_draft", _boom)
+    with caplog.at_level(logging.WARNING):
+        assert _gate_enforces_review(clf_decision=True, **_args()) is True
+    assert any("gate_draft errored" in r.message for r in caplog.records)
 
 
 def test_low_confidence_already_reviews_not_double_gated(monkeypatch: pytest.MonkeyPatch) -> None:

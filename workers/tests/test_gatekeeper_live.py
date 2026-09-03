@@ -219,3 +219,45 @@ def test_gate_draft_passes_when_no_domains_dead(monkeypatch: pytest.MonkeyPatch)
     assert gate is not None
     assert gate.passed
     assert gate.dead_domains == ()
+
+
+# ------------------------------------- disabled vs. errored (2026-09-03 fix)
+#
+# gate_draft used to wrap its ENTIRE body -- including the GATEKEEPER_ENABLED
+# check -- in one try/except that returned None either way, so a genuine
+# internal error (Cassandra blip, etc.) was indistinguishable from
+# "gatekeeper is deliberately off". At least one caller (_gate_enforces_review
+# in publish_tasks.py) read that None as "no signal, don't divert" and so
+# silently failed OPEN on a real error. Disabled must still return a clean
+# None with no exception machinery; a real error must now propagate so every
+# caller's own try/except can fail closed instead.
+
+
+def test_gate_draft_returns_none_cleanly_when_disabled(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """GATEKEEPER_ENABLED False returns a clean None with no warning logged -- deliberate and expected, not an error path."""
+    import logging
+
+    monkeypatch.setattr("app.core.config.GATEKEEPER_ENABLED", False)
+
+    def _boom(_sid: str) -> str:
+        raise AssertionError("must not even reach the trace lookup when disabled")
+
+    monkeypatch.setattr("app.modules.newspaper.investigation_store.load_investigation_trace", _boom)
+    with caplog.at_level(logging.WARNING):
+        gate = gate_draft(article_text="Some article.", source_url="https://example.com")
+    assert gate is None
+    assert caplog.records == []
+
+
+def test_gate_draft_propagates_a_genuine_internal_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A real error (e.g. a Cassandra blip loading the investigation trace) must raise, not collapse to the same None a deliberately-disabled gatekeeper returns -- otherwise callers can't tell 'no signal' from 'something broke' and fail open on the latter."""
+    monkeypatch.setattr("app.core.config.GATEKEEPER_ENABLED", True)
+
+    def _boom(_sid: str) -> str:
+        raise RuntimeError("cassandra blip")
+
+    monkeypatch.setattr("app.modules.newspaper.investigation_store.load_investigation_trace", _boom)
+    with pytest.raises(RuntimeError, match="cassandra blip"):
+        gate_draft(article_text="Some article.", source_url="https://example.com")

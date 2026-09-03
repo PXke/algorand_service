@@ -405,8 +405,14 @@ def _gate_enforces_review(
     """Quality veto on the auto-publish path. True when a draft Classifier A would send STRAIGHT to the feed (``clf_decision is True``) should instead be diverted to human review because the deterministic gatekeeper fails.
 
     Honors ``GATEKEEPER_ENFORCE`` — default off, so this returns False (shadow
-    mode, no behaviour change) until the quality head is trusted. Failure-tolerant:
-    a None gate (disabled / error) never diverts.
+    mode, no behaviour change) until the quality head is trusted. A disabled
+    gatekeeper (``gate_draft`` returns None) never diverts -- there's no
+    signal to fail on. A genuine ``gate_draft`` error is a DIFFERENT case
+    (2026-09-03: ``gate_draft`` used to collapse "disabled" and "errored"
+    into the same None, which made this function silently fail OPEN --
+    never diverting -- on a real internal error too) and now fails CLOSED:
+    caught, logged, and treated as "divert to review," matching the
+    fail-closed shape ``_fresh_auto_approve_passes``/``_grade_and_gate`` use.
     """
     from app.core import config
 
@@ -414,10 +420,18 @@ def _gate_enforces_review(
         return False
     from app.modules.gatekeeper.live import gate_draft
 
-    gate = gate_draft(
-        article_text=f"{title}\n{body}",
-        source_url=source_url,
-    )
+    try:
+        gate = gate_draft(
+            article_text=f"{title}\n{body}",
+            source_url=source_url,
+        )
+    except Exception:
+        logger.warning(
+            "gate_draft errored for %s -- diverting to review (fail closed)",
+            source_url,
+            exc_info=True,
+        )
+        return True
     return gate is not None and not gate.passed
 
 

@@ -66,6 +66,41 @@ def test_compose_scrape_uses_mistral_when_configured(monkeypatch: pytest.MonkeyP
     assert result.title == "AI Title"
 
 
+def test_compose_scrape_forwards_broken_link_hold_reason_on_generic_branch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The generic writer-tools branch (ordinary articles, not EDITORIAL_ASSIGNMENT/COMMUNITY_RECAP) must forward broken_link_hold_reason from LLMArticleFields into ArticleComposeResult, same as defunct_domains/unsourced_hold_reason/regrade_unconfirmed_hold_reason -- silently dropping it makes publish_tasks.py's getattr(..., default) fall back to the all-clear default, exactly the bug class the dataclass docstring warns about (MyAlgo/GoPlausible incidents)."""
+    import app.core.config as config
+    import app.modules.newspaper.article_composer as composer_module
+
+    monkeypatch.setattr(config, "MISTRAL_ENABLED", True)
+    monkeypatch.setattr(config, "MISTRAL_API_KEY", "key")
+
+    class FakeFields:
+        title = "Title"
+        summary = "Summary"
+        body = "Body"
+        broken_link_hold_reason = "unverified broken-link claim: /terms"
+
+    def fake_mistral(**_kwargs: object) -> Any:  # noqa: ANN401 -- test double / fake response
+        return FakeFields()
+
+    monkeypatch.setattr(composer_module, "_llm_compose_scrape_article", fake_mistral)
+
+    result = compose_scrape_article(
+        service_name="Svc",
+        source_url="https://example.com",
+        page_title="Page",
+        page_text="body",
+        txid="TX",
+        round_num=1,
+        diff=None,
+        is_first_snapshot=True,
+        publish_kind=PublishKind.SERVICE_DISCOVERY,
+    )
+    assert result.broken_link_hold_reason == "unverified broken-link claim: /terms"
+
+
 def test_compose_scrape_raises_on_mistral_error_no_fallback(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -160,9 +195,7 @@ def test_compose_scrape_recap_topic_does_not_double_fold_transcript(
     def fail_generic_mistral(**_kwargs: object) -> Never:
         raise AssertionError("must not fall through to the generic scrape compose")
 
-    monkeypatch.setattr(
-        composer_module, "compose_recap_from_transcript", fake_recap_mistral
-    )
+    monkeypatch.setattr(composer_module, "compose_recap_from_transcript", fake_recap_mistral)
     monkeypatch.setattr(composer_module, "_llm_compose_scrape_article", fail_generic_mistral)
 
     result = compose_scrape_article(
@@ -232,9 +265,7 @@ def test_compose_scrape_allowed_off_peak(monkeypatch: pytest.MonkeyPatch) -> Non
         summary = "Summary"
         body = "Body"
 
-    monkeypatch.setattr(
-        composer_module, "_llm_compose_scrape_article", lambda **_kw: FakeFields()
-    )
+    monkeypatch.setattr(composer_module, "_llm_compose_scrape_article", lambda **_kw: FakeFields())
 
     result = compose_scrape_article(
         service_name="Svc",

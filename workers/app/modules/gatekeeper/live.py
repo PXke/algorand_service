@@ -6,8 +6,20 @@ model is trained. Designed to ship in shadow mode: it always computes and
 returns the signals (for the review metadata), and the caller decides whether to
 enforce based on ``GATEKEEPER_ENFORCE``.
 
-Everything here is failure-tolerant: a malformed input or missing trace yields a
-permissive result, never an exception into the publish path.
+``run_deterministic_gate`` is pure string processing (completeness rules,
+numeric entailment) and is failure-tolerant to malformed input by
+construction — no I/O, nothing to raise. ``gate_draft``, the impure wrapper
+below that adds the trace lookup and the dead-domain check, is a different
+story: it deliberately returns ``None`` ONLY for the expected, silent
+"gatekeeper is disabled" case, and otherwise lets a genuine internal error
+(e.g. a Cassandra blip in ``domain_tracker.get_domain_status``) propagate as
+an exception rather than also collapsing to ``None`` (found 2026-09-03:
+collapsing both into the same ``None`` made a real error indistinguishable
+from "deliberately off," and at least one caller treated that ``None`` as
+"no signal, don't divert" — i.e. silently failed OPEN on error). Every
+caller of ``gate_draft`` must catch and fail CLOSED; see
+``_fresh_auto_approve_passes`` / ``_grade_and_gate`` / ``_gate_enforces_review``
+in ``publish_tasks.py`` for the established pattern.
 """
 
 from __future__ import annotations
@@ -176,7 +188,7 @@ def _dead_domains_referenced(article_text: str, *, source_domain: str = "") -> l
 
 
 def gate_draft(*, article_text: str, source_url: str) -> DeterministicGate | None:
-    """Convenience wrapper for the publish task: loads the trace by source_url, reads config, runs the gate, then folds in the dead-domain check (needs I/O -- domain_tracking lookups and, for never-seen domains, a live DNS resolution -- so it lives here rather than in the pure ``run_deterministic_gate`` core). Returns None when disabled or on any error (shadow-safe). The caller enforces only when ``GATEKEEPER_ENFORCE`` and ``not result.passed``.
+    """Convenience wrapper for the publish task: loads the trace by source_url, reads config, runs the gate, then folds in the dead-domain check (needs I/O -- domain_tracking lookups and, for never-seen domains, a live DNS resolution -- so it lives here rather than in the pure ``run_deterministic_gate`` core). Returns None ONLY when the gatekeeper is deliberately disabled (``GATEKEEPER_ENABLED`` False) -- a deliberate, expected, silent case, not an error. A genuine internal error (trace lookup, domain-tracking lookup, etc.) RAISES instead of also returning None; the caller enforces only when ``GATEKEEPER_ENFORCE`` and ``not result.passed``, and must catch and fail closed on a raised exception (see the module docstring above for the established caller pattern -- this distinction is what CHANGED 2026-09-03; previously both cases returned the same None and at least one caller silently failed open on a real error).
 
     No longer takes ``source_text`` (found 2026-09-02: completeness
     trigger-matching moved to article_text only, see run_deterministic_gate's
@@ -195,36 +207,37 @@ def gate_draft(*, article_text: str, source_url: str) -> DeterministicGate | Non
     different values and silently keying the trace lookup off one URL while
     excluding a different domain from the dead-domain scan.
     """
-    try:
-        from app.core.config import (
-            GATEKEEPER_ENABLED,
-            GATEKEEPER_ENFORCE,
-            GATEKEEPER_FACT_MIN,
-        )
+    from app.core.config import (
+        GATEKEEPER_ENABLED,
+        GATEKEEPER_ENFORCE,
+        GATEKEEPER_FACT_MIN,
+    )
 
-        if not GATEKEEPER_ENABLED:
-            return None
-        from app.modules.newspaper.investigation_store import load_investigation_trace
-
-        trace = load_investigation_trace(source_url)
-        gate = run_deterministic_gate(
-            trace,
-            article_text,
-            GateConfig(fact_min=GATEKEEPER_FACT_MIN, enforce=GATEKEEPER_ENFORCE),
-        )
-        from app.modules.crawler.domain_tracker import domain_from_url
-
-        source_domain = domain_from_url(source_url) if source_url else ""
-        dead = _dead_domains_referenced(article_text, source_domain=source_domain)
-        if not dead:
-            return gate
-        from dataclasses import replace
-
-        return replace(
-            gate,
-            passed=False,
-            dead_domains=tuple(dead),
-            reasons=(*gate.reasons, f"references confirmed-dead domain(s): {', '.join(dead)}"),
-        )
-    except Exception:
+    if not GATEKEEPER_ENABLED:
+        # Deliberate, expected, silent -- not an error, so no try/except
+        # machinery around it and no log line. Everything below this point
+        # is real I/O and is allowed to raise; see the docstring above.
         return None
+
+    from app.modules.newspaper.investigation_store import load_investigation_trace
+
+    trace = load_investigation_trace(source_url)
+    gate = run_deterministic_gate(
+        trace,
+        article_text,
+        GateConfig(fact_min=GATEKEEPER_FACT_MIN, enforce=GATEKEEPER_ENFORCE),
+    )
+    from app.modules.crawler.domain_tracker import domain_from_url
+
+    source_domain = domain_from_url(source_url) if source_url else ""
+    dead = _dead_domains_referenced(article_text, source_domain=source_domain)
+    if not dead:
+        return gate
+    from dataclasses import replace
+
+    return replace(
+        gate,
+        passed=False,
+        dead_domains=tuple(dead),
+        reasons=(*gate.reasons, f"references confirmed-dead domain(s): {', '.join(dead)}"),
+    )
