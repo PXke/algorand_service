@@ -231,30 +231,41 @@ def test_valid_code_and_wallet_bypasses_payment(promo_store: InMemoryPromoStore)
 
 
 def test_exhausted_code_falls_through_to_normal_payment(
-    promo_store: InMemoryPromoStore, fake_redis: _FakeRedis
+    promo_store: InMemoryPromoStore, fake_redis: _FakeRedis, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """A code whose remaining count hits zero falls through to the normal paid gate, not an error."""
+    """A code whose remaining count hits zero falls through to the normal paid gate, not an error.
+
+    Root-caused 2026-09-03 (operator-clarity follow-up): this was completely silent server-side
+    too -- an admin/support agent had no way to distinguish "exhausted" from every other silent
+    rejection reason without reading Redis directly. Now logs an INFO line naming it explicitly,
+    still without changing the caller-facing contract (still a plain fall-through, never a 402 the
+    caller can't route around -- see the module docstring's owner decision).
+    """
     _seed(promo_store, starting_count=1)
 
-    first = promo_module.attempt_promo_redemption(
-        _request(headers={"x-real-ip": "1.1.1.1"}),
-        code="LAUNCH",
-        wallet=_WALLET,
-        resource=_RESOURCE,
-        store=promo_store,
-    )
-    second = promo_module.attempt_promo_redemption(
-        _request(headers={"x-real-ip": "1.1.1.2"}),
-        code="LAUNCH",
-        wallet=_WALLET_2,
-        resource=_RESOURCE,
-        store=promo_store,
-    )
+    with caplog.at_level("INFO", logger="app.modules.x402.promo"):
+        first = promo_module.attempt_promo_redemption(
+            _request(headers={"x-real-ip": "1.1.1.1"}),
+            code="LAUNCH",
+            wallet=_WALLET,
+            resource=_RESOURCE,
+            store=promo_store,
+        )
+        second = promo_module.attempt_promo_redemption(
+            _request(headers={"x-real-ip": "1.1.1.2"}),
+            code="LAUNCH",
+            wallet=_WALLET_2,
+            resource=_RESOURCE,
+            store=promo_store,
+        )
 
     assert first is not None
     assert second is None  # falls through, not an error
     # The exhausted decrement was undone -- remaining stays at 0, not -1.
     assert fake_redis.store[f"{promo_module._REMAINING_PREFIX}LAUNCH"] == "0"
+    assert any(
+        "code=LAUNCH exhausted (1/1 uses spent)" in record.message for record in caplog.records
+    )
 
 
 def test_wrong_resource_scope_falls_through_without_touching_redis(
@@ -337,9 +348,14 @@ def test_wallet_redeems_up_to_its_per_wallet_cap_then_falls_through(
 
 @pytest.mark.usefixtures("fake_redis")
 def test_default_max_redemptions_per_wallet_is_still_exactly_one(
-    promo_store: InMemoryPromoStore,
+    promo_store: InMemoryPromoStore, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """A code seeded without max_redemptions_per_wallet keeps the pre-101 exactly-once behavior."""
+    """A code seeded without max_redemptions_per_wallet keeps the pre-101 exactly-once behavior.
+
+    Also: the second (refused) attempt logs an INFO line naming the reason (this wallet's own
+    per-code allowance, not the code's global count) -- same operator-clarity follow-up as the
+    exhausted-code and unknown-code tests above.
+    """
     _seed(promo_store, starting_count=25)  # max_redemptions_per_wallet defaults to 1
     headers = {"x-real-ip": "1.1.1.1"}
 
@@ -350,16 +366,21 @@ def test_default_max_redemptions_per_wallet_is_still_exactly_one(
         resource=_RESOURCE,
         store=promo_store,
     )
-    second = promo_module.attempt_promo_redemption(
-        _request(headers=headers),
-        code="LAUNCH",
-        wallet=_WALLET,
-        resource=_RESOURCE,
-        store=promo_store,
-    )
+    with caplog.at_level("INFO", logger="app.modules.x402.promo"):
+        second = promo_module.attempt_promo_redemption(
+            _request(headers=headers),
+            code="LAUNCH",
+            wallet=_WALLET,
+            resource=_RESOURCE,
+            store=promo_store,
+        )
 
     assert first is not None
     assert second is None
+    assert any(
+        "code=LAUNCH already redeemed max_redemptions_per_wallet=1 times" in record.message
+        for record in caplog.records
+    )
 
 
 @pytest.mark.usefixtures("fake_redis")
@@ -464,16 +485,22 @@ def test_invalid_wallet_falls_through(
 
 
 @pytest.mark.usefixtures("fake_redis")
-def test_unknown_code_falls_through(promo_store: InMemoryPromoStore) -> None:
-    """A code that was never issued falls through."""
-    result = promo_module.attempt_promo_redemption(
-        _request(headers={"x-real-ip": "1.1.1.1"}),
-        code="NOPE",
-        wallet=_WALLET,
-        resource=_RESOURCE,
-        store=promo_store,
-    )
+def test_unknown_code_falls_through(
+    promo_store: InMemoryPromoStore, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A code that was never issued falls through, now with an INFO log line for operators."""
+    with caplog.at_level("INFO", logger="app.modules.x402.promo"):
+        result = promo_module.attempt_promo_redemption(
+            _request(headers={"x-real-ip": "1.1.1.1"}),
+            code="NOPE",
+            wallet=_WALLET,
+            resource=_RESOURCE,
+            store=promo_store,
+        )
     assert result is None
+    assert any(
+        "no active code=NOPE valid for resource=" in record.message for record in caplog.records
+    )
 
 
 @pytest.mark.usefixtures("fake_redis")

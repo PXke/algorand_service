@@ -532,6 +532,12 @@ def _reserve_slot(code: str, starting_count: int) -> tuple[object, str] | None:
         return None
     if remaining < 0:
         _undo_reserved_slot(redis_client, remaining_key, code=code)
+        logger.info(
+            "x402 promo: code=%s exhausted (%d/%d uses spent) -- falling through to normal payment",
+            code,
+            starting_count,
+            starting_count,
+        )
         return None
     return redis_client, remaining_key
 
@@ -580,6 +586,15 @@ def _reserve_wallet_slot(
         return None
     if remaining < 0:
         _undo_reserved_wallet_slot(redis_client, remaining_key, code=code, wallet_hash=wallet_hash)
+        # wallet_hash only (never the raw address) -- same "never logged" rule
+        # this module's own docstring already applies to every other use of it.
+        logger.info(
+            "x402 promo: code=%s already redeemed max_redemptions_per_wallet=%d times by "
+            "wallet_hash=%s -- falling through to normal payment",
+            code,
+            max_redemptions_per_wallet,
+            wallet_hash,
+        )
         return None
     return redis_client, remaining_key
 
@@ -615,6 +630,21 @@ def attempt_promo_redemption(
     active_store = store or get_promo_store()
     record = _lookup_redeemable_record(active_store, code, resource)
     if record is None:
+        # Deliberately still a silent 402 to the caller (owner decision --
+        # a promo failure must never itself be a blocking error, see the
+        # module docstring) -- this INFO line is for operators grepping
+        # logs, not a change to the caller-facing contract. Doesn't
+        # distinguish "code doesn't exist" from "wrong resource" / "inactive"
+        # / "expired": _lookup_redeemable_record's own point-read already
+        # collapses those (no second query here to tell them apart, same
+        # "keep the hot path to one read" reasoning as everywhere else in
+        # this module).
+        logger.info(
+            "x402 promo: no active code=%s valid for resource=%s (unknown, inactive, wrong "
+            "resource, or expired) -- falling through to normal payment",
+            code,
+            resource,
+        )
         return None
 
     reserved = _reserve_slot(code, record.starting_count)
