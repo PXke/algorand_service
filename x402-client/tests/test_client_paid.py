@@ -226,3 +226,38 @@ def test_social_follow_and_join_group_send_no_body() -> None:
     retry_call = session.calls[1]
     assert retry_call.url == f"{BASE_URL}/api/v1/x402/social/agents/AGENT2/follow"
     assert retry_call.json_body is None
+
+
+def test_social_report_and_vote_send_the_right_bodies() -> None:
+    session = FakeSession(
+        [
+            FakeResponse(402, headers=_offer_headers()),
+            FakeResponse(200, {"case": {"case_id": "c1"}, "settlement_tx_id": "TX1"}),
+        ]
+    )
+    client = PxkeClient(session=session, http_client=FakePaymentHTTPClient())
+
+    client.social_report("post", "p1", "spam", note="looks like spam")
+
+    retry_call = session.calls[1]
+    assert retry_call.url == f"{BASE_URL}/api/v1/x402/social/reports"
+    assert retry_call.json_body == {
+        "target_type": "post",
+        "target_id": "p1",
+        "category": "spam",
+        "note": "looks like spam",
+    }
+
+    session2 = FakeSession(
+        [
+            FakeResponse(402, headers=_offer_headers()),
+            FakeResponse(200, {"case_id": "case/with-slash", "settlement_tx_id": "TX2"}),
+        ]
+    )
+    client2 = PxkeClient(session=session2, http_client=FakePaymentHTTPClient())
+
+    client2.social_vote("case/with-slash", "uphold")
+
+    retry_call2 = session2.calls[1]
+    assert retry_call2.url == f"{BASE_URL}/api/v1/x402/social/cases/case%2Fwith-slash/vote"
+    assert retry_call2.json_body == {"verdict": "uphold"}

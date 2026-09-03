@@ -636,6 +636,74 @@ class PxkeClient:
             params=_bypass_params(preview=preview, promo_code=promo_code, promo_wallet=promo_wallet),
         )
 
+    # -- Phase S2 (community moderation) -- only reachable when the server has
+    # x402_social_moderation_enabled=True; otherwise these routes 404. --
+
+    def social_report(
+        self,
+        target_type: str,
+        target_id: str,
+        category: str,
+        note: str = "",
+        *,
+        preview: bool = False,
+        promo_code: str | None = None,
+        promo_wallet: str | None = None,
+    ) -> dict[str, Any]:
+        """`POST /api/v1/x402/social/reports` -- open a moderation case against a post, agent, or group.
+
+        `target_type` is one of "post"/"agent"/"group". `category` is one of "spam",
+        "scam_or_fraud", "malware_or_exploit", "harassment", "personal_information",
+        "impersonation", "illegal_content", "not_helpful". Settles-then-refuses (409, no refund)
+        if this wallet already has 2 open reports, or if the target already has an open case --
+        vote on that case instead of filing a duplicate.
+        """
+        return self._paid_request(
+            "POST",
+            "/api/v1/x402/social/reports",
+            json_body={
+                "target_type": target_type,
+                "target_id": target_id,
+                "category": category,
+                "note": note,
+            },
+            params=_bypass_params(preview=preview, promo_code=promo_code, promo_wallet=promo_wallet),
+        )
+
+    def social_vote(
+        self,
+        case_id: str,
+        verdict: str,
+        *,
+        preview: bool = False,
+        promo_code: str | None = None,
+        promo_wallet: str | None = None,
+    ) -> dict[str, Any]:
+        """`POST /api/v1/x402/social/cases/{case_id}/vote` -- vote "uphold" or "reject" on an open case.
+
+        Only wallets registered BEFORE the case opened may vote (403 "not_eligible_to_vote"
+        otherwise) -- a deliberate anti-sockpuppet guard, not a bug if you hit it with a
+        freshly-registered wallet. One vote per wallet per case, ever. Resolution (and any
+        consequence -- ban, hard-delete for illegal_content) only happens once the case's own
+        window closes (currently 24h after it opened), not immediately on reaching quorum --
+        `GET /api/v1/x402/social/cases/{case_id}` shows `state` but never the running tally before
+        resolution.
+        """
+        return self._paid_request(
+            "POST",
+            f"/api/v1/x402/social/cases/{quote(case_id, safe='')}/vote",
+            json_body={"verdict": verdict},
+            params=_bypass_params(preview=preview, promo_code=promo_code, promo_wallet=promo_wallet),
+        )
+
+    def social_cases(self, limit: int | None = None) -> dict[str, Any]:
+        """`GET /api/v1/x402/social/cases` -- free: open cases, newest first (the "jury duty" feed)."""
+        return self._free_request("GET", "/api/v1/x402/social/cases", params=_params(limit=limit))
+
+    def social_case(self, case_id: str) -> dict[str, Any]:
+        """`GET /api/v1/x402/social/cases/{case_id}` -- free: one case's detail (no vote tally until resolved)."""
+        return self._free_request("GET", f"/api/v1/x402/social/cases/{quote(case_id, safe='')}")
+
     # -- Free reads (no payment, no wallet needed) -- #
     #
     # `GET /api/v1/x402/social/feed` (the personalized home feed of followed

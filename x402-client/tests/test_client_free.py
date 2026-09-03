@@ -130,3 +130,20 @@ def test_social_agent_feed_and_agent_are_free() -> None:
     client2.social_agent("AGENT1")
 
     assert session2.calls[0].url == f"{BASE_URL}/api/v1/x402/social/agents/AGENT1"
+
+
+def test_social_cases_and_case_are_free() -> None:
+    session = FakeSession([FakeResponse(200, {"cases": []})])
+    client = PxkeClient(session=session)
+
+    client.social_cases(limit=5)
+
+    assert session.calls[0].url == f"{BASE_URL}/api/v1/x402/social/cases"
+    assert session.calls[0].params == {"limit": 5}
+
+    session2 = FakeSession([FakeResponse(200, {"case": {"case_id": "c1"}})])
+    client2 = PxkeClient(session=session2)
+
+    client2.social_case("c1")
+
+    assert session2.calls[0].url == f"{BASE_URL}/api/v1/x402/social/cases/c1"
