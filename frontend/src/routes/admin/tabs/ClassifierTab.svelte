@@ -2,6 +2,7 @@
   import type { AdminApi } from '../../../lib/api/admin'
   import Markdown from '../../../components/Markdown.svelte'
   import { LatestOnly } from '../../../lib/asyncGuard'
+  import { isHttp } from '../../../lib/sanitizeHtml'
 
   type ReviewItem = Record<string, unknown>
   type Quality = 'high' | 'medium' | 'low' | 'spam'
@@ -472,9 +473,13 @@
       <h3 class="review-title">
         {String(current.page_title ?? current.article_title ?? current.url ?? '')}
       </h3>
-      <a class="review-url" href={String(current.url)} target="_blank" rel="noopener noreferrer">
-        {String(current.url ?? '')}
-      </a>
+      {#if isHttp(String(current.url ?? ''))}
+        <a class="review-url" href={String(current.url)} target="_blank" rel="noopener noreferrer">
+          {String(current.url ?? '')}
+        </a>
+      {:else}
+        <span class="review-url">{String(current.url ?? '')}</span>
+      {/if}
 
       {#if typeof current.grade === 'number'}
         <section class="grade-block">

@@ -23,6 +23,7 @@
 
   $effect(() => {
     const t = token
+    let cancelled = false
     loading = true
     error = null
     revoked = false
@@ -32,20 +33,25 @@
           sharingApi.fetchSharedArticle(t),
           sharingApi.listSharedComments(t),
         ])
+        if (cancelled) return
         article = articleResp.article
         isDraft = articleResp.is_draft
         linkLabel = articleResp.link_label
         comments = commentsResp.items
       } catch (e) {
+        if (cancelled) return
         if (e instanceof ApiException && e.statusCode === 403) {
           revoked = true
         } else {
           error = e instanceof Error ? e.message : String(e)
         }
       } finally {
-        loading = false
+        if (!cancelled) loading = false
       }
     })()
+    return () => {
+      cancelled = true
+    }
   })
 
   function saveAuthorName(): void {

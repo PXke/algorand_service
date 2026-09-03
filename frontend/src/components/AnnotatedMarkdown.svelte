@@ -97,6 +97,7 @@
     const rect = mark.getBoundingClientRect()
     const wrapperRect = wrapperEl.getBoundingClientRect()
     activeCommentId = id
+    deleteError = null
     popoverPos = {
       top: rect.bottom - wrapperRect.top + 6,
       left: rect.left - wrapperRect.left,
@@ -193,11 +194,33 @@
     composerError = null
   }
 
+  let deletingId = $state<string | null>(null)
+  let deleteError = $state<string | null>(null)
+
+  // Shared by the popover's "Delete" button and each orphaned-comment row
+  // below -- both used to call onDeleteComment directly from an onclick
+  // handler with no error handling, leaving a rejected delete an unhandled
+  // promise the user never saw.
+  async function deleteComment(commentId: string): Promise<void> {
+    if (!onDeleteComment || deletingId) return
+    deletingId = commentId
+    deleteError = null
+    try {
+      await onDeleteComment(commentId)
+      if (activeCommentId === commentId) {
+        activeCommentId = null
+        popoverPos = null
+      }
+    } catch (e) {
+      deleteError = e instanceof Error ? e.message : String(e)
+    } finally {
+      deletingId = null
+    }
+  }
+
   async function deleteActive(): Promise<void> {
-    if (!activeCommentId || !onDeleteComment) return
-    await onDeleteComment(activeCommentId)
-    activeCommentId = null
-    popoverPos = null
+    if (!activeCommentId) return
+    await deleteComment(activeCommentId)
   }
 
   const activeComment = $derived(activeCommentId ? (commentsById().get(activeCommentId) ?? null) : null)
@@ -219,9 +242,17 @@
         {new Date(activeComment.created_at_epoch * 1000).toLocaleDateString()}
       </div>
       <p class="comment-body">{activeComment.body}</p>
+      {#if deleteError}
+        <p class="composer-error">{deleteError}</p>
+      {/if}
       {#if allowDelete}
-        <button type="button" class="btn compact btn-danger" onclick={deleteActive}>
-          Delete
+        <button
+          type="button"
+          class="btn compact btn-danger"
+          disabled={deletingId === activeComment.comment_id}
+          onclick={deleteActive}
+        >
+          {deletingId === activeComment.comment_id ? 'Deleting…' : 'Delete'}
         </button>
       {/if}
     </div>
@@ -265,6 +296,9 @@
     <p class="admin-muted small">
       These were anchored to text that no longer appears in the article (it was likely edited).
     </p>
+    {#if deleteError}
+      <p class="composer-error">{deleteError}</p>
+    {/if}
     {#each orphanedComments as comment (comment.comment_id)}
       <div class="orphaned-comment">
         {#if comment.anchor_quote}
@@ -279,9 +313,10 @@
           <button
             type="button"
             class="btn compact btn-danger"
-            onclick={() => onDeleteComment?.(comment.comment_id)}
+            disabled={deletingId === comment.comment_id}
+            onclick={() => deleteComment(comment.comment_id)}
           >
-            Delete
+            {deletingId === comment.comment_id ? 'Deleting…' : 'Delete'}
           </button>
         {/if}
       </div>

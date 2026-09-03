@@ -20,8 +20,8 @@ export function createAdminApi(wallet: string, token: string | null) {
       api.postJson('/api/v1/admin/briefs', body, h()),
     assignBriefNow: (briefId: string) =>
       api.postJson(`/api/v1/admin/briefs/${briefId}/assign-now`, {}, h()),
-    listPendingFeedBacklog: () =>
-      api.getJson('/api/v1/admin/pending-feed-backlog', h()),
+    listPendingFeedBacklog: (signal?: AbortSignal) =>
+      api.getJson('/api/v1/admin/pending-feed-backlog', { headers: h(), signal }),
     getTrainingStats: () => api.getJson('/api/v1/admin/training-stats', h()),
     triggerRetrain: () => api.postJson('/api/v1/admin/retrain', {}, h()),
     listDomains: (status = 'all', page = 1, pageSize = 25, signal?: AbortSignal) =>
@@ -49,12 +49,19 @@ export function createAdminApi(wallet: string, token: string | null) {
       api.getJson('/api/v1/admin/tool-suggestions', h()),
     listComposeFeedback: () =>
       api.getJson('/api/v1/admin/compose-feedback', h()),
-    listComposeSessions: (opts?: { before?: string | null; limit?: number }) => {
+    listComposeSessions: (opts?: {
+      before?: string | null
+      limit?: number
+      signal?: AbortSignal
+    }) => {
       const q = new URLSearchParams()
       if (opts?.before) q.set('before', opts.before)
       if (opts?.limit) q.set('limit', String(opts.limit))
       const qs = q.toString()
-      return api.getJson(`/api/v1/admin/compose-sessions${qs ? `?${qs}` : ''}`, h())
+      return api.getJson(`/api/v1/admin/compose-sessions${qs ? `?${qs}` : ''}`, {
+        headers: h(),
+        signal: opts?.signal,
+      })
     },
     getComposeSessionDetail: (sessionId: string, createdAt: string) =>
       api.getJson(
@@ -142,15 +149,15 @@ export function createAdminApi(wallet: string, token: string | null) {
     // Editorial-room artifact system — backs the Queue tab's ranked
     // pending-artifact list, the real-selection lookup, and the
     // pin-for-tomorrow action.
-    artifactsToComposePreview: (day?: string) =>
+    artifactsToComposePreview: (day?: string, signal?: AbortSignal) =>
       api.getJson(
         `/api/v1/admin/artifacts/to-compose-preview${day ? `?day=${encodeURIComponent(day)}` : ''}`,
-        h(),
+        { headers: h(), signal },
       ),
-    artifactsToComposeSelected: (day?: string) =>
+    artifactsToComposeSelected: (day?: string, signal?: AbortSignal) =>
       api.getJson(
         `/api/v1/admin/artifacts/to-compose-selected${day ? `?day=${encodeURIComponent(day)}` : ''}`,
-        h(),
+        { headers: h(), signal },
       ),
     pinArtifactForTomorrow: (artifactId: string) =>
       api.postJson(`/api/v1/admin/artifacts/${encodeURIComponent(artifactId)}/pin-for-tomorrow`, {}, h()),

@@ -1,5 +1,7 @@
 <script lang="ts">
   import type { AdminApi } from '../../../lib/api/admin'
+  import { isHttp } from '../../../lib/sanitizeHtml'
+  import { LatestOnly } from '../../../lib/asyncGuard'
 
   let {
     admin,
@@ -220,17 +222,26 @@
   let loading = $state(true)
   let error = $state<string | null>(null)
 
+  // Typing into the "Day" date input fires one load() per keystroke/digit;
+  // without this, a slower response for an earlier day could resolve after
+  // a faster one for the day currently on screen and clobber it with the
+  // wrong day's selection/pool/backlog (same class of bug DomainsTab's
+  // `inflight` guards against).
+  const inflight = new LatestOnly()
+
   async function load() {
+    const { signal, stale } = inflight.next()
     loading = true
     error = null
     try {
       const [res, sel, b] = await Promise.all([
-        admin.artifactsToComposePreview(day) as Promise<Record<string, unknown>>,
+        admin.artifactsToComposePreview(day, signal) as Promise<Record<string, unknown>>,
         admin
-          .artifactsToComposeSelected(day)
+          .artifactsToComposeSelected(day, signal)
           .catch(() => ({ items: [] })) as Promise<Record<string, unknown>>,
-        admin.listPendingFeedBacklog().catch(() => ({ items: [] })),
+        admin.listPendingFeedBacklog(signal).catch(() => ({ items: [] })),
       ])
+      if (stale()) return
       items = Array.isArray(res.items) ? (res.items as PreviewItem[]) : []
       humanPicked = Boolean(res.human_picked)
       platformSlotsFilled = Number(res.platform_slots_filled ?? 0)
@@ -239,9 +250,10 @@
       selected = Array.isArray(sel.items) ? (sel.items as SelectedItem[]) : []
       backlog = Array.isArray(b.items) ? (b.items as Array<Record<string, unknown>>) : []
     } catch (e) {
+      if (stale() || (e instanceof DOMException && e.name === 'AbortError')) return
       error = e instanceof Error ? e.message : String(e)
     } finally {
-      loading = false
+      if (!stale()) loading = false
     }
   }
 
@@ -314,6 +326,12 @@
     return pool === 'new_service' ? 'new service' : 'update / diff'
   }
 
+  // Every url below comes off crawled/scraped artifact content -- a
+  // javascript:/data: value there must not render as a clickable link.
+  function httpHref(url: string | null): string | null {
+    return url && isHttp(url) ? url : null
+  }
+
   $effect(() => {
     void day
     void load()
@@ -372,23 +390,27 @@
               {@const transcript = metaPayloadString(d, 'transcript_text')}
               <div class="kind-head">
                 <span class="kind-badge kind-youtube">▶ YouTube video</span>
-                {#if d.url}
-                  <a class="kind-link" href={d.url} target="_blank" rel="noopener noreferrer"
+                {#if httpHref(d.url)}
+                  <a class="kind-link" href={httpHref(d.url)} target="_blank" rel="noopener noreferrer"
                     >Watch on YouTube ↗</a
                   >
                 {/if}
               </div>
               <div class="youtube-card">
-                {#if thumb}
+                {#if thumb && httpHref(d.url)}
                   <a
                     class="youtube-thumb-link"
-                    href={d.url ?? undefined}
+                    href={httpHref(d.url)}
                     target="_blank"
                     rel="noopener noreferrer"
                   >
                     <img class="youtube-thumb" src={thumb} alt="" loading="lazy" />
                     <span class="youtube-play" aria-hidden="true">▶</span>
                   </a>
+                {:else if thumb}
+                  <span class="youtube-thumb-link">
+                    <img class="youtube-thumb" src={thumb} alt="" loading="lazy" />
+                  </span>
                 {/if}
                 <div class="youtube-body">
                   <strong class="youtube-title">{d.title || '(untitled video)'}</strong>
@@ -406,8 +428,8 @@
               {@const displayName = metaString(d, 'display_name')}
               <div class="kind-head">
                 <span class="kind-badge kind-bluesky">🦋 Bluesky post</span>
-                {#if d.url}
-                  <a class="kind-link" href={d.url} target="_blank" rel="noopener noreferrer"
+                {#if httpHref(d.url)}
+                  <a class="kind-link" href={httpHref(d.url)} target="_blank" rel="noopener noreferrer"
                     >View on Bluesky ↗</a
                   >
                 {/if}
@@ -425,8 +447,8 @@
               {@const posts = forumPosts(d.content)}
               <div class="kind-head">
                 <span class="kind-badge kind-forum">💬 Forum thread</span>
-                {#if d.url}
-                  <a class="kind-link" href={d.url} target="_blank" rel="noopener noreferrer"
+                {#if httpHref(d.url)}
+                  <a class="kind-link" href={httpHref(d.url)} target="_blank" rel="noopener noreferrer"
                     >Open thread ↗</a
                   >
                 {/if}
@@ -447,7 +469,11 @@
             {:else}
               {#if d.url}
                 <p class="small detail-url">
-                  <a href={d.url} target="_blank" rel="noopener noreferrer">{d.url}</a>
+                  {#if httpHref(d.url)}
+                    <a href={httpHref(d.url)} target="_blank" rel="noopener noreferrer">{d.url}</a>
+                  {:else}
+                    {d.url}
+                  {/if}
                 </p>
               {/if}
               <pre class="artifact-content">{d.content || '(no content)'}</pre>

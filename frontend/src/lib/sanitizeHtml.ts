@@ -48,6 +48,21 @@ function installUriGuardHook(): void {
   hookInstalled = true
 }
 
+/**
+ * Guards a bare `href`/`src` value (not run through `sanitizeArticleHtml`
+ * above -- e.g. a plain `<a href={...}>` binding rather than an `{@html}`
+ * block) that comes from crawler- or LLM-supplied content: a listing URL,
+ * an artifact's source link, a classifier review's page URL. Svelte does
+ * not sanitize attribute bindings, so an unguarded `javascript:`/`data:`
+ * value there is clickable script execution, not just markup. Only
+ * scheme-prefixed http(s) links are considered safe to render as a link;
+ * anything else (including a bare domain-looking string with no scheme)
+ * should fall back to plain text rather than an `<a>`.
+ */
+export function isHttp(url: string): boolean {
+  return /^https?:\/\//i.test(url)
+}
+
 /** Sanitize a trusted-shape-but-untrusted-content HTML string for `{@html}`. */
 export function sanitizeArticleHtml(html: string): string {
   if (!html) return ''
@@ -70,5 +85,23 @@ export function sanitizeArticleHtml(html: string): string {
       'link',
       'meta',
     ],
+  })
+}
+
+/**
+ * Sanitizes Typesense's `<mark>` highlight wrapper around a search result's
+ * title/snippet -- the underlying text is writer/crawled content (same
+ * untrusted-content class as `sanitizeArticleHtml` above), just rendered
+ * into a result row rather than an article body, so it gets a single-tag
+ * allowlist instead of the full structural one: only a bare `<mark>` with no
+ * attributes survives, everything else (including any literal `<mark>` that
+ * happened to be part of the source content rather than Typesense's own
+ * wrapping) is dropped to text.
+ */
+export function sanitizeHighlightHtml(html: string): string {
+  if (!html) return ''
+  return DOMPurify.sanitize(html, {
+    ALLOWED_TAGS: ['mark'],
+    ALLOWED_ATTR: [],
   })
 }

@@ -7,6 +7,7 @@
   import { route, navigate } from '../lib/router'
   import { ApiException } from '../lib/api/client'
   import { LatestOnly } from '../lib/asyncGuard'
+  import { sanitizeHighlightHtml } from '../lib/sanitizeHtml'
   import Icon from '../components/Icon.svelte'
   import PageMeta from '../components/PageMeta.svelte'
   import { SITE_TAGLINE } from '../lib/seo'
@@ -27,13 +28,7 @@
 
   /** Typesense wraps matches in `<mark>`; keep only that markup. */
   function highlightHtml(raw: string): string {
-    const escaped = raw
-      .replaceAll('&', '&amp;')
-      .replaceAll('<', '&lt;')
-      .replaceAll('>', '&gt;')
-    return escaped
-      .replaceAll('&lt;mark&gt;', '<mark>')
-      .replaceAll('&lt;/mark&gt;', '</mark>')
+    return sanitizeHighlightHtml(raw)
   }
 
   function titleOf(item: Record<string, unknown>): string {

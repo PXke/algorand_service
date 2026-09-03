@@ -35,9 +35,14 @@
 
   $effect(() => {
     if (!walletOpen || WalletDialog) return
-    void import('./WalletDialog.svelte').then((m) => {
-      WalletDialog = m.default
-    })
+    void import('./WalletDialog.svelte')
+      .then((m) => {
+        WalletDialog = m.default
+      })
+      .catch((e) => {
+        console.error('Failed to load WalletDialog', e)
+        walletOpen = false
+      })
   })
 
   /* The masthead tab row carries content destinations only. Top, About and

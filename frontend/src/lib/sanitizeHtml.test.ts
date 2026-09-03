@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { describe, expect, it } from 'vitest'
-import { sanitizeArticleHtml } from './sanitizeHtml'
+import { isHttp, sanitizeArticleHtml, sanitizeHighlightHtml } from './sanitizeHtml'
 
 describe('sanitizeArticleHtml', () => {
   it('strips an onerror handler off an img tag', () => {
@@ -98,5 +98,53 @@ describe('sanitizeArticleHtml', () => {
 
   it('returns an empty string for empty input', () => {
     expect(sanitizeArticleHtml('')).toBe('')
+  })
+})
+
+describe('isHttp', () => {
+  it('accepts http and https URLs', () => {
+    expect(isHttp('https://example.com')).toBe(true)
+    expect(isHttp('http://example.com')).toBe(true)
+  })
+
+  it('rejects a javascript: URI', () => {
+    expect(isHttp('javascript:alert(1)')).toBe(false)
+  })
+
+  it('rejects a data: URI', () => {
+    expect(isHttp('data:text/html,<script>alert(1)</script>')).toBe(false)
+  })
+
+  it('rejects a bare domain with no scheme', () => {
+    expect(isHttp('example.com')).toBe(false)
+  })
+
+  it('rejects an empty string', () => {
+    expect(isHttp('')).toBe(false)
+  })
+})
+
+describe('sanitizeHighlightHtml', () => {
+  it('keeps a bare Typesense <mark> wrapper', () => {
+    expect(sanitizeHighlightHtml('before <mark>hit</mark> after')).toBe(
+      'before <mark>hit</mark> after',
+    )
+  })
+
+  it('escapes an unrelated tag in the source text instead of rendering it', () => {
+    const out = sanitizeHighlightHtml('<img src=x onerror=alert(1)>hi')
+    expect(out).not.toMatch(/onerror/i)
+    expect(out).not.toMatch(/<img/i)
+    expect(out).toContain('hi')
+  })
+
+  it('strips attributes off a mark tag rather than keeping them', () => {
+    const out = sanitizeHighlightHtml('<mark onclick="alert(1)">hit</mark>')
+    expect(out).not.toMatch(/onclick/i)
+    expect(out).toContain('<mark>hit</mark>')
+  })
+
+  it('returns an empty string for empty input', () => {
+    expect(sanitizeHighlightHtml('')).toBe('')
   })
 })

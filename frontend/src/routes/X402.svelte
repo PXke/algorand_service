@@ -18,6 +18,7 @@
   import { formatDispatchStamp } from '../lib/liveClock'
   import PageMeta from '../components/PageMeta.svelte'
   import { SITE_TAGLINE } from '../lib/seo'
+  import { isHttp } from '../lib/sanitizeHtml'
 
   type X402Tab = 'directory' | 'board' | 'requests' | 'grades' | 'news'
 
@@ -143,10 +144,6 @@
 
   function shortAddr(a: string): string {
     return a.length > 12 ? `${a.slice(0, 6)}…${a.slice(-4)}` : a
-  }
-
-  function isHttp(url: string): boolean {
-    return /^https?:\/\//i.test(url)
   }
 
   function go(href: string, e: MouseEvent) {
@@ -380,9 +377,13 @@
         {#each newsItems as item, i (`${item.article_id}-${i}`)}
           <li class="row">
             <div class="row-head">
-              <a class="name" href={item.url} target="_blank" rel="noopener noreferrer nofollow"
-                >{item.title}</a
-              >
+              {#if isHttp(item.url)}
+                <a class="name" href={item.url} target="_blank" rel="noopener noreferrer nofollow"
+                  >{item.title}</a
+                >
+              {:else}
+                <span class="name">{item.title}</span>
+              {/if}
             </div>
             {#if item.summary}
               <p class="desc">{item.summary}</p>

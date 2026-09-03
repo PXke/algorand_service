@@ -277,9 +277,16 @@ export async function cancelWalletSignIn(): Promise<void> {
 }
 
 export function wakeWalletTransport(): void {
-  void import('./walletProviders').then(({ loadWalletAdapter }) =>
-    loadWalletAdapter(activeWalletId).then((adapter) => adapter.wakeTransport()),
-  )
+  void import('./walletProviders')
+    .then(({ loadWalletAdapter }) =>
+      loadWalletAdapter(activeWalletId).then((adapter) => adapter.wakeTransport()),
+    )
+    .catch((e) => {
+      // Best-effort wake of an already-paired wallet transport -- a failure
+      // here must not surface to the caller (WalletDialog fires this from a
+      // mount effect with nothing to show an error in), just get logged.
+      console.error('wakeWalletTransport failed', e)
+    })
 }
 
 export async function logout(): Promise<void> {

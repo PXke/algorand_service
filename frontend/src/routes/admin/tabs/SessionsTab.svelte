@@ -1,5 +1,6 @@
 <script lang="ts">
   import type { AdminApi } from '../../../lib/api/admin'
+  import { LatestOnly } from '../../../lib/asyncGuard'
 
   type SessionSummary = Record<string, unknown>
   type SessionDetail = Record<string, unknown>
@@ -165,31 +166,32 @@
     }
   }
 
+  // The manual Refresh button, the "Load more" button (bumping pageLimit),
+  // and the poll timer below can all call load() while a previous call is
+  // still in flight -- without this, a slower earlier response (e.g. from
+  // before pageLimit grew) resolving after a newer one would clobber the
+  // list currently on screen with a shorter/staler page.
+  const inflight = new LatestOnly()
+
   async function load(showSpinner = true) {
+    const { signal, stale } = inflight.next()
     if (showSpinner) loading = true
     error = null
     try {
-      const res = await admin.listComposeSessions({ limit: pageLimit })
+      const res = await admin.listComposeSessions({ limit: pageLimit, signal })
+      if (stale()) return
       const items = Array.isArray(res.items) ? (res.items as SessionSummary[]) : []
       sessions = items
       hasMore = items.length >= pageLimit
       refreshExpandedActiveDetails(items)
     } catch (e) {
+      if (stale() || (e instanceof DOMException && e.name === 'AbortError')) return
+      // A background poll (showSpinner=false) stays silent -- the next poll
+      // retries; only a spinner-driving call (manual refresh / load more)
+      // surfaces the error.
       if (showSpinner) error = e instanceof Error ? e.message : String(e)
     } finally {
-      if (showSpinner) loading = false
-    }
-  }
-
-  async function quietReload() {
-    try {
-      const res = await admin.listComposeSessions({ limit: pageLimit })
-      const items = Array.isArray(res.items) ? (res.items as SessionSummary[]) : []
-      sessions = items
-      hasMore = items.length >= pageLimit
-      refreshExpandedActiveDetails(items)
-    } catch {
-      // Silent — next poll retries; manual refresh surfaces errors.
+      if (!stale() && showSpinner) loading = false
     }
   }
 
@@ -306,7 +308,7 @@
     function schedule() {
       timer = setTimeout(async () => {
         if (cancelled) return
-        await quietReload()
+        await load(false)
         if (!cancelled) schedule()
       }, interval)
     }

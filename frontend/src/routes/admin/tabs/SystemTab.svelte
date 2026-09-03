@@ -1,5 +1,6 @@
 <script lang="ts">
   import type { AdminApi } from '../../../lib/api/admin'
+  import { LatestOnly } from '../../../lib/asyncGuard'
 
   let {
     admin,
@@ -87,13 +88,23 @@
       })
   }
 
+  // The mount effect and the Refresh button can both call load(); each
+  // per-section fetch (checks/workers/scrapers) is idempotent so a slower
+  // older batch overwriting a section with equally-live data is harmless,
+  // but without this an older batch's `fetchedAt` could still land after a
+  // newer batch's and show a stale "as of" time for data that's actually
+  // current.
+  const inflight = new LatestOnly()
+
   async function load() {
+    const { stale } = inflight.next()
     // Fire every section's fetch at once; each updates its own state as
     // soon as it resolves instead of waiting on the others. `fetchedAt`
     // just timestamps the toolbar once the whole batch has settled — it
     // doesn't gate any section's render.
     const tasks = [...CHECK_NAMES.map((name) => loadCheck(name)), loadWorkers(), loadScrapers()]
     await Promise.allSettled(tasks)
+    if (stale()) return
     fetchedAt = new Date()
   }
 
