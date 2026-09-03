@@ -1988,8 +1988,21 @@ def _recompose_via_writer(
     storage_score: float,
     kind: str | None,
     old_article_id: str,
+    service_id: str,
+    og_image: str,
 ) -> tuple[ArticleComposeResult | None, dict[str, str] | None]:
-    """Compose a fresh proposal for a recompose. Returns (composed, None) on success, or (None, error_response) on a busy-lock, writer-spike, LLM failure, or admin-sources read error — restoring/re-enqueuing the review on failure so it isn't lost."""
+    """Compose a fresh proposal for a recompose. Returns (composed, None) on success, or (None, error_response) on a busy-lock, writer-spike, LLM failure, or admin-sources read error — restoring/re-enqueuing the review on failure so it isn't lost.
+
+    `service_id`/`og_image` are the caller's own already-carried-forward values (recompose_review's
+    "Carry forward service_id / hero image from the prior proposal's metadata" step) -- every
+    re-enqueue below must echo them straight back into the fresh review's metadata, unchanged, so a
+    SECOND recompose attempt (e.g. after a peak-hours deferral) still has them to carry forward
+    again. Root-caused 2026-09-03: this function used to re-enqueue with only article_id/source/
+    recompose_failed, silently dropping service_id -- the next attempt's `old.get("service_id")`
+    then fell back to the raw url, corrupting the article's service_id column (and defeating the
+    hero-image homepage-slug fallback, which requires a real slug, not a URL) on any review that
+    survived a deferral before finally composing.
+    """
     from app.modules.ai.llm_provider import LLMCreditError, LLMError
     from app.modules.ai.llm_purpose_router import PeakHoursBlockedError
     from app.modules.ai.story_spike import StorySpikedError
@@ -2022,6 +2035,8 @@ def _recompose_via_writer(
             metadata={
                 "article_id": old_article_id,
                 "source": kind or "web",
+                "service_id": service_id,
+                "og_image": og_image,
                 "recompose_failed": f"admin_sources_unavailable: {exc}"[:200],
             },
         )
@@ -2070,6 +2085,8 @@ def _recompose_via_writer(
             metadata={
                 "article_id": old_article_id,
                 "source": kind or "web",
+                "service_id": service_id,
+                "og_image": og_image,
                 "recompose_busy": True,
             },
         )
@@ -2115,6 +2132,8 @@ def _recompose_via_writer(
             metadata={
                 "article_id": old_article_id,
                 "source": kind or "web",
+                "service_id": service_id,
+                "og_image": og_image,
                 "recompose_failed": str(exc)[:200],
             },
         )
@@ -2217,6 +2236,8 @@ def recompose_review(review_id: str) -> dict[str, str]:
         storage_score=storage_score,
         kind=kind,
         old_article_id=old_article_id,
+        service_id=service_id,
+        og_image=og_image,
     )
     if compose_error is not None:
         return compose_error

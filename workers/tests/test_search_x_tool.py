@@ -429,6 +429,8 @@ def test_recompose_via_writer_reinjects_prior_search_x_into_enrichment_block(
         storage_score=0.5,
         kind="web",
         old_article_id="art1",
+        service_id="example-com",
+        og_image="",
     )
 
     assert "algorand quantum" in captured["enrichment_block"]
@@ -466,6 +468,8 @@ def test_recompose_via_writer_no_prior_findings_passes_empty_enrichment_block(
         storage_score=0.5,
         kind="web",
         old_article_id="art1",
+        service_id="example-com",
+        og_image="",
     )
 
     assert captured["enrichment_block"] == ""

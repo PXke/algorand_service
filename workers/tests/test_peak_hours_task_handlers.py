@@ -50,7 +50,13 @@ def test_compose_or_error_reports_skipped_peak_hours(monkeypatch: pytest.MonkeyP
 def test_recompose_via_writer_reports_skipped_peak_hours_and_restores_review(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """_recompose_via_writer must both report skipped_peak_hours AND still call enqueue_classifier_review to restore the original proposal -- the same recovery a genuine Mistral failure triggers, so a peak-hours defer never silently drops the review."""
+    """_recompose_via_writer must both report skipped_peak_hours AND still call enqueue_classifier_review to restore the original proposal -- the same recovery a genuine Mistral failure triggers, so a peak-hours defer never silently drops the review.
+
+    Also: the re-enqueued metadata must carry service_id/og_image forward unchanged (root-caused
+    2026-09-03 -- these used to be silently dropped, so a SECOND recompose attempt after the
+    deferral fell back to the raw url as service_id, corrupting the eventual article's service_id
+    column and defeating the hero-image homepage-slug fallback).
+    """
     monkeypatch.setattr(pt, "compose_scrape_article", _raise_peak_blocked)
 
     restored: dict = {}
@@ -71,10 +77,14 @@ def test_recompose_via_writer_reports_skipped_peak_hours_and_restores_review(
         storage_score=0.5,
         kind="web",
         old_article_id="art1",
+        service_id="example-com",
+        og_image="https://example.com/share.png",
     )
     assert error is not None
     assert error["status"] == "skipped_peak_hours"
     assert restored["url"] == "https://example.com/x"
+    assert restored["metadata"]["service_id"] == "example-com"
+    assert restored["metadata"]["og_image"] == "https://example.com/share.png"
     assert restored["metadata"]["article_id"] == "art1"
 
 
