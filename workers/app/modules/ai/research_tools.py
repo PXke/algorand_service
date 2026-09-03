@@ -401,7 +401,10 @@ def _tool_search_x(query: str) -> dict[str, Any]:
     # every result genuinely IS low-engagement) is more reliable than a
     # static schema warning, since it responds to the actual numbers instead
     # of hoping the model remembers a general instruction.
-    if posts and max((p.get("likes", 0) + p.get("reposts", 0) + p.get("replies", 0)) for p in posts) < 3:
+    if (
+        posts
+        and max((p.get("likes", 0) + p.get("reposts", 0) + p.get("replies", 0)) for p in posts) < 3
+    ):
         result["engagement_note"] = (
             "Every result has minimal engagement (under 3 combined likes/reposts/"
             "replies). Cite a specific post only if its CONTENT is genuinely useful "
@@ -1274,9 +1277,7 @@ def _bundle_script_urls(html: str, base: str) -> list[str]:
     return script_urls[:_BUNDLE_GREP_MAX_SCRIPTS]
 
 
-def _bundle_body_matches(
-    body: str, src: str, term: str, *, limit: int
-) -> list[dict[str, Any]]:
+def _bundle_body_matches(body: str, src: str, term: str, *, limit: int) -> list[dict[str, Any]]:
     """Every occurrence of term (case-insensitive) in one script body, with surrounding context, up to limit."""
     matches: list[dict[str, Any]] = []
     body_lower = body.lower()
@@ -1488,9 +1489,13 @@ def _fetch_url_internal(
         body = resp.text
         with contextlib.suppress(ValueError):
             body = json.dumps(json.loads(resp.text), indent=2)
-        return _slice_document_text(body, url=base, title=base, links=[], max_chars=cap, offset=offset)
+        return _slice_document_text(
+            body, url=base, title=base, links=[], max_chars=cap, offset=offset
+        )
     if "html" not in ctype_lower and "xml" in ctype_lower:
-        return _slice_document_text(resp.text, url=base, title=base, links=[], max_chars=cap, offset=offset)
+        return _slice_document_text(
+            resp.text, url=base, title=base, links=[], max_chars=cap, offset=offset
+        )
     if "html" not in ctype_lower and "text" not in ctype_lower:
         return {"url": u, "error": f"unsupported content-type: {ctype[:60]}"}
 
@@ -2141,8 +2146,8 @@ def _tool_list_nfd_segments(parent_name: str, limit: int = 20) -> dict[str, Any]
         # (segmentCount) independent of pagination below -- surface it
         # directly so a capped `limit` never silently understates "how many
         # identities has this project issued".
-        reported_total = (parent_data.get("properties") or {}).get("internal", {}).get(
-            "segmentCount"
+        reported_total = (
+            (parent_data.get("properties") or {}).get("internal", {}).get("segmentCount")
         )
         browse_resp = _guarded_get(
             "https://api.nf.domains/nfd/browse",
@@ -3198,8 +3203,17 @@ _CAPTURE_SCREENSHOT_SCHEMA = {
             "whole scrollable page (e.g. a long leaderboard); the default "
             "(viewport only) is what a real visitor sees without "
             "scrolling. Slow (loads a full browser) — expect several "
-            "seconds. You will be shown the actual image right after this "
-            "call returns — look at it before deciding. If it genuinely "
+            "seconds. Whether you'll be shown the actual image content "
+            "afterward depends on whether the model answering this call is "
+            "vision-capable — most are not. If this is your first "
+            "capture_screenshot in this conversation, you don't yet know "
+            "which case you're in; treat 'I will not see it, only get back "
+            "an image_url string' as the default assumption. If you truly "
+            "cannot see it: don't spend a call hoping to visually confirm "
+            "something (whether a popup is showing, a chart's exact "
+            "values, a layout detail) — only capture in that case when the "
+            "image_url itself is worth embedding sight-unseen alongside "
+            "evidence you already have from text. If it genuinely "
             "earns a place in the article, EMBED IT YOURSELF in the "
             "article body as markdown: ![caption](image_url), using the "
             "image_url value from this tool's own result. Nothing does "
