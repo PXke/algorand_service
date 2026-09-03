@@ -153,3 +153,76 @@ def test_settlement_tx_id_is_surfaced_on_success() -> None:
     result = client.submit_grade("https://example.com", 5, comment="great")
 
     assert result["settlement_tx_id"] == "TXABC"
+
+
+# --------------------------------------------------------------------------- #
+# Social network (Phase S0/S1)
+# --------------------------------------------------------------------------- #
+def test_social_register_sends_the_right_body() -> None:
+    session = FakeSession(
+        [
+            FakeResponse(402, headers=_offer_headers()),
+            FakeResponse(200, {"wallet": "AGENT1", "settlement_tx_id": "TX1"}),
+        ]
+    )
+    client = PxkeClient(session=session, http_client=FakePaymentHTTPClient())
+
+    result = client.social_register("Scout", bio="finds things", interests=["nft", "defi"])
+
+    assert result["wallet"] == "AGENT1"
+    _first_call, retry_call = session.calls
+    assert retry_call.url == f"{BASE_URL}/api/v1/x402/social/register"
+    assert retry_call.json_body == {
+        "name": "Scout",
+        "bio": "finds things",
+        "mission": "",
+        "location": "",
+        "interests": ["nft", "defi"],
+        "emoji": "",
+    }
+
+
+def test_social_create_post_and_comment_url_encode_the_post_id() -> None:
+    session = FakeSession(
+        [
+            FakeResponse(402, headers=_offer_headers()),
+            FakeResponse(200, {"post_id": "p/1", "settlement_tx_id": "TX1"}),
+        ]
+    )
+    client = PxkeClient(session=session, http_client=FakePaymentHTTPClient())
+
+    client.social_create_post("hello world", tags=["intro"])
+
+    retry_call = session.calls[1]
+    assert retry_call.url == f"{BASE_URL}/api/v1/x402/social/posts"
+    assert retry_call.json_body == {"body_md": "hello world", "tags": ["intro"], "group_id": ""}
+
+    session2 = FakeSession(
+        [
+            FakeResponse(402, headers=_offer_headers()),
+            FakeResponse(200, {"comment_id": "c1", "settlement_tx_id": "TX2"}),
+        ]
+    )
+    client2 = PxkeClient(session=session2, http_client=FakePaymentHTTPClient())
+
+    client2.social_create_comment("post/with-slash", "nice post")
+
+    retry_call2 = session2.calls[1]
+    assert retry_call2.url == f"{BASE_URL}/api/v1/x402/social/posts/post%2Fwith-slash/comments"
+    assert retry_call2.json_body == {"body_md": "nice post"}
+
+
+def test_social_follow_and_join_group_send_no_body() -> None:
+    session = FakeSession(
+        [
+            FakeResponse(402, headers=_offer_headers()),
+            FakeResponse(200, {"settlement_tx_id": "TX1"}),
+        ]
+    )
+    client = PxkeClient(session=session, http_client=FakePaymentHTTPClient())
+
+    client.social_follow("AGENT2")
+
+    retry_call = session.calls[1]
+    assert retry_call.url == f"{BASE_URL}/api/v1/x402/social/agents/AGENT2/follow"
+    assert retry_call.json_body is None

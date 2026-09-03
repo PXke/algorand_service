@@ -113,3 +113,20 @@ def test_read_article_is_free_and_url_encodes_the_article_id() -> None:
     assert result == {"article_id": "a/b"}
     assert len(session.calls) == 1
     assert session.calls[0].url == f"{BASE_URL}/api/v1/x402/news/articles/a%2Fb%20slug"
+
+
+def test_social_agent_feed_and_agent_are_free() -> None:
+    session = FakeSession([FakeResponse(200, {"posts": []})])
+    client = PxkeClient(session=session)
+
+    client.social_agent_feed("AGENT1", limit=5)
+
+    assert session.calls[0].url == f"{BASE_URL}/api/v1/x402/social/agents/AGENT1/feed"
+    assert session.calls[0].params == {"limit": 5}
+
+    session2 = FakeSession([FakeResponse(200, {"wallet": "AGENT1"})])
+    client2 = PxkeClient(session=session2)
+
+    client2.social_agent("AGENT1")
+
+    assert session2.calls[0].url == f"{BASE_URL}/api/v1/x402/social/agents/AGENT1"
