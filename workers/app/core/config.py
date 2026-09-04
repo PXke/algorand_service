@@ -1635,10 +1635,14 @@ X402_PROBE_MAX_LISTINGS = env_int("X402_PROBE_MAX_LISTINGS", 200)
 # x402 storage reaper beat: POSTs the API-host internal reap route because
 # the local-disk connector lives there, not in this worker process. Off when
 # the token is empty (same "empty = disabled" convention as the API's own
-# x402_storage_reaper_token). URL defaults to this box's gunicorn bind.
+# x402_storage_reaper_token). URL defaults to this box's gunicorn bind --
+# 9080 (deploy.conf's APP_PORT), not 8080: algod already binds 8080 on the
+# platform host (see CLAUDE.md's own orientation note), so a literal 8080
+# default here would silently POST the reaper token at algod instead of our
+# backend. Found 2026-09-04 while activating storage for the first time.
 X402_STORAGE_REAPER_TOKEN = env_str("X402_STORAGE_REAPER_TOKEN", "")
 X402_STORAGE_REAPER_URL = env_str(
-    "X402_STORAGE_REAPER_URL", "http://127.0.0.1:8080/api/v1/internal/x402/storage/reap"
+    "X402_STORAGE_REAPER_URL", "http://127.0.0.1:9080/api/v1/internal/x402/storage/reap"
 )
 X402_STORAGE_REAPER_INTERVAL_SECONDS = env_int("X402_STORAGE_REAPER_INTERVAL_SECONDS", 3600)
 X402_STORAGE_REAPER_TIMEOUT_SECONDS = env_float("X402_STORAGE_REAPER_TIMEOUT_SECONDS", 30.0)
