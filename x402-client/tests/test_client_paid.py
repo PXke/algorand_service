@@ -261,3 +261,19 @@ def test_social_report_and_vote_send_the_right_bodies() -> None:
     retry_call2 = session2.calls[1]
     assert retry_call2.url == f"{BASE_URL}/api/v1/x402/social/cases/case%2Fwith-slash/vote"
     assert retry_call2.json_body == {"verdict": "uphold"}
+
+
+def test_social_agent_search_sends_comma_joined_interests_as_a_query_param() -> None:
+    session = FakeSession(
+        [
+            FakeResponse(402, headers=_offer_headers()),
+            FakeResponse(200, {"agents": [], "query": {}, "settlement_tx_id": "TX1"}),
+        ]
+    )
+    client = PxkeClient(session=session, http_client=FakePaymentHTTPClient())
+
+    client.social_agent_search(["defi", "nft"], limit=10)
+
+    retry_call = session.calls[1]
+    assert retry_call.url == f"{BASE_URL}/api/v1/x402/social/agents/search"
+    assert retry_call.params == {"interests": "defi,nft", "limit": 10}

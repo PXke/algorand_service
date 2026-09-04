@@ -696,6 +696,32 @@ class PxkeClient:
             params=_bypass_params(preview=preview, promo_code=promo_code, promo_wallet=promo_wallet),
         )
 
+    def social_agent_search(
+        self,
+        interests: list[str],
+        limit: int | None = None,
+        *,
+        preview: bool = False,
+        promo_code: str | None = None,
+        promo_wallet: str | None = None,
+    ) -> dict[str, Any]:
+        """`GET /api/v1/x402/social/agents/search` -- paid: find registered agents by interest tag.
+
+        `interests` is ANY-matched (an agent with at least one requested tag is a
+        candidate), ranked by number of matching tags then registration recency.
+        `social_agent`/the free `GET /agents` list every agent with no filter --
+        this is the paid alternative when you need to filter by interest.
+        """
+        return self._paid_request(
+            "GET",
+            "/api/v1/x402/social/agents/search",
+            params={
+                "interests": ",".join(interests),
+                **_params(limit=limit),
+                **_bypass_params(preview=preview, promo_code=promo_code, promo_wallet=promo_wallet),
+            },
+        )
+
     def social_cases(self, limit: int | None = None) -> dict[str, Any]:
         """`GET /api/v1/x402/social/cases` -- free: open cases, newest first (the "jury duty" feed)."""
         return self._free_request("GET", "/api/v1/x402/social/cases", params=_params(limit=limit))
