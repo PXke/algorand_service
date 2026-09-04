@@ -1,6 +1,5 @@
 """Celery app wiring: broker/backend config, beat schedule, Bugsnag, and prefork-safety hooks."""
 
-import os
 from pathlib import Path
 
 from celery import Celery
@@ -8,12 +7,12 @@ from celery.schedules import crontab
 from celery.signals import worker_process_init
 
 from app.core import config
-from app.core.config import env_bool, env_int
+from app.core.config import env_bool, env_int, env_str
 from app.modules.scraper.crawler_registry import is_crawler_enabled
 from app.modules.scraper.crawler_types import CrawlerType
 
-_broker = os.getenv("REDIS_BROKER_URL", "redis://localhost:6379/1")
-_result_backend = os.getenv("REDIS_RESULT_URL", "redis://localhost:6379/2")
+_broker = config.REDIS_BROKER_URL
+_result_backend = config.REDIS_RESULT_URL
 
 celery_app = Celery(
     "algorand_platform_workers",
@@ -26,8 +25,8 @@ celery_app = Celery(
 # up to LLM_MAX_TOOL_ROUNDS agentic rounds, so a healthy compose can legitimately
 # take several minutes. The hard limit leaves 60s of grace so a task that catches
 # SoftTimeLimitExceeded can return partial progress before the kill.
-celery_app.conf.task_soft_time_limit = int(os.getenv("CELERY_TASK_SOFT_TIME_LIMIT", "1800"))
-celery_app.conf.task_time_limit = int(os.getenv("CELERY_TASK_TIME_LIMIT", "1860"))
+celery_app.conf.task_soft_time_limit = config.CELERY_TASK_SOFT_TIME_LIMIT
+celery_app.conf.task_time_limit = config.CELERY_TASK_TIME_LIMIT
 
 
 @worker_process_init.connect
@@ -89,19 +88,19 @@ def _build_beat_schedule() -> dict:
     if is_crawler_enabled(CrawlerType.CHAIN):
         schedule["chain-tail-process-rounds"] = {
             "task": "app.tasks.chain_tail.process_new_rounds",
-            "schedule": float(os.getenv("CHAIN_TAIL_POLL_SECONDS", "60")),
+            "schedule": float(env_int("CHAIN_TAIL_POLL_SECONDS", config.CHAIN_TAIL_POLL_SECONDS)),
         }
 
     if is_crawler_enabled(CrawlerType.YOUTUBE):
         schedule["youtube-poll-sources"] = {
             "task": "app.tasks.scrape.poll_youtube_sources",
-            "schedule": float(os.getenv("YOUTUBE_POLL_SECONDS", "3600")),
+            "schedule": float(env_int("YOUTUBE_POLL_SECONDS", config.YOUTUBE_POLL_SECONDS)),
         }
 
     if is_crawler_enabled(CrawlerType.BLUESKY):
         schedule["bluesky-poll-sources"] = {
             "task": "app.tasks.scrape.poll_bluesky_sources",
-            "schedule": float(os.getenv("BLUESKY_POLL_SECONDS", "3600")),
+            "schedule": float(env_int("BLUESKY_POLL_SECONDS", config.BLUESKY_POLL_SECONDS)),
         }
     # Beats are a slow SAFETY-NET heartbeat: the real work is triggered on demand
     # by admin actions (approving/rejecting a review fires drain_to_compose;
@@ -138,7 +137,11 @@ def _build_beat_schedule() -> dict:
     # translation-sessions above.
     schedule["reclaim-stale-processing-urls"] = {
         "task": "app.tasks.crawler.reclaim_stale_processing_urls",
-        "schedule": float(os.getenv("URL_QUEUE_PROCESSING_RECLAIM_SECONDS", "600")),
+        "schedule": float(
+            env_int(
+                "URL_QUEUE_PROCESSING_RECLAIM_SECONDS", config.URL_QUEUE_PROCESSING_RECLAIM_SECONDS
+            )
+        ),
     }
     # Same shape as reclaim-stale-processing-urls just above, for the other
     # in-flight marker this module's own deep-classify escalation path can
@@ -148,7 +151,7 @@ def _build_beat_schedule() -> dict:
     # skips it -- see reap_stale_deep_classify_flags's own docstring.
     schedule["reap-stale-deep-classify-flags"] = {
         "task": "app.tasks.crawler.reap_stale_deep_classify_flags",
-        "schedule": float(os.getenv("DEEP_CLASSIFY_REAP_SECONDS", "600")),
+        "schedule": float(env_int("DEEP_CLASSIFY_REAP_SECONDS", config.DEEP_CLASSIFY_REAP_SECONDS)),
     }
     schedule["retrain-publish-classifier"] = {
         "task": "app.tasks.crawler.retrain_publish_classifier",
@@ -167,23 +170,23 @@ def _build_beat_schedule() -> dict:
         # here without updating backend (out of scope for this pass) would
         # silently break that admin "compose next" button in prod.
         "task": "app.tasks.newspaper.check_and_publish_mistral_on_diff",
-        "schedule": float(os.getenv("MISTRAL_DIFF_POLL_SECONDS", "600")),
+        "schedule": float(env_int("MISTRAL_DIFF_POLL_SECONDS", config.MISTRAL_DIFF_POLL_SECONDS)),
     }
     # Weekly digest retired 2026-08-18 (owner call) -- opt back in with
     # WEEKLY_DIGEST_ENABLED=1 if it's ever wanted again.
-    if os.getenv("WEEKLY_DIGEST_ENABLED", "0") == "1":
+    if env_bool("WEEKLY_DIGEST_ENABLED", config.WEEKLY_DIGEST_ENABLED):
         schedule["weekly-price-analysis"] = {
             "task": "app.tasks.newspaper.publish_weekly_price_analysis",
             "schedule": crontab(
-                minute=int(os.getenv("PRICE_ANALYSIS_CRON_MINUTE", "0")),
+                minute=env_int("PRICE_ANALYSIS_CRON_MINUTE", config.PRICE_ANALYSIS_CRON_MINUTE),
                 # Default moved off DeepSeek peak hours (2026-08-15): 9 sat inside
                 # the 06:00-10:00 UTC peak window. The compose itself is also
                 # gated by article_composer's off-peak check regardless of this
                 # cron hour (see peak_hours.py) -- this default just avoids
                 # scheduling the one hour-configurable LLM task to immediately
                 # collide with peak on every run.
-                hour=int(os.getenv("PRICE_ANALYSIS_CRON_HOUR", "11")),
-                day_of_week=os.getenv("PRICE_ANALYSIS_CRON_DOW", "mon"),
+                hour=env_int("PRICE_ANALYSIS_CRON_HOUR", config.PRICE_ANALYSIS_CRON_HOUR),
+                day_of_week=env_str("PRICE_ANALYSIS_CRON_DOW", config.PRICE_ANALYSIS_CRON_DOW),
             ),
         }
     # search_x reverted 2026-08-28 back to live per-compose calls (see
@@ -226,23 +229,23 @@ def _build_beat_schedule() -> dict:
     # drain_to_compose (its 2026-08-25 successor) inherited this same fold-in.
     schedule["sync-ecosystem-directories"] = {
         "task": "app.tasks.crawler.sync_ecosystem_directories",
-        "schedule": float(os.getenv("ECOSYSTEM_SYNC_SECONDS", "86400")),
+        "schedule": float(env_int("ECOSYSTEM_SYNC_SECONDS", config.ECOSYSTEM_SYNC_SECONDS)),
     }
     schedule["discover-from-mentions"] = {
         "task": "app.tasks.crawler.discover_from_mentions",
-        "schedule": float(os.getenv("MENTION_DISCOVERY_SECONDS", "86400")),
+        "schedule": float(env_int("MENTION_DISCOVERY_SECONDS", config.MENTION_DISCOVERY_SECONDS)),
     }
     schedule["poll-forum-topics"] = {
         "task": "app.tasks.scrape.poll_forum_topics",
-        "schedule": float(os.getenv("FORUM_POLL_SECONDS", "1800")),
+        "schedule": float(env_int("FORUM_POLL_SECONDS", config.FORUM_POLL_SECONDS)),
     }
     schedule["poll-xgov-proposals"] = {
         "task": "app.tasks.chain_tail.poll_xgov_proposals",
-        "schedule": float(os.getenv("XGOV_POLL_SECONDS", "3600")),
+        "schedule": float(env_int("XGOV_POLL_SECONDS", config.XGOV_POLL_SECONDS)),
     }
     schedule["reevaluate-pending-domains"] = {
         "task": "app.tasks.crawler.reevaluate_pending_domains",
-        "schedule": float(os.getenv("PENDING_REEVALUATE_SECONDS", "86400")),
+        "schedule": float(env_int("PENDING_REEVALUATE_SECONDS", config.PENDING_REEVALUATE_SECONDS)),
     }
     # One-time gray-zone reconciliation (2026-08-26 audit, see
     # gray_zone_reconciliation.py's module docstring): companion to
@@ -263,7 +266,12 @@ def _build_beat_schedule() -> dict:
     ):
         schedule["reclassify-gray-zone-domains"] = {
             "task": "app.tasks.crawler.reclassify_gray_zone_domains",
-            "schedule": float(os.getenv("FRONTIER_GRAY_ZONE_RECLASSIFY_SECONDS", "1800")),
+            "schedule": float(
+                env_int(
+                    "FRONTIER_GRAY_ZONE_RECLASSIFY_SECONDS",
+                    config.FRONTIER_GRAY_ZONE_RECLASSIFY_SECONDS,
+                )
+            ),
             "kwargs": {
                 "limit": env_int(
                     "FRONTIER_GRAY_ZONE_RECLASSIFY_LIMIT",
@@ -294,17 +302,21 @@ def _build_beat_schedule() -> dict:
     schedule["select-to-compose-for-today"] = {
         "task": "app.tasks.newspaper.select_to_compose_for_today",
         "schedule": crontab(
-            minute=int(os.getenv("TO_COMPOSE_SELECT_CRON_MINUTE", "5")),
-            hour=int(os.getenv("TO_COMPOSE_SELECT_CRON_HOUR", "0")),
+            minute=env_int("TO_COMPOSE_SELECT_CRON_MINUTE", config.TO_COMPOSE_SELECT_CRON_MINUTE),
+            hour=env_int("TO_COMPOSE_SELECT_CRON_HOUR", config.TO_COMPOSE_SELECT_CRON_HOUR),
         ),
     }
     schedule["reap-stale-compose-sessions"] = {
         "task": "app.tasks.newspaper.reap_stale_compose_sessions",
-        "schedule": float(os.getenv("COMPOSE_SESSION_REAP_SECONDS", "3600")),
+        "schedule": float(
+            env_int("COMPOSE_SESSION_REAP_SECONDS", config.COMPOSE_SESSION_REAP_SECONDS)
+        ),
     }
     schedule["reap-stale-translation-sessions"] = {
         "task": "app.tasks.newspaper.reap_stale_translation_sessions",
-        "schedule": float(os.getenv("TRANSLATION_SESSION_REAP_SECONDS", "3600")),
+        "schedule": float(
+            env_int("TRANSLATION_SESSION_REAP_SECONDS", config.TRANSLATION_SESSION_REAP_SECONDS)
+        ),
     }
     # OS-level companion to the two DB-row reapers above (root-caused
     # 2026-08-26, see browser_reaper.py's module docstring): a forceful
@@ -329,7 +341,9 @@ def _build_beat_schedule() -> dict:
     # already-stranded platform picks live before this existed.
     schedule["reclaim-stale-selected-artifacts"] = {
         "task": "app.tasks.newspaper.reclaim_stale_selected_artifacts",
-        "schedule": float(os.getenv("STALE_SELECTION_REAP_SECONDS", "3600")),
+        "schedule": float(
+            env_int("STALE_SELECTION_REAP_SECONDS", config.STALE_SELECTION_REAP_SECONDS)
+        ),
     }
     # Root-caused 2026-08-27 (arima.io): a pending artifact's source can go
     # dark -- domain registration expires, page becomes a registrar parking
@@ -343,7 +357,7 @@ def _build_beat_schedule() -> dict:
     # a slow trickle across many runs, never a one-shot sweep.
     schedule["discard-dead-pending-sources"] = {
         "task": "app.tasks.newspaper.discard_dead_pending_sources",
-        "schedule": float(os.getenv("DEAD_SOURCE_SWEEP_SECONDS", "3600")),
+        "schedule": float(env_int("DEAD_SOURCE_SWEEP_SECONDS", config.DEAD_SOURCE_SWEEP_SECONDS)),
     }
     # Editorial-room artifacts: recomputes priority for every PENDING
     # artifact once a day, feeding drain-to-compose's daily selection above.
@@ -369,7 +383,9 @@ def _build_beat_schedule() -> dict:
     # manual review, never auto-merged/auto-backfilled.
     schedule["reconcile-service-duplicates"] = {
         "task": "app.tasks.newspaper.reconcile_service_duplicates",
-        "schedule": float(os.getenv("SERVICE_RECONCILE_SWEEP_SECONDS", "86400")),
+        "schedule": float(
+            env_int("SERVICE_RECONCILE_SWEEP_SECONDS", config.SERVICE_RECONCILE_SWEEP_SECONDS)
+        ),
     }
     # Drains backend's Redis-buffered per-article view increments into the
     # article_view_counts Cassandra counter (2026-08-25, replacing a direct
@@ -380,7 +396,7 @@ def _build_beat_schedule() -> dict:
     # self-correcting lag.
     schedule["flush-pending-view-counts"] = {
         "task": "app.tasks.newspaper.flush_pending_views",
-        "schedule": float(os.getenv("VIEW_COUNT_FLUSH_SECONDS", "600")),
+        "schedule": float(env_int("VIEW_COUNT_FLUSH_SECONDS", config.VIEW_COUNT_FLUSH_SECONDS)),
     }
     # Drains backend's Redis-buffered pageview-analytics deltas (geo/campaign/
     # hour/language/referrer_path/referrer_url only -- everything the
@@ -391,7 +407,7 @@ def _build_beat_schedule() -> dict:
     # admin-only breakdown dashboard, not anything real-time.
     schedule["flush-pending-analytics"] = {
         "task": "app.tasks.newspaper.flush_pending_analytics",
-        "schedule": float(os.getenv("ANALYTICS_FLUSH_SECONDS", "600")),
+        "schedule": float(env_int("ANALYTICS_FLUSH_SECONDS", config.ANALYTICS_FLUSH_SECONDS)),
     }
     # Self-heals index_article.delay() misses: that task fires once at publish
     # time with no retry, so a transient Typesense hiccup silently drops an
@@ -399,8 +415,8 @@ def _build_beat_schedule() -> dict:
     # article missing from every result). Idempotent upsert, safe to re-run.
     schedule["reindex-articles"] = {
         "task": "app.tasks.search.reindex_articles",
-        "schedule": float(os.getenv("ARTICLE_REINDEX_SECONDS", "86400")),
-        "kwargs": {"limit": int(os.getenv("ARTICLE_REINDEX_LIMIT", "1000"))},
+        "schedule": float(env_int("ARTICLE_REINDEX_SECONDS", config.ARTICLE_REINDEX_SECONDS)),
+        "kwargs": {"limit": env_int("ARTICLE_REINDEX_LIMIT", config.ARTICLE_REINDEX_LIMIT)},
     }
     if is_crawler_enabled(CrawlerType.MAIL):
         schedule["mail-poll-inbox"] = {
@@ -413,15 +429,12 @@ def _build_beat_schedule() -> dict:
     # 2026-07-19). Briefs now only compose when explicitly triggered via the
     # admin API. Set EDITORIAL_BRIEF_SCAN_ENABLED=true in workers.env to restore
     # the recurring beat.
-    if os.getenv("EDITORIAL_BRIEF_SCAN_ENABLED", "false").strip().lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }:
+    if env_bool("EDITORIAL_BRIEF_SCAN_ENABLED", config.EDITORIAL_BRIEF_SCAN_ENABLED):
         schedule["scan-editorial-brief-schedule"] = {
             "task": "app.tasks.newspaper.scan_editorial_brief_schedule",
-            "schedule": float(os.getenv("EDITORIAL_BRIEF_SCAN_SECONDS", "3600")),
+            "schedule": float(
+                env_int("EDITORIAL_BRIEF_SCAN_SECONDS", config.EDITORIAL_BRIEF_SCAN_SECONDS)
+            ),
         }
     return schedule
 
@@ -454,7 +467,7 @@ def _init_bugsnag() -> None:
     try:
         # Opt-in: reporting only happens where the deploy env provides the key
         # (prod shared env). No key baked in — dev shells and test runs stay silent.
-        key = os.getenv("BUGSNAG_API_KEY", "").strip()
+        key = env_str("BUGSNAG_API_KEY", config.BUGSNAG_API_KEY).strip()
         if not key:
             return
         import logging
@@ -465,7 +478,7 @@ def _init_bugsnag() -> None:
 
         bugsnag.configure(
             api_key=key,
-            release_stage=os.getenv("BUGSNAG_RELEASE_STAGE", os.getenv("APP_ENV", "prod")),
+            release_stage=env_str("BUGSNAG_RELEASE_STAGE", config.BUGSNAG_RELEASE_STAGE),
             auto_capture_sessions=True,
         )
         connect_failure_handler()

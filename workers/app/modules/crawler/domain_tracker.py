@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
@@ -10,6 +11,8 @@ from app.core.redis_client import get_redis
 
 if TYPE_CHECKING:
     import redis
+
+logger = logging.getLogger(__name__)
 
 # Multi-label public suffixes — keep one extra label so the registrable domain
 # is right (example.co.uk, not co.uk). Not exhaustive; covers the common ones
@@ -127,6 +130,9 @@ def record_domain_crawl(domain: str) -> int:
             client.expire(_crawl_budget_key(domain), CRAWL_PAGECOUNT_TTL)
         return total
     except Exception:
+        logger.warning(
+            "record_domain_crawl: Redis unavailable, failing open for %s", domain, exc_info=True
+        )
         return 0
 
 
@@ -141,6 +147,9 @@ def domain_crawl_count(domain: str) -> int:
         value = _crawl_budget_client().get(_crawl_budget_key(domain))
         return int(value) if value else 0
     except Exception:
+        logger.warning(
+            "domain_crawl_count: Redis unavailable, failing open for %s", domain, exc_info=True
+        )
         return 0
 
 
@@ -174,6 +183,9 @@ def record_domain_compose(domain: str) -> int:
             client.set(_compose_cooldown_key(domain), "1", ex=COMPOSE_DOMAIN_COOLDOWN_HOURS * 3600)
         return total
     except Exception:
+        logger.warning(
+            "record_domain_compose: Redis unavailable, failing open for %s", domain, exc_info=True
+        )
         return 0
 
 
@@ -193,6 +205,9 @@ def domain_in_cooldown(domain: str) -> bool:
     try:
         return _crawl_budget_client().get(_compose_cooldown_key(domain)) is not None
     except Exception:
+        logger.warning(
+            "domain_in_cooldown: Redis unavailable, failing open for %s", domain, exc_info=True
+        )
         return False
 
 
@@ -213,6 +228,11 @@ def record_service_compose(service_id: str) -> None:
             _service_cooldown_key(service_id), "1", ex=COMPOSE_SERVICE_COOLDOWN_HOURS * 3600
         )
     except Exception:
+        logger.warning(
+            "record_service_compose: Redis unavailable, failing open for %s",
+            service_id,
+            exc_info=True,
+        )
         return
 
 
@@ -227,6 +247,9 @@ def service_in_cooldown(service_id: str) -> bool:
     try:
         return _crawl_budget_client().get(_service_cooldown_key(service_id)) is not None
     except Exception:
+        logger.warning(
+            "service_in_cooldown: Redis unavailable, failing open for %s", service_id, exc_info=True
+        )
         return False
 
 
@@ -243,6 +266,11 @@ def domain_compose_cap_reached(domain: str) -> bool:
         value = _crawl_budget_client().get(_compose_key(domain))
         return int(value) >= COMPOSE_MAX_PER_DOMAIN_PER_DAY if value else False
     except Exception:
+        logger.warning(
+            "domain_compose_cap_reached: Redis unavailable, failing open for %s",
+            domain,
+            exc_info=True,
+        )
         return False
 
 
@@ -263,6 +291,11 @@ def record_domain_auto_approved(domain: str) -> None:
         client.sadd(key, domain)
         client.expire(key, 172800)  # keep ~2 days so a 'today' read always resolves
     except Exception:
+        logger.warning(
+            "record_domain_auto_approved: Redis unavailable, failing open for %s",
+            domain,
+            exc_info=True,
+        )
         return
 
 
@@ -289,6 +322,9 @@ def url_recently_rejected(url: str) -> bool:
     try:
         return _crawl_budget_client().get(reject_cooldown_key(url)) is not None
     except Exception:
+        logger.warning(
+            "url_recently_rejected: Redis unavailable, failing open for %s", url, exc_info=True
+        )
         return False
 
 

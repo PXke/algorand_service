@@ -60,7 +60,7 @@ def reset_and_reselect_to_compose_for_day(day: str) -> dict[str, object]:
 
 @celery_app.task(name="app.tasks.newspaper.pin_artifact_for_tomorrow")
 def pin_artifact_for_tomorrow(artifact_id: str) -> dict[str, object]:
-    """On-demand write: pin one artifact as tomorrow's human pick -- see to_compose_selection.pin_for_tomorrow. Dispatched by the admin shadow-selection dashboard's "pin for tomorrow" button. Writes only to the new shadow `artifacts`/`artifacts_pending`/`to_compose` tables, which nothing in the live compose/publish path reads yet."""
+    """On-demand write: pin one artifact as tomorrow's human pick -- see to_compose_selection.pin_for_tomorrow. Dispatched by the admin shadow-selection dashboard's "pin for tomorrow" button. Writes to the `artifacts`/`artifacts_pending`/`to_compose` tables, which is the live compose path since 2026-08-25 -- queue_drain_tasks.drain_to_compose reads `to_compose` exclusively (see its own module docstring)."""
     from algorand_shared.to_compose_selection import pin_for_tomorrow
 
     ok = pin_for_tomorrow(artifact_id)

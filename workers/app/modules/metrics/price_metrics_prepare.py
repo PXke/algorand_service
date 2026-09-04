@@ -1,4 +1,4 @@
-"""Build the price-metrics brief and Mistral context from stored samples."""
+"""Build the price-metrics brief and compose-prompt context from stored samples."""
 
 from __future__ import annotations
 
@@ -73,7 +73,7 @@ def build_mistral_context(
     weekly: WeeklyPriceSnapshot | None = None,
     max_chars: int = PRICE_METRICS_BRIEF_MAX_CHARS,
 ) -> str:
-    """Structured facts for Mistral (stored and injected into article prompts)."""
+    """Structured facts for compose (stored and injected into article prompts; live provider is DeepSeek)."""
     now = tick.collected_at
     samples_24h = _samples_in_window(samples, hours=24, now=now)
     samples_7d = _samples_in_window(samples, hours=24 * 7, now=now)

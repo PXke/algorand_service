@@ -171,3 +171,43 @@ def test_forum_poll_signals_hot_unseen_topics(monkeypatch: pytest.MonkeyPatch) -
     assert signals[0]["source_url"] == "https://forum.algorand.co/t/wormhole-ntt/15288"
     assert "@dev1: Proposal to deploy NTT" in signals[0]["page_text"]
     assert signals[0]["published_at"] == "2026-07-01T10:00:00Z"
+
+
+# --------------------------------------------------------------------------- #
+# poll_forum_topics single_flight lock (CLAUDE.md invariant 5)
+# --------------------------------------------------------------------------- #
+
+
+def test_poll_forum_topics_is_single_flight_locked(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A concurrent poll_forum_topics invocation must not race the first run -- overlapping runs could both read get_latest_snapshot as unseen for the same topic before either writes the snapshot, double-signaling the same topic. Must return `already_running` without ever entering the poll body."""
+    monkeypatch.setattr("app.core.redis_lock.acquire", lambda _key, _ttl: None)
+
+    def _boom(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("poll body must not run while the lock is held")
+
+    monkeypatch.setattr("app.core.net_guard.guarded_get", _boom)
+
+    result = fp.poll_forum_topics()
+
+    assert result == {"status": "already_running", "key": "scrape:poll_forum_topics"}
+
+
+def test_poll_forum_topics_lock_ttl_covers_the_hard_task_time_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The lock TTL must be at least the task's soft time limit (CLAUDE.md invariant 5); poll_forum_topics has no per-task override, so it inherits the celery-wide hard task_time_limit, same convention as drain_url_queue."""
+    from app.celery_app import celery_app
+
+    seen_ttls: list[int] = []
+
+    def _spy_acquire(_key: str, ttl: int) -> str:
+        seen_ttls.append(ttl)
+        return "token"
+
+    monkeypatch.setattr("app.core.redis_lock.acquire", _spy_acquire)
+    monkeypatch.setattr("app.core.redis_lock.release", lambda _key, _token: None)
+    monkeypatch.setattr("app.core.config.FORUM_POLL_ENABLED", False)
+
+    fp.poll_forum_topics()
+
+    assert seen_ttls == [celery_app.conf.task_time_limit]

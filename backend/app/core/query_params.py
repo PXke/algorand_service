@@ -1,4 +1,4 @@
-"""Normalize Robyn/Werkzeug-style query values to plain strings."""
+"""Normalize query values (which may arrive as a str, list, or MultiDict) to plain strings."""
 
 from __future__ import annotations
 

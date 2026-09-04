@@ -113,13 +113,15 @@ def _bsky_access_token() -> tuple[str, str]:
     left the session mint as a single point of failure for the exact same
     incident.
     """
-    import os
     import time
 
     import httpx
 
-    ident = os.getenv("BLUESKY_IDENTIFIER", "").strip()
-    pw = os.getenv("BLUESKY_APP_PASSWORD", "").strip()
+    from app.core import config
+    from app.core.config import env_str
+
+    ident = env_str("BLUESKY_IDENTIFIER", config.BLUESKY_IDENTIFIER).strip()
+    pw = env_str("BLUESKY_APP_PASSWORD", config.BLUESKY_APP_PASSWORD).strip()
     if not ident or not pw:
         return "", ""
     cached = _bsky_token_cache.get("token")
@@ -581,10 +583,11 @@ def _github_get(
     url: str, *, params: dict | None = None, timeout: float | None = None
 ) -> httpx.Response:
     """GET against the GitHub API with GITHUB_TOKEN when set — but never let a dead token take a tool down. GitHub answers 401 to ANY request carrying a revoked/expired token, while the same request unauthenticated succeeds (just rate-limited harder). Root-caused 2026-07-16: the prod token expired and github_repository_search started returning '401 Unauthorized' verbatim into research traces; on 401-with-token this logs loudly and retries once without the Authorization header."""
-    import os
+    from app.core import config
+    from app.core.config import env_str
 
     headers = {"Accept": "application/vnd.github+json"}
-    token = os.getenv("GITHUB_TOKEN", "").strip()
+    token = env_str("GITHUB_TOKEN", config.GITHUB_TOKEN).strip()
     if token:
         headers["Authorization"] = f"Bearer {token}"
     kwargs: dict[str, Any] = {"params": params, "headers": headers}
@@ -3621,9 +3624,8 @@ def research_tools() -> tuple[list[dict[str, Any]], dict[str, Any]]:
     lookup_asset_market_data hit free public APIs and are always available
     (GITHUB_TOKEN optional).
     """
-    import os
-
-    from app.core.config import BLUESKY_SEARCH_ENABLED, SEARXNG_URL
+    from app.core import config
+    from app.core.config import BLUESKY_SEARCH_ENABLED, SEARXNG_URL, env_str
 
     schemas: list[dict[str, Any]] = [
         _GITHUB_SCHEMA,
@@ -3684,8 +3686,8 @@ def research_tools() -> tuple[list[dict[str, Any]], dict[str, Any]]:
         schemas.append(_WEB_SCHEMA)
         handlers["search_web"] = _tool_search_web
     bsky_ready = bool(
-        os.getenv("BLUESKY_IDENTIFIER", "").strip()
-        and os.getenv("BLUESKY_APP_PASSWORD", "").strip()
+        env_str("BLUESKY_IDENTIFIER", config.BLUESKY_IDENTIFIER).strip()
+        and env_str("BLUESKY_APP_PASSWORD", config.BLUESKY_APP_PASSWORD).strip()
     )
     if BLUESKY_SEARCH_ENABLED and bsky_ready:
         schemas.append(_BLUESKY_SCHEMA)

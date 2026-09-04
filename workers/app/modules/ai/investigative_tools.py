@@ -11,9 +11,11 @@ Provenance -> Identity -> Assets -> History -> Network.
 from __future__ import annotations
 
 import logging
-import os
 import socket
 from typing import Any
+
+from app.core import config
+from app.core.config import env_str
 
 logger = logging.getLogger(__name__)
 
@@ -359,7 +361,7 @@ def resolve_domain_infrastructure(domain: str, include_hosting: bool = False) ->
 def screen_sanctions_and_pep(person_name: str, dob: str = "") -> dict[str, Any]:
     """OpenSanctions: flag PEPs, sanctioned entities, watchlist hits. Uses OPENSANCTIONS_API_KEY when set."""
     try:
-        key = os.getenv("OPENSANCTIONS_API_KEY", "").strip()
+        key = env_str("OPENSANCTIONS_API_KEY", config.OPENSANCTIONS_API_KEY).strip()
         headers = {"Authorization": f"ApiKey {key}"} if key else None
         query = f"{person_name} {dob}".strip() if dob else person_name
         data = _get(
@@ -389,7 +391,7 @@ def query_corporate_registry(company_name: str, jurisdiction: str = "") -> dict[
     Uses OPENCORPORATES_API_TOKEN when set.
     """
     try:
-        token = os.getenv("OPENCORPORATES_API_TOKEN", "").strip()
+        token = env_str("OPENCORPORATES_API_TOKEN", config.OPENCORPORATES_API_TOKEN).strip()
         params = {"q": company_name, "per_page": 5}
         if jurisdiction:
             params["jurisdiction_code"] = jurisdiction
@@ -434,7 +436,7 @@ def query_uk_companies_house(company_name: str = "", company_number: str = "") -
 
     from app.core.net_guard import guarded_get
 
-    key = os.getenv("COMPANIES_HOUSE_API_KEY", "").strip()
+    key = env_str("COMPANIES_HOUSE_API_KEY", config.COMPANIES_HOUSE_API_KEY).strip()
     if not key:
         return {"error": "COMPANIES_HOUSE_API_KEY not configured"}
     number = (company_number or "").strip()
@@ -493,7 +495,7 @@ def query_uk_companies_house(company_name: str = "", company_number: str = "") -
 def query_court_dockets(entity_name: str) -> dict[str, Any]:
     """CourtListener: civil/criminal cases, bankruptcies. Token optional via COURTLISTENER_TOKEN."""
     try:
-        token = os.getenv("COURTLISTENER_TOKEN", "").strip()
+        token = env_str("COURTLISTENER_TOKEN", config.COURTLISTENER_TOKEN).strip()
         headers = {"Authorization": f"Token {token}"} if token else None
         data = _get(
             "https://www.courtlistener.com/api/rest/v4/search/",
@@ -741,8 +743,12 @@ def investigative_tools(
     schemas = list(ARCHIVE_SCHEMAS)
     handlers = dict(ARCHIVE_HANDLERS)
     if include_entity_osint:
-        has_oc_token = bool(os.getenv("OPENCORPORATES_API_TOKEN", "").strip())
-        has_ch_key = bool(os.getenv("COMPANIES_HOUSE_API_KEY", "").strip())
+        has_oc_token = bool(
+            env_str("OPENCORPORATES_API_TOKEN", config.OPENCORPORATES_API_TOKEN).strip()
+        )
+        has_ch_key = bool(
+            env_str("COMPANIES_HOUSE_API_KEY", config.COMPANIES_HOUSE_API_KEY).strip()
+        )
         skip_unconfigured = {
             "query_corporate_registry": not has_oc_token,
             "query_uk_companies_house": not has_ch_key,

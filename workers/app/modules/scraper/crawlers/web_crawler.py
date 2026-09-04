@@ -324,7 +324,8 @@ class WebCrawlerDriver:
         # is stamped only by that path, see _enqueue_discovered_links below):
         # one-shot compose via the exact same shared path every other lane
         # (full-site service watch, mail, Bluesky, ...) already uses, so it
-        # gets novelty/dedupe/priority/the Mistral credit-guard/publish caps
+        # gets novelty/dedupe/priority/the credit-exhaustion guard (shared by
+        # DeepSeek and Mistral, see mistral_credit_guard.py)/publish caps
         # for free. Reuses the page just fetched above — no second HTTP call.
         no_follow = item.get("metadata", {}).get("no_follow_links") == "true"
         if no_follow and admin_approved and SINGLE_PAGE_AUTOCOMPOSE_ENABLED:

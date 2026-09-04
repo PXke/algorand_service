@@ -178,6 +178,49 @@ def test_drain_to_compose_env_override_still_wins_over_config_default(
     assert schedule["drain-to-compose"]["schedule"] == 42.0
 
 
+def test_chain_tail_poll_default_sourced_from_config_not_a_hardcoded_literal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression (CLAUDE.md section 3, 2026-09 audit): celery_app._build_beat_schedule used to hardcode its own '60' default for CHAIN_TAIL_POLL_SECONDS via a raw os.getenv() call instead of reading config.CHAIN_TAIL_POLL_SECONDS -- config had no owner of this default at all. Patching the config constant (as if the env var were never set) must now be reflected in the beat schedule."""
+    monkeypatch.delenv("CHAIN_TAIL_POLL_SECONDS", raising=False)
+    monkeypatch.setattr(config, "CHAIN_TAIL_POLL_SECONDS", 4321)
+    schedule = celery_app._build_beat_schedule()
+    assert schedule["chain-tail-process-rounds"]["schedule"] == 4321.0
+
+
+def test_chain_tail_poll_env_override_still_wins_over_config_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An explicit CHAIN_TAIL_POLL_SECONDS env var still overrides config.py's default."""
+    monkeypatch.setattr(config, "CHAIN_TAIL_POLL_SECONDS", 4321)
+    monkeypatch.setenv("CHAIN_TAIL_POLL_SECONDS", "99")
+    schedule = celery_app._build_beat_schedule()
+    assert schedule["chain-tail-process-rounds"]["schedule"] == 99.0
+
+
+def test_article_reindex_limit_default_sourced_from_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Same regression class as above, for the reindex-articles beat's kwargs (ARTICLE_REINDEX_LIMIT), which used to be a raw int(os.getenv(...)) with no config.py owner."""
+    monkeypatch.delenv("ARTICLE_REINDEX_LIMIT", raising=False)
+    monkeypatch.setattr(config, "ARTICLE_REINDEX_LIMIT", 42)
+    schedule = celery_app._build_beat_schedule()
+    assert schedule["reindex-articles"]["kwargs"]["limit"] == 42
+
+
+def test_weekly_price_analysis_beat_gated_by_config_owned_flag(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """WEEKLY_DIGEST_ENABLED used to be a raw os.getenv(...) == "1" strict-equality check; now config.py owns the default (env_bool's broader truthy set) and the beat is gated the same way FRONTIER_GRAY_ZONE_RECLASSIFY_ENABLED already is."""
+    monkeypatch.delenv("WEEKLY_DIGEST_ENABLED", raising=False)
+    monkeypatch.setattr(config, "WEEKLY_DIGEST_ENABLED", True)
+    schedule = celery_app._build_beat_schedule()
+    assert "weekly-price-analysis" in schedule
+    monkeypatch.setattr(config, "WEEKLY_DIGEST_ENABLED", False)
+    schedule = celery_app._build_beat_schedule()
+    assert "weekly-price-analysis" not in schedule
+
+
 def test_drain_url_queue_default_matches_config_not_a_stale_duplicate(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

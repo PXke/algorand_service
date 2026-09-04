@@ -1,8 +1,10 @@
-"""Robyn's QueryParams.get requires an explicit default.
+"""request.query_params.get(...) must always pass an explicit default.
 
-Omitting it raises TypeError when the request runs, not when the module
-imports — so ruff, svelte-check and the whole suite stay green while the route
-500s in production. That is exactly how /api/v1/admin/compose-sessions shipped
+query_params is a plain dict, so an omitted default silently returns None —
+and downstream code (`.strip()`, `int(...)`, string concatenation) then
+raises AttributeError/TypeError at request time, not at import time — so
+ruff, svelte-check and the whole suite stay green while the route 500s in
+production. That is exactly how /api/v1/admin/compose-sessions shipped
 broken on 2026-07-29. This pins the call shape across the admin routes.
 """
 
@@ -33,5 +35,5 @@ def test_query_params_get_always_passes_a_default() -> None:
             offenders.append(node.lineno)
     assert not offenders, (
         f"{ROUTES.name}: query_params.get() without a default at lines {offenders}. "
-        f"Robyn requires it — omitting it is a 500 at request time only."
+        f"An omitted default silently returns None — omitting it is a 500 at request time only."
     )

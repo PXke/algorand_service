@@ -20,7 +20,7 @@ def register_search_routes(app: Router) -> None:
     search_service = SearchService()
 
     @app.get("/api/v1/search")
-    def search(request: Request) -> Any:  # noqa: ANN401 -- Robyn route handler returns a Response or any JSON-serializable builtin
+    def search(request: Request) -> Any:  # noqa: ANN401 -- route handler returns a Response or any JSON-serializable builtin
         query = query_param(request.query_params.get("q", ""))
         if not query:
             return json_error_response(400, "invalid_request", "q query param required")

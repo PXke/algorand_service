@@ -11,7 +11,7 @@ from app.modules.metrics.services.price_service import PriceMetricsService
 
 
 def register_metrics_routes(app: Router) -> None:
-    """Attach the price-metrics dashboard endpoints to the Robyn app."""
+    """Attach the price-metrics dashboard endpoints to the Falcon app."""
     service = PriceMetricsService()
     dashboard = MetricsDashboardService()
 

@@ -1,9 +1,9 @@
-"""Bugsnag error reporting for the Robyn backend.
+"""Bugsnag error reporting for the Falcon backend.
 
-Attaches a logging handler so Robyn's logged route errors (and any ERROR-level
-log with a traceback) are reported automatically. Configurable via env
-BUGSNAG_API_KEY / BUGSNAG_RELEASE_STAGE; safe no-op if the package or key is
-absent.
+Attaches a logging handler so the app's logged route errors (and any
+ERROR-level log with a traceback) are reported automatically. Configurable
+via env BUGSNAG_API_KEY / BUGSNAG_RELEASE_STAGE; safe no-op if the package or
+key is absent.
 """
 
 from __future__ import annotations

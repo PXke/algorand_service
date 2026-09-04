@@ -1019,6 +1019,21 @@ def discover_from_mentions_task() -> dict[str, object]:
 
 
 @celery_app.task(name="app.tasks.crawler.reevaluate_pending_domains")
+# Beat fires every PENDING_REEVALUATE_SECONDS (default 86400s); each run
+# classifies up to `limit` unscored pending domains (real network fetches via
+# classify_pending_domains) AND scans up to 5000 pending rows to promote,
+# each promotion writing update_domain_status/enqueue_url/
+# ensure_monitored_service -- a slow classify pass can outrun the beat
+# interval. Without single_flight, two overlapping runs can both promote the
+# same domain (double enqueue_url, double ensure_monitored_service race --
+# CLAUDE.md invariant 5), unlike sync_ecosystem_directories_task just above
+# (ensure_monitored_service is a provably idempotent upsert on its own, and
+# that beat's daily cadence makes overlap moot) or search's reindex_articles
+# (a pure Typesense upsert), which both stay unlocked. Lock TTL pinned to the
+# celery-wide hard task_time_limit, same convention as drain_url_queue above.
+@single_flight(
+    lambda *_a, **_kw: "crawler:reevaluate_pending_domains", ttl=celery_app.conf.task_time_limit
+)
 def reevaluate_pending_domains(*, limit: int = 40) -> dict[str, object]:
     """Daily retro-pass over the pending frontier pool: refresh content scores (unscored domains first), then PROMOTE any pending domain whose crawled- content relevance clears FRONTIER_CONTENT_PROMOTE_SCORE — approval only, never rejection. Fixes the one-shot nature of discovery-time auto-approve: pending rows never re-evaluated themselves, so domains that arrived before today's gates (criptomedia sat at content_relevance with no reader) or whose sites grew a real product later stayed buried forever."""
     from app.core.cassandra import get_cassandra_session

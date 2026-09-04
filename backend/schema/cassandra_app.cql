@@ -1,7 +1,7 @@
 -- DEPRECATED for deploy: use versioned migrations + cql-migrate instead.
 -- Snapshot of app stream 001–003. Registry: schema/migrations/manifest.toml
 --
--- Application tables (Robyn API), separate from Conduit chain tables.
+-- Application tables (Falcon API), separate from Conduit chain tables.
 
 USE algorand_platform;
 

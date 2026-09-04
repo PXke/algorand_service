@@ -803,10 +803,8 @@ INDEXNOW_KEY = env_str("INDEXNOW_KEY", "63e7ffa13f3ca734700ca375c0581b41")
 # Reuses the SAME account (and so the same two env vars) as search_bluesky's
 # research tool in research_tools.py — owner deliberately repurposed the
 # existing agent-research account (2026-07-12), handle changed to the
-# algorand.pxke.me custom domain. research_tools.py reads BLUESKY_IDENTIFIER
-# via os.getenv() directly rather than this constant — both read the same
-# underlying env var, so there's still only one value to keep in sync, just
-# two code paths reading it.
+# algorand.pxke.me custom domain. research_tools.py reads these same two
+# constants (not its own os.getenv() copy, see CLAUDE.md section 3).
 BLUESKY_IDENTIFIER = env_str("BLUESKY_IDENTIFIER", "")
 BLUESKY_APP_PASSWORD = env_str("BLUESKY_APP_PASSWORD", "")
 # Bot token from @BotFather; chat_id is the target channel (e.g. "@channelname"
@@ -1402,10 +1400,20 @@ LLM_ALWAYS_OFF_PEAK_WEEKDAYS_UTC = env_str("LLM_ALWAYS_OFF_PEAK_WEEKDAYS_UTC", "
 WRITER_TOOLS_ENABLED = env_bool("WRITER_TOOLS_ENABLED", True)
 
 # Investigative-journalism tools for the writer agent (Phase 1: free/no-key
-# OSINT lookups). Optional API keys: OPENSANCTIONS_API_KEY,
-# OPENCORPORATES_API_TOKEN, COURTLISTENER_TOKEN, GITHUB_TOKEN,
-# COMPANIES_HOUSE_API_KEY (free UK-specific corporate registry lookup).
+# OSINT lookups). Optional API keys below -- every lookup already degrades to
+# an unauthenticated/rate-limited call when its key is unset (see each tool's
+# own docstring in investigative_tools.py), so an empty default is a real,
+# supported "not configured" state, not a startup requirement.
 INVESTIGATIVE_TOOLS_ENABLED = env_bool("INVESTIGATIVE_TOOLS_ENABLED", True)
+OPENSANCTIONS_API_KEY = env_str("OPENSANCTIONS_API_KEY", "")
+OPENCORPORATES_API_TOKEN = env_str("OPENCORPORATES_API_TOKEN", "")
+# Free UK-specific corporate registry lookup.
+COMPANIES_HOUSE_API_KEY = env_str("COMPANIES_HOUSE_API_KEY", "")
+COURTLISTENER_TOKEN = env_str("COURTLISTENER_TOKEN", "")
+# github_repository_search/github_activity/etc want this too -- see
+# research_tools.py's _github_get docstring for the 401-with-dead-token
+# fallback behavior that makes this genuinely optional, not just undocumented.
+GITHUB_TOKEN = env_str("GITHUB_TOKEN", "")
 
 # Free public Bluesky post search for community sentiment (no Twitter/X, no key).
 BLUESKY_SEARCH_ENABLED = env_bool("BLUESKY_SEARCH_ENABLED", True)
@@ -1624,3 +1632,61 @@ X402_PROBE_INTERVAL_SECONDS = env_int("X402_PROBE_INTERVAL_SECONDS", 1800)
 X402_PROBE_TIMEOUT_SECONDS = env_float("X402_PROBE_TIMEOUT_SECONDS", 5.0)
 X402_PROBE_MAX_BODY_BYTES = env_int("X402_PROBE_MAX_BODY_BYTES", 64 * 1024)
 X402_PROBE_MAX_LISTINGS = env_int("X402_PROBE_MAX_LISTINGS", 200)
+
+# --------------------------------------------------------------------------- #
+# celery_app.py wiring: broker/backend, task limits, beat-schedule intervals,
+# and Bugsnag. Moved here 2026-09 (CLAUDE.md section 3 -- config has one
+# owner, never a raw os.getenv in celery_app.py or a task module).
+# --------------------------------------------------------------------------- #
+REDIS_BROKER_URL = env_str("REDIS_BROKER_URL", "redis://localhost:6379/1")
+REDIS_RESULT_URL = env_str("REDIS_RESULT_URL", "redis://localhost:6379/2")
+# See celery_app.py's own comment on task_soft_time_limit/task_time_limit for
+# why these defaults are sized the way they are (a healthy compose may
+# legitimately run several minutes; the 60s gap is SoftTimeLimitExceeded
+# grace before the hard SIGKILL).
+CELERY_TASK_SOFT_TIME_LIMIT = env_int("CELERY_TASK_SOFT_TIME_LIMIT", 1800)
+CELERY_TASK_TIME_LIMIT = env_int("CELERY_TASK_TIME_LIMIT", 1860)
+
+CHAIN_TAIL_POLL_SECONDS = env_int("CHAIN_TAIL_POLL_SECONDS", 60)
+YOUTUBE_POLL_SECONDS = env_int("YOUTUBE_POLL_SECONDS", 3600)
+BLUESKY_POLL_SECONDS = env_int("BLUESKY_POLL_SECONDS", 3600)
+URL_QUEUE_PROCESSING_RECLAIM_SECONDS = env_int("URL_QUEUE_PROCESSING_RECLAIM_SECONDS", 600)
+DEEP_CLASSIFY_REAP_SECONDS = env_int("DEEP_CLASSIFY_REAP_SECONDS", 600)
+# Registered task name is still "check_and_publish_mistral_on_diff" (see
+# celery_app.py's own comment on why it isn't renamed); the env var name
+# predates the DeepSeek migration too and is kept for the same reason.
+MISTRAL_DIFF_POLL_SECONDS = env_int("MISTRAL_DIFF_POLL_SECONDS", 600)
+# Weekly digest retired 2026-08-18 (owner call) -- opt back in with
+# WEEKLY_DIGEST_ENABLED=1 if it's ever wanted again.
+WEEKLY_DIGEST_ENABLED = env_bool("WEEKLY_DIGEST_ENABLED", False)
+PRICE_ANALYSIS_CRON_MINUTE = env_int("PRICE_ANALYSIS_CRON_MINUTE", 0)
+# Default moved off DeepSeek peak hours (2026-08-15): see celery_app.py's own
+# comment on this cron entry.
+PRICE_ANALYSIS_CRON_HOUR = env_int("PRICE_ANALYSIS_CRON_HOUR", 11)
+PRICE_ANALYSIS_CRON_DOW = env_str("PRICE_ANALYSIS_CRON_DOW", "mon")
+ECOSYSTEM_SYNC_SECONDS = env_int("ECOSYSTEM_SYNC_SECONDS", 86400)
+MENTION_DISCOVERY_SECONDS = env_int("MENTION_DISCOVERY_SECONDS", 86400)
+FORUM_POLL_SECONDS = env_int("FORUM_POLL_SECONDS", 1800)
+XGOV_POLL_SECONDS = env_int("XGOV_POLL_SECONDS", 3600)
+PENDING_REEVALUATE_SECONDS = env_int("PENDING_REEVALUATE_SECONDS", 86400)
+FRONTIER_GRAY_ZONE_RECLASSIFY_SECONDS = env_int("FRONTIER_GRAY_ZONE_RECLASSIFY_SECONDS", 1800)
+TO_COMPOSE_SELECT_CRON_MINUTE = env_int("TO_COMPOSE_SELECT_CRON_MINUTE", 5)
+TO_COMPOSE_SELECT_CRON_HOUR = env_int("TO_COMPOSE_SELECT_CRON_HOUR", 0)
+COMPOSE_SESSION_REAP_SECONDS = env_int("COMPOSE_SESSION_REAP_SECONDS", 3600)
+TRANSLATION_SESSION_REAP_SECONDS = env_int("TRANSLATION_SESSION_REAP_SECONDS", 3600)
+STALE_SELECTION_REAP_SECONDS = env_int("STALE_SELECTION_REAP_SECONDS", 3600)
+DEAD_SOURCE_SWEEP_SECONDS = env_int("DEAD_SOURCE_SWEEP_SECONDS", 3600)
+SERVICE_RECONCILE_SWEEP_SECONDS = env_int("SERVICE_RECONCILE_SWEEP_SECONDS", 86400)
+VIEW_COUNT_FLUSH_SECONDS = env_int("VIEW_COUNT_FLUSH_SECONDS", 600)
+ANALYTICS_FLUSH_SECONDS = env_int("ANALYTICS_FLUSH_SECONDS", 600)
+ARTICLE_REINDEX_SECONDS = env_int("ARTICLE_REINDEX_SECONDS", 86400)
+ARTICLE_REINDEX_LIMIT = env_int("ARTICLE_REINDEX_LIMIT", 1000)
+# Editorial-brief recurrence is OFF by default -- see celery_app.py's own
+# comment (2026-07-19: a 30-day brief silently re-ran and republished with no
+# operator action). Set true to restore the recurring beat.
+EDITORIAL_BRIEF_SCAN_ENABLED = env_bool("EDITORIAL_BRIEF_SCAN_ENABLED", False)
+EDITORIAL_BRIEF_SCAN_SECONDS = env_int("EDITORIAL_BRIEF_SCAN_SECONDS", 3600)
+# Opt-in: reporting only happens where the deploy env provides the key (prod
+# shared env). No key baked in -- dev shells and test runs stay silent.
+BUGSNAG_API_KEY = env_str("BUGSNAG_API_KEY", "")
+BUGSNAG_RELEASE_STAGE = env_str("BUGSNAG_RELEASE_STAGE", env_str("APP_ENV", "prod"))

@@ -1138,8 +1138,9 @@ def admin_list_compose_sessions(request: Request) -> Response:
         return denied
 
     # Keyset cursor: the created_at of the oldest row the client already has.
-    # Robyn's QueryParams.get REQUIRES the default argument — omitting it is a
-    # TypeError at request time, not import time, so it 500s only in prod.
+    # query_params.get() must always pass a default — an omitted default
+    # silently returns None, which then 500s downstream at request time,
+    # not import time, so it only fails in prod.
     before = query_param(request.query_params.get("before", ""))
     try:
         limit = max(1, min(int(query_param(request.query_params.get("limit", "")) or 20), 100))
@@ -2079,7 +2080,7 @@ def admin_x402_social_moderation_remove(request: Request) -> Response | dict:
 
 
 def register_admin_routes(app: Router) -> None:
-    """Register all admin API endpoints on the given Robyn app."""
+    """Register all admin API endpoints on the given Falcon app."""
     app.get("/api/v1/admin/analytics")(admin_analytics)
     app.get("/api/v1/admin/articles/drafts")(admin_list_draft_articles)
     app.get("/api/v1/admin/articles/:article_id/versions")(admin_list_article_versions)

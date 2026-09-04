@@ -1786,6 +1786,42 @@ class X402SocialStmts:
 
 
 # --------------------------------------------------------------------------- #
+# x402_storage_backups
+# --------------------------------------------------------------------------- #
+class X402StorageStmts:
+    """Prepared statements for x402 agent backup storage (migration 111).
+
+    One table, partitioned by wallet, clustered newest-first by backup_id
+    (a timeuuid) -- every access pattern this product needs (list a wallet's
+    own backups, point-read one by id) is single-partition, so no projection
+    table is needed the way the directory/board's global feeds need one.
+    """
+
+    # Full INSERT, never a partial UPDATE (CLAUDE.md section 3) -- used for
+    # both create() and every later mutation (renew's expires_at/
+    # settlement_tx_id, delete's status flip), each writing every column.
+    UPSERT_BACKUP = _Stmt(
+        "INSERT INTO algorand_platform.x402_storage_backups ("
+        "wallet, backup_id, connector, connector_params, size_bytes, content_hash, "
+        "label, created_at, expires_at, status, settlement_tx_id"
+        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+    )
+    GET_BACKUP = _Stmt(
+        "SELECT wallet, backup_id, connector, connector_params, size_bytes, content_hash, "
+        "label, created_at, expires_at, status, settlement_tx_id "
+        "FROM algorand_platform.x402_storage_backups WHERE wallet = ? AND backup_id = ?"
+    )
+    # Newest-first by construction (CLUSTERING ORDER BY (backup_id DESC)) --
+    # returns rows of every status; the service filters to active/unexpired
+    # after this LIMITed read, same shape as x402_directory.search().
+    LIST_RECENT = _Stmt(
+        "SELECT wallet, backup_id, connector, connector_params, size_bytes, content_hash, "
+        "label, created_at, expires_at, status, settlement_tx_id "
+        "FROM algorand_platform.x402_storage_backups WHERE wallet = ? LIMIT ?"
+    )
+
+
+# --------------------------------------------------------------------------- #
 # glossary_terms
 # --------------------------------------------------------------------------- #
 class GlossaryStmts:

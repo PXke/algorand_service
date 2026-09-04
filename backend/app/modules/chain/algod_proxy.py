@@ -17,8 +17,13 @@ import falcon
 import httpx
 
 from app.core.config import settings
+from app.core.rate_limit import incr_with_expiry
+from app.core.request_headers import client_ip
 
 logger = logging.getLogger(__name__)
+
+_RATE_KEY_PREFIX = "algorand:algod_proxy_rl:"
+_RATE_WINDOW_SECONDS = 3600
 
 _ADDR = r"[A-Z2-7]{58}"
 _TXID = r"[A-Z2-7]{52}"
@@ -92,6 +97,24 @@ def _json_error(resp: falcon.Response, status: int, code: str, message: str) -> 
     resp.media = {"error": {"code": code, "message": message}}
 
 
+def _rate_limited(headers: dict[str, str]) -> bool:
+    """True when this IP has exceeded the hourly algod-proxy budget.
+
+    Fails OPEN (a Redis hiccup reads as "not limited") -- same policy as the
+    image proxy's rate limit: a Redis blip must not take down public algod
+    reads. An unattributable request (no X-Real-IP / X-Forwarded-For) is not
+    limited either, for the same reason -- one shared bucket would let
+    unrelated callers starve each other.
+    """
+    ip = client_ip(headers)
+    if not ip:
+        return False
+    count = incr_with_expiry(f"{_RATE_KEY_PREFIX}{ip}", window_seconds=_RATE_WINDOW_SECONDS)
+    if count is None:
+        return False
+    return count > settings.algod_proxy_rate_limit_per_hour
+
+
 class AlgodProxyResource:
     """Falcon resource: GET/POST /api/v1/algod/{rest:path}."""
 
@@ -107,6 +130,11 @@ class AlgodProxyResource:
         path = (rest or "").lstrip("/")
         if not allowed_algod_path(method, path):
             _json_error(resp, 404, "not_found", "unknown algod path")
+            return
+        if _rate_limited(dict(req.headers)):
+            _json_error(
+                resp, 429, "rate_limited", "Too many algod requests — please try again later"
+            )
             return
         body = b""
         if method == "POST":

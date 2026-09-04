@@ -1,1 +1,1 @@
-"""x402 payment-gate adapter and client for Robyn routes."""
+"""x402 payment-gate adapter and client for Falcon routes."""

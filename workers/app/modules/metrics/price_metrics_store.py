@@ -108,7 +108,7 @@ def load_brief(asset_id: str) -> PriceMetricsBrief | None:
 
 
 def load_mistral_context(asset_id: str) -> str:
-    """Prepared price narrative for Mistral prompts; empty when not yet collected."""
+    """Prepared price narrative injected into compose prompts (live provider: DeepSeek); empty when not yet collected."""
     brief = load_brief(asset_id)
     if brief is None or not brief.mistral_context.strip():
         return ""

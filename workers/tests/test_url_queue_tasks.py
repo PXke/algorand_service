@@ -17,6 +17,7 @@ from app.modules.crawler.tasks.url_queue_tasks import (
     drain_url_queue,
     reap_stale_deep_classify_flags,
     reclassify_gray_zone_domains,
+    reevaluate_pending_domains,
 )
 from app.modules.scraper.core.base import ScrapeResult
 
@@ -1326,6 +1327,54 @@ def test_drain_url_queue_lock_ttl_covers_the_hard_task_time_limit(
     monkeypatch.setattr("app.modules.crawler.tasks.url_queue_tasks.URL_QUEUE_ENABLED", False)
 
     drain_url_queue()
+
+    assert seen_ttls == [celery_app.conf.task_time_limit]
+
+
+# --------------------------------------------------------------------------- #
+# reevaluate_pending_domains single_flight lock (CLAUDE.md invariant 5)
+# --------------------------------------------------------------------------- #
+
+
+def test_reevaluate_pending_domains_is_single_flight_locked(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A concurrent reevaluate_pending_domains invocation must not race the first run -- overlapping runs could both promote the same pending domain (double enqueue_url, double ensure_monitored_service). Must return `already_running` without ever entering the classify/promote body."""
+    monkeypatch.setattr("app.core.redis_lock.acquire", lambda _key, _ttl: None)
+
+    def _boom(*_args: object, **_kwargs: object) -> Never:
+        raise AssertionError("reevaluate body must not run while the lock is held")
+
+    monkeypatch.setattr("app.modules.crawler.tasks.url_queue_tasks.classify_pending_domains", _boom)
+
+    result = reevaluate_pending_domains()
+
+    assert result == {"status": "already_running", "key": "crawler:reevaluate_pending_domains"}
+
+
+def test_reevaluate_pending_domains_lock_ttl_covers_the_hard_task_time_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The lock TTL must be at least the task's soft time limit (CLAUDE.md invariant 5); reevaluate_pending_domains has no per-task override, so it inherits the celery-wide hard task_time_limit, same convention as drain_url_queue."""
+    from app.celery_app import celery_app
+
+    seen_ttls: list[int] = []
+
+    def _spy_acquire(_key: str, ttl: int) -> str:
+        seen_ttls.append(ttl)
+        return "token"
+
+    monkeypatch.setattr("app.core.redis_lock.acquire", _spy_acquire)
+    monkeypatch.setattr("app.core.redis_lock.release", lambda _key, _token: None)
+    # FRONTIER_RETRO_PROMOTE_ENABLED=False short-circuits the body immediately
+    # after the lock is acquired -- this test only cares about the ttl bound
+    # to acquire(), not the classify/promote logic. Patched on app.core.config
+    # itself (unlike URL_QUEUE_ENABLED above): reevaluate_pending_domains
+    # re-imports this name fresh from app.core.config on every call, rather
+    # than binding it once at module import time.
+    monkeypatch.setattr("app.core.config.FRONTIER_RETRO_PROMOTE_ENABLED", False)
+
+    reevaluate_pending_domains()
 
     assert seen_ttls == [celery_app.conf.task_time_limit]
 

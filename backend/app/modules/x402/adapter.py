@@ -2,10 +2,7 @@
 
 No official x402 adapter ships for this backend's own request type (only
 Flask/FastAPI), so this is the seam that makes the rest of the x402
-package's HTTP-flow code reusable here. Originally written against the
-Robyn framework (pre-Falcon-migration Request shape) -- renamed 2026-08-15
-since the migration's own app.core.http.Request abstraction is already
-framework-neutral, and "RobynAdapter" had gone stale/misleading.
+package's HTTP-flow code reusable here.
 """
 
 from __future__ import annotations

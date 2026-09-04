@@ -113,7 +113,7 @@ def _header(request: Request, name: str) -> str:
 
 
 def _query_params(request: Request) -> dict:
-    """Best-effort dict of the request's query params (Robyn shapes vary)."""
+    """Best-effort dict of the request's query params (the underlying object's shape varies -- dict, or something with .to_dict()/.queries())."""
     qp = getattr(request, "query_params", None)
     if qp is None:
         return {}
@@ -227,7 +227,7 @@ def _text_response(body: str, content_type: str, cache: str) -> Response:
 
 
 def _response_for_head(response: Response) -> Response:
-    """Robyn does not auto-register HEAD for GET routes; crawlers (Yandex sitemap analyzer, etc.) probe with HEAD and treat non-200 as failure."""
+    """FalconRouter only dispatches HEAD for a path that was also explicitly registered via .head(); crawlers (Yandex sitemap analyzer, etc.) probe with HEAD and treat non-200 as failure."""
     headers = dict(response.headers) if response.headers else {}
     return Response(
         status_code=response.status_code,
@@ -732,7 +732,9 @@ def rss_feed(request: Request) -> Response:
                 if detail.body:
                     bodies[article_id] = md_to_html(detail.body)
         except Exception:
-            pass
+            logger.warning(
+                "rss_feed: get_articles failed, falling back to summary-only feed", exc_info=True
+            )
         return feeds.rss_xml(items, bodies=bodies).encode("utf-8")
 
     xml = cached_bytes("seo:rss-feed", _RSS_CACHE_TTL, compute).decode("utf-8")
@@ -790,7 +792,10 @@ def llms_full_txt(request: Request) -> Response:
                 if detail.body:
                     bodies[article_id] = detail.body
         except Exception:
-            pass
+            logger.warning(
+                "llms_full_txt: get_articles failed, falling back to bodies-empty output",
+                exc_info=True,
+            )
         return sitemap.llms_full_txt(items, bodies).encode("utf-8")
 
     text = cached_bytes("seo:llms-full-txt", _LLMS_FULL_CACHE_TTL, compute).decode("utf-8")

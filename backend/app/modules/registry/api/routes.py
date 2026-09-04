@@ -8,7 +8,7 @@ from app.modules.registry.services.registry_service import RegistryService
 
 
 def register_registry_routes(app: Router) -> None:
-    """Register the service-registry HTTP routes on the Robyn app."""
+    """Register the service-registry HTTP routes on the Falcon app."""
     registry_service = RegistryService()
 
     @app.get("/api/v1/registry/services")

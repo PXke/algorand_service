@@ -22,7 +22,7 @@ def run_collect_and_prepare_price_metrics(
     *,
     asset_id: str = PRICE_METRICS_ASSET_ID,
 ) -> dict[str, str]:
-    """Poll CoinGecko, append a sample, rebuild the Mistral-ready brief."""
+    """Poll CoinGecko, append a sample, rebuild the compose-ready brief."""
     if not config.PRICE_METRICS_ENABLED:
         return {"status": "skipped", "reason": "PRICE_METRICS_ENABLED=0"}
 

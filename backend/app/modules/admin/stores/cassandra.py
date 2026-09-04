@@ -545,6 +545,9 @@ class AdminCassandraStore:
         try:
             rows = session.execute(EditorialBriefStmts.LIST, (limit,))
         except Exception:
+            logger.warning(
+                "list_briefs: Cassandra query failed, returning empty list", exc_info=True
+            )
             return []
         items = []
         for row in rows:
@@ -1573,6 +1576,10 @@ class AdminCassandraStore:
             # scan order, not the display order — see _rank_reviews below.
             rows = session.execute(ClassifierReviewStmts.LIST_PENDING, ("pending", scan_limit))
         except Exception:
+            logger.warning(
+                "_pending_review_details: Cassandra query failed, returning empty list",
+                exc_info=True,
+            )
             return []
         review_ids = [row.review_id for row in rows]
         if not review_ids:

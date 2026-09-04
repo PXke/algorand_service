@@ -14,6 +14,7 @@ import logging
 from typing import Any
 
 from app.celery_app import celery_app
+from app.core.redis_lock import single_flight
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +56,16 @@ def fetch_topic_text(
 
 
 @celery_app.task(name="app.tasks.scrape.poll_forum_topics")
+# Beat fires every FORUM_POLL_SECONDS (default 1800s); each run reads
+# /latest.json then (for every newly-hot topic) fetches the topic body via
+# fetch_topic_text -- a slow forum response or a burst of new hot topics can
+# outrun the beat interval. Without single_flight, two overlapping runs both
+# read get_latest_snapshot for the same topic_id before either writes the
+# snapshot, and both ingest_publish_signal it -- a duplicate compose signal
+# for the same topic (CLAUDE.md invariant 5). Lock TTL pinned to the
+# celery-wide hard task_time_limit, same convention as drain_url_queue /
+# chain_tail.process_new_rounds.
+@single_flight(lambda *_a, **_kw: "scrape:poll_forum_topics", ttl=celery_app.conf.task_time_limit)
 def poll_forum_topics() -> dict[str, object]:
     """Celery task: poll the Discourse forum's latest topics and enqueue publish signals."""
     from app.core import config

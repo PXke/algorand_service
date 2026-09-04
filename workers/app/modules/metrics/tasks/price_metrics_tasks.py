@@ -9,7 +9,7 @@ from app.modules.scraper.crawler_registry import metrics_crawl_disabled_reason
 
 @celery_app.task(name="app.tasks.metrics.collect_price_metrics")
 def collect_price_metrics() -> dict[str, str]:
-    """Periodic CoinGecko poll + Cassandra store + Mistral context brief."""
+    """Periodic CoinGecko poll + Cassandra store + compose-prompt context brief."""
     off = metrics_crawl_disabled_reason()
     if off:
         return {"status": "skipped", "reason": off}
