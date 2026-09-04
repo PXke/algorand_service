@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import hmac
 import logging
 
 from app.core import serialization
@@ -26,6 +27,7 @@ from app.core.config import settings
 from app.core.http import Request, Response, Router
 from app.core.http_errors import json_error_from_platform, json_error_response
 from app.core.query_params import query_param
+from app.core.request_headers import header_value
 from app.modules.x402 import circuit_breaker
 from app.modules.x402.discovery import describe_json_endpoint
 from app.modules.x402.paid_request import mark_fulfilled, require_paid_request, run_with_refund
@@ -39,9 +41,11 @@ from app.modules.x402_storage.services import auth_service, rate_limit
 from app.modules.x402_storage.services.backup_service import (
     MAX_LABEL_LENGTH,
     BackupService,
+    at_remaining_cap,
     compute_price,
     validate_declared_size,
 )
+from app.modules.x402_storage.services.reaper import reap_expired
 
 logger = logging.getLogger(__name__)
 
@@ -218,7 +222,6 @@ def x402_storage_create_backup(request: Request) -> Response:
         return json_error_response(400, "invalid_request", "data must be valid base64")
 
     price = compute_price(declared_size_bytes)
-    term_days = settings.x402_storage_term_days
     result = require_paid_request(
         request,
         price=price,
@@ -226,7 +229,8 @@ def x402_storage_create_backup(request: Request) -> Response:
         description=(
             f"Store one opaque backup blob (up to declared_size_bytes={declared_size_bytes} "
             f"bytes, charged at ceil(size/1MB) * {settings.x402_storage_price_per_mb}/MB), "
-            f"retrievable and deletable for {term_days} days by proving control of this same "
+            f"retrievable and deletable for up to {settings.x402_storage_max_remaining_days} days "
+            "(one paid term, not stackable past that ceiling) by proving control of this same "
             "wallet again (no session -- POST .../auth/challenge then GET/DELETE "
             "/storage/backups with the signed proof). Stored content is OPAQUE with NO "
             "confidentiality guarantee beyond owner-only access control: encrypt sensitive "
@@ -280,6 +284,12 @@ def x402_storage_create_backup(request: Request) -> Response:
 def x402_storage_renew_backup(request: Request) -> Response:
     """Paid: extend an existing backup's expiry by one more term, owner only, priced from its ALREADY-STORED size_bytes.
 
+    Remaining life is capped at x402_storage_max_remaining_days (90): if the
+    backup is already at that ceiling, this returns a free 400 before the
+    payment gate so the caller is not charged for a no-op. Expired-but-not-
+    yet-reaped backups (inside x402_storage_reaper_grace_days) can still be
+    renewed -- that is the "pay to keep the bytes" window.
+
     Existence is checked BEFORE the payment gate (a free 404 for an unknown
     id) using `wallet` from the request body purely as a lookup hint --
     x402_storage_backups is partitioned by wallet, so a point read needs it
@@ -314,6 +324,14 @@ def x402_storage_renew_backup(request: Request) -> Response:
     if backup is None or backup.status == STATUS_DELETED:
         return json_error_response(404, "not_found", "No backup with that id for that wallet")
 
+    if at_remaining_cap(backup):
+        return json_error_response(
+            400,
+            "term_at_maximum",
+            "This backup already has the maximum remaining storage term "
+            f"({settings.x402_storage_max_remaining_days} days). Payment was not taken.",
+        )
+
     price = compute_price(backup.size_bytes)
     term_days = settings.x402_storage_term_days
     result = require_paid_request(
@@ -321,10 +339,12 @@ def x402_storage_renew_backup(request: Request) -> Response:
         price=price,
         resource=_RESOURCE_RENEW,
         description=(
-            f"Extend an existing backup's retrieval window by {term_days} more days, from "
-            "the later of now and its current expiry; the stored bytes themselves never "
-            "change. Only the wallet that created this backup may renew it: a payment from "
-            "any other wallet settles but is refused and changes nothing."
+            f"Extend an existing backup's retrieval window by up to {term_days} more days, "
+            f"capped at {settings.x402_storage_max_remaining_days} days remaining from now "
+            "(renewing early does not stack past that ceiling). Works during the "
+            f"{settings.x402_storage_reaper_grace_days}-day grace after expiry, before the "
+            "reaper deletes the bytes. Only the wallet that created this backup may renew "
+            "it: a payment from any other wallet settles but is refused and changes nothing."
         ),
         extensions=describe_json_endpoint(
             body_type="json",
@@ -466,11 +486,34 @@ def x402_storage_delete_backup(request: Request) -> Response | dict:
     return {"deleted": True, "backup_id": backup_id}
 
 
+def x402_storage_reap(_request: Request) -> Response | dict:
+    """Internal: delete backups whose reaper grace window after expiry has elapsed.
+
+    Not a marketplace product -- the Celery beat on this same box POSTs here
+    because the local-disk connector lives on the API host. Gated on
+    x402_storage_reaper_token (empty token = 404, same disabled convention
+    as an empty local_root). Path is /api/v1/internal/... so it is not
+    required to appear in the x402 catalog roster.
+    """
+    expected = settings.x402_storage_reaper_token.strip()
+    if not expected:
+        return json_error_response(404, "not_found", "Not found")
+    presented = header_value(_request.headers, "x-storage-reaper-token")
+    if (
+        not presented
+        or len(presented) != len(expected)
+        or not hmac.compare_digest(presented, expected)
+    ):
+        return json_error_response(401, "unauthorized", "Invalid reaper token")
+    return reap_expired(backup_service)
+
+
 def register_x402_storage_routes(app: Router) -> None:
-    """Register the free challenge route, paid create/renew, and free list/detail/delete."""
+    """Register the free challenge route, paid create/renew, free list/detail/delete, and the internal reaper."""
     app.post("/api/v1/x402/storage/auth/challenge")(x402_storage_auth_challenge)
     app.post("/api/v1/x402/storage/backups")(x402_storage_create_backup)
     app.get("/api/v1/x402/storage/backups")(x402_storage_list_backups)
     app.get("/api/v1/x402/storage/backups/:backup_id")(x402_storage_get_backup)
     app.post("/api/v1/x402/storage/backups/:backup_id/renew")(x402_storage_renew_backup)
     app.delete("/api/v1/x402/storage/backups/:backup_id")(x402_storage_delete_backup)
+    app.post("/api/v1/internal/x402/storage/reap")(x402_storage_reap)

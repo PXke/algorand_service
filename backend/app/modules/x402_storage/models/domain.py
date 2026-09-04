@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import UTC, date, datetime
 
 from app.core.errors import PlatformError, http_status_for_code
 
@@ -88,3 +89,22 @@ class StoredBackup:
     def is_live(self, *, now_epoch: int) -> bool:
         """True when this row is active AND has not passed its expiry."""
         return self.is_active and self.expires_at_epoch > now_epoch
+
+
+@dataclass(frozen=True, slots=True)
+class ExpiryIndexRow:
+    """One x402_storage_by_expiry projection row (migration 112).
+
+    Enough to find the canonical backup and to delete THIS projection row
+    if it has gone stale (the backup was renewed onto a new expires_at, or
+    already deleted).
+    """
+
+    wallet: str
+    backup_id: str
+    expires_at_epoch: int
+
+
+def expiry_day_utc(expires_at_epoch: int) -> date:
+    """UTC calendar date of `expires_at_epoch` -- the expiry projection's partition key."""
+    return datetime.fromtimestamp(expires_at_epoch, tz=UTC).date()

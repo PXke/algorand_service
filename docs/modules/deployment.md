@@ -42,9 +42,12 @@ Repeatable packaging, upload, unpack, and service restart for TestNet and produc
 - Built artifacts on host (shared Python venv at `$TARGET_PATH/venv`, prod: `/home/guillaume/algorand-platform/venv`)
 - systemd, `rsync`, `ssh`
 
+Ops map of hosts and processes (platform vs OpenClaw agent): [ops-hosts.md](../ops-hosts.md).
+
 ## Code map
 
 - `deploy/package.sh`, `deploy/deploy.sh`, `deploy/deploy.conf`, `deploy/rollback.sh`, `deploy/README.md`
+- `docs/ops-hosts.md` — which hosts run which processes (platform vs OpenClaw agent)
 - `deploy/nginx/algorand-platform.conf`, `deploy/env/*.env.example`
 - `deploy/systemd/algorand-platform-backend.service`
 - `deploy/systemd/algorand-platform-celery.service`

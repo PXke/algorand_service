@@ -72,6 +72,25 @@ def _operation_id(route: dict[str, Any]) -> str:
     return f"{route['method'].lower()}_{slug}"
 
 
+def _paid_description(route: dict[str, Any]) -> str:
+    """Append the structured price/resource note used on paid OpenAPI operations."""
+    unit = route.get("price_unit")
+    price_note = f"price_usd={route['price_usd']!r}"
+    if unit:
+        price_note += f" per {unit}"
+    return f"{route['description']} Paid: {price_note}, resource={route['resource']!r}."
+
+
+def _apply_paid_extensions(operation: dict[str, Any], route: dict[str, Any]) -> None:
+    """Set the x-x402-* vendor fields every paid operation carries."""
+    operation["x-x402-price-usd"] = route["price_usd"]
+    if route.get("price_unit"):
+        operation["x-x402-price-unit"] = route["price_unit"]
+    operation["x-x402-resource"] = route["resource"]
+    operation["x-x402-supports-preview"] = route["supports_preview"]
+    operation["x-x402-supports-receipts"] = route["supports_receipts"]
+
+
 def _operation(route: dict[str, Any]) -> dict[str, Any]:
     """One OpenAPI operation object for one catalog route dict (see catalog._route_json)."""
     param_names = _path_param_names(route["path"])
@@ -80,11 +99,7 @@ def _operation(route: dict[str, Any]) -> dict[str, Any]:
         for name in param_names
     ]
 
-    description = route["description"]
-    if route["paid"]:
-        description = (
-            f"{description} Paid: price_usd={route['price_usd']!r}, resource={route['resource']!r}."
-        )
+    description = _paid_description(route) if route["paid"] else route["description"]
 
     example = route["input_example"]
     request_body: dict[str, Any] | None = None
@@ -131,10 +146,7 @@ def _operation(route: dict[str, Any]) -> dict[str, Any]:
         "x-x402-paid": route["paid"],
     }
     if route["paid"]:
-        operation["x-x402-price-usd"] = route["price_usd"]
-        operation["x-x402-resource"] = route["resource"]
-        operation["x-x402-supports-preview"] = route["supports_preview"]
-        operation["x-x402-supports-receipts"] = route["supports_receipts"]
+        _apply_paid_extensions(operation, route)
     if parameters:
         operation["parameters"] = parameters
     if request_body is not None:

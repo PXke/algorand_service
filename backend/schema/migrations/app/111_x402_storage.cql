@@ -25,10 +25,12 @@ USE algorand_platform;
 -- content_hash is a sha256 hex digest of the actual uploaded bytes, checked
 -- again on every restore so silent corruption is caught rather than served.
 --
--- status is a soft-delete flag ("active" | "deleted"): DELETE removes the
--- connector's bytes first, then marks the row deleted, so a crash mid-delete
--- leaves a row pointing at already-gone bytes (a safe 404) rather than
--- silently orphaned bytes nobody's metadata references (a real disk leak).
+-- status is a soft-delete flag ("active" | "deleted"): DELETE marks the
+-- row deleted first, then removes the connector's bytes, so a crash
+-- mid-delete is a user-facing 404 rather than an active row whose bytes
+-- have vanished. Expired blobs stay retrievable-via-renew for
+-- x402_storage_reaper_grace_days, then the reaper (migration 112) deletes
+-- them. Remaining term cannot exceed x402_storage_max_remaining_days.
 --
 -- settlement_tx_id traces the row to the payment that bought its current
 -- term, replaced by a renewal's own txid -- same convention every other

@@ -581,7 +581,9 @@ class Settings(msgspec.Struct, kw_only=True):
     x402_storage_price_per_mb: str = "$0.02"
     # Hard cap on one backup, regardless of what declared_size_bytes claims.
     # Checked on the free initial request, before the payment gate -- a
-    # cheap early rejection nobody pays for.
+    # cheap early rejection nobody pays for. nginx client_max_body_size must
+    # stay above this after JSON+base64 inflation (~4/3) -- see
+    # deploy/nginx/algorand-platform.conf.
     x402_storage_max_backup_mb: int = 10
     # Global local-disk ceiling across every stored backup on this connector.
     # Checked at write time via the connector's own usage_bytes(). Unlike the
@@ -593,10 +595,36 @@ class Settings(msgspec.Struct, kw_only=True):
     # refunds the payer and counts the failure against the resource's
     # circuit breaker (see StorageCapacityUnavailable's own docstring).
     x402_storage_local_max_total_mb: int = 5000
-    # How long a paid backup (or a renewal) stays retrievable before
-    # expires_at. Stated in the 402 offer's description before the payer
-    # commits.
-    x402_storage_term_days: int = 180
+    # How long one paid create (or a renewal) tries to add, in days. The
+    # remaining window is ALSO capped by x402_storage_max_remaining_days
+    # (renewing early cannot stack past that ceiling).
+    x402_storage_term_days: int = 90
+    # Hard cap on remaining retrievable life, from "now" at the moment of
+    # create/renew. A backup may never be extended past this many days of
+    # remaining storage -- renewing a still-live backup refreshes up to this
+    # ceiling rather than stacking another full term on top of what is left.
+    x402_storage_max_remaining_days: int = 90
+    # After expires_at, GET/list hide the backup, but renew still works for
+    # this many extra days. Past that, the reaper deletes connector bytes
+    # and marks the row deleted. Two days is enough to notice an expiry and
+    # pay to renew without the blob already being gone.
+    x402_storage_reaper_grace_days: int = 2
+    # How far back (in calendar days) one reaper tick scans the expiry
+    # projection. A tick that was down for a week still catches up without
+    # an unbounded partition scan.
+    x402_storage_reaper_lookback_days: int = 14
+    # Per-expiry-day LIMIT on one reaper tick. Further due rows wait for
+    # the next hourly beat rather than one unbounded query.
+    x402_storage_reaper_batch: int = 100
+    # Shared secret for POST /api/v1/internal/x402/storage/reap (the Celery
+    # beat hits this, because the local-disk connector lives on the API
+    # host, not in the worker process). Empty = the route 404s and the beat
+    # is not registered -- same "empty = disabled" convention as
+    # x402_storage_local_root.
+    x402_storage_reaper_token: str = ""
+    # Redis lock TTL covering one reap tick so two overlapping calls
+    # (beat + a manual trigger) do not double-walk the same due rows.
+    x402_storage_reaper_lock_seconds: int = 600
     # Free-endpoint abuse gate (CLAUDE.md section 9: rate limit every free
     # endpoint per IP), counted under its own key prefix. Covers the free
     # challenge-issuance, list, detail and delete routes.

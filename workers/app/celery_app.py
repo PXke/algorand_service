@@ -80,7 +80,33 @@ celery_app.conf.imports = (
     "app.tasks.search",
     "app.tasks.metrics",
     "app.tasks.x402_probe",
+    "app.tasks.x402_storage_reaper",
 )
+
+
+def _add_x402_beats(schedule: dict) -> None:
+    """Register the x402 probe and storage-reaper beats when their gates are on.
+
+    Probe is off by default (real requests to third-party endpoints). The
+    storage reaper is off when X402_STORAGE_REAPER_TOKEN is empty -- the
+    same empty=disabled gate the API route uses. Both entries set
+    `expires=` to their interval so a stale tick is dropped, not run late
+    (same pairing as drain-url-queue).
+    """
+    if config.X402_PROBE_ENABLED:
+        probe_seconds = float(config.X402_PROBE_INTERVAL_SECONDS)
+        schedule["x402-probe-listed-endpoints"] = {
+            "task": "app.tasks.x402_probe.probe_listed_endpoints",
+            "schedule": probe_seconds,
+            "options": {"expires": probe_seconds},
+        }
+    if config.X402_STORAGE_REAPER_TOKEN.strip():
+        reaper_seconds = float(config.X402_STORAGE_REAPER_INTERVAL_SECONDS)
+        schedule["x402-storage-reap-expired"] = {
+            "task": "app.tasks.x402_storage_reaper.reap_expired_backups",
+            "schedule": reaper_seconds,
+            "options": {"expires": reaper_seconds},
+        }
 
 
 def _build_beat_schedule() -> dict:
@@ -197,19 +223,11 @@ def _build_beat_schedule() -> dict:
     # in place, just unreachable via beat; a manual/admin trigger of the
     # task still works (it re-checks X_SEARCH_ENABLED itself) if this ever
     # needs to be re-enabled.
-    # x402 probe / monitoring (roadmap item 7): unpaid liveness + 402-offer
-    # checks of every live directory listing and the verified badge. Off by
-    # default (config.X402_PROBE_ENABLED) because it sends real requests to
-    # third-party endpoints; the task is single_flight-locked and this
-    # `expires` drops a tick that never found a free worker within one
-    # interval rather than running it stale (same pairing as drain-url-queue).
-    if config.X402_PROBE_ENABLED:
-        _x402_probe_seconds = float(config.X402_PROBE_INTERVAL_SECONDS)
-        schedule["x402-probe-listed-endpoints"] = {
-            "task": "app.tasks.x402_probe.probe_listed_endpoints",
-            "schedule": _x402_probe_seconds,
-            "options": {"expires": _x402_probe_seconds},
-        }
+    # x402 probe / monitoring (roadmap item 7) and the storage reaper
+    # (roadmap item 12): pulled into _add_x402_beats so this function stays
+    # under ruff's C901 branch budget -- same extraction as falcon_main.py's
+    # _register_x402_storage_if_enabled.
+    _add_x402_beats(schedule)
     if is_crawler_enabled(CrawlerType.METRICS):
         schedule["collect-price-metrics"] = {
             "task": "app.tasks.metrics.collect_price_metrics",

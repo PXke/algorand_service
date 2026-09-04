@@ -14,6 +14,7 @@ opposite of the code). Follow them literally.
 - Removed lanes, do not restore: Discord/Reddit/Telegram ingest, external push, weekly digest, Flutter frontend, `publish_queue` table.
 - `.claude/worktrees/` is agent scratch — never read, grep, or count it as codebase.
 - No git remote → CI has never run. "CI is green" means nothing. Verify locally (section 6).
+- Hosts and OS processes: `docs/ops-hosts.md`. `deploy.sh` only ships **5.135.131.229** (algorand.pxke.me / algorand-api.pxke.me). The OpenClaw marketing/seller/tester agent is a **separate** box at `92.222.76.121` (SSH as root) — not in this deploy path, not wash volume.
 
 ## 1. Scope discipline
 

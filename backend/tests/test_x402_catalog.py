@@ -375,6 +375,19 @@ def test_prices_come_from_settings(monkeypatch: pytest.MonkeyPatch) -> None:
     assert by_key[("POST", "/api/v1/x402/list")]["paid"] is True
 
 
+def test_storage_paid_routes_advertise_price_per_mb(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Storage create/renew are per-MB: price_usd is the rate, price_unit is MB, unlike every flat-priced route."""
+    _all_gates_on(monkeypatch)
+    by_key = {(r["method"], r["path"]): r for r in _catalog_routes(monkeypatch)}
+    create = by_key[("POST", "/api/v1/x402/storage/backups")]
+    renew = by_key[("POST", "/api/v1/x402/storage/backups/:backup_id/renew")]
+    assert create["price_usd"] == settings.x402_storage_price_per_mb
+    assert create["price_unit"] == "MB"
+    assert renew["price_unit"] == "MB"
+    listing = by_key[("POST", "/api/v1/x402/list")]
+    assert listing["price_unit"] is None
+
+
 def test_every_paid_route_has_a_real_price_setting_and_resource() -> None:
     """A paid roster entry must name a settings attribute that exists and a ledger resource id."""
     for product in catalog_service.PRODUCTS:

@@ -38,8 +38,11 @@ class CatalogRoute:
     """One product route as the catalog describes it.
 
     `price_setting` names the settings attribute holding the route's Money
-    price; None means the route is free. `resource` is the stable id the 402
-    offer and the settlement ledger use for the route (paid routes only).
+    price; None means the route is free. `price_unit` is None for a flat
+    `price_usd`, or a unit name ("MB") when `price_usd` is a per-unit rate
+    rather than the amount actually charged -- storage's paid routes multiply
+    this rate by ceil(size/1MB) in the live 402 offer. `resource` is the
+    stable id the 402 offer and the settlement ledger use (paid routes only).
     `input_example` mirrors the example the route declares in its Bazaar
     discovery extension, where it declares one.
     """
@@ -49,6 +52,7 @@ class CatalogRoute:
     description: str
     price_setting: str | None = None
     resource: str | None = None
+    price_unit: str | None = None
     input_example: dict[str, Any] | None = None
     # True for a paid route that also accepts `?preview=true` (see
     # app/modules/x402/preview.py): a redacted, unpaid, rate-limited response
@@ -847,9 +851,10 @@ PRODUCTS: tuple[Product, ...] = (
                 method="POST",
                 path="/api/v1/x402/storage/backups",
                 description=(
-                    "Store one opaque backup blob for x402_storage_term_days (JSON body: "
-                    "base64 data, optional label; query param declared_size_bytes=<N>, "
-                    "priced at ceil(N/1MB) * x402_storage_price_per_mb, capped at "
+                    "Store one opaque backup blob for up to x402_storage_max_remaining_days "
+                    "(JSON body: base64 data, optional label; query param "
+                    "declared_size_bytes=<N>, priced at ceil(N/1MB) * "
+                    "x402_storage_price_per_mb per megabyte, capped at "
                     "x402_storage_max_backup_mb). Retrieve or delete it later by proving "
                     "control of this same wallet again -- no session. Stored content is "
                     "OPAQUE with no confidentiality guarantee beyond owner-only access: "
@@ -857,6 +862,7 @@ PRODUCTS: tuple[Product, ...] = (
                 ),
                 price_setting="x402_storage_price_per_mb",
                 resource="x402-storage-backup-create",
+                price_unit="MB",
                 input_example={"data": "<base64>", "label": "my-agent-state-backup"},
                 supports_promo=False,
                 supports_receipts=False,
@@ -883,14 +889,18 @@ PRODUCTS: tuple[Product, ...] = (
                 method="POST",
                 path="/api/v1/x402/storage/backups/:backup_id/renew",
                 description=(
-                    "Extend an existing backup's retrieval window by x402_storage_term_days "
-                    "more days, from the later of now and its current expiry (JSON body: "
-                    "wallet), priced from the backup's already-stored size. Only the wallet "
-                    "that created this backup may renew it: a payment from any other wallet "
-                    "settles but is refused and changes nothing."
+                    "Extend an existing backup's retrieval window, capped at "
+                    "x402_storage_max_remaining_days remaining from now (JSON body: "
+                    "wallet), priced per megabyte from the backup's already-stored size. "
+                    "Works during the x402_storage_reaper_grace_days window after expiry. "
+                    "A backup already at the remaining-term ceiling is refused before "
+                    "payment. Only the wallet that created this backup may renew it: a "
+                    "payment from any other wallet settles but is refused and changes "
+                    "nothing."
                 ),
                 price_setting="x402_storage_price_per_mb",
                 resource="x402-storage-backup-renew",
+                price_unit="MB",
                 input_example={"wallet": "A" * 58},
                 supports_promo=False,
                 supports_receipts=False,
@@ -900,7 +910,7 @@ PRODUCTS: tuple[Product, ...] = (
                 path="/api/v1/x402/storage/backups/:backup_id",
                 description=(
                     "Free, wallet-signature-authenticated, owner-only: delete one backup "
-                    "outright (connector bytes removed before the row is marked deleted)."
+                    "outright (row marked deleted, then connector bytes removed)."
                 ),
             ),
         ),
@@ -936,6 +946,7 @@ def _route_json(product: Product, route: CatalogRoute) -> dict[str, Any]:
         "path": route.path,
         "paid": route.paid,
         "price_usd": getattr(settings, route.price_setting) if route.price_setting else None,
+        "price_unit": route.price_unit,
         "resource": route.resource,
         "description": route.description,
         "input_example": route.input_example,

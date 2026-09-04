@@ -59,6 +59,34 @@ def compute_price(declared_size_bytes: int) -> str:
     return f"${total:.6f}"
 
 
+def max_remaining_epoch(now: datetime) -> int:
+    """UTC epoch of now + x402_storage_max_remaining_days -- the hard remaining-term ceiling."""
+    return int((now + timedelta(days=settings.x402_storage_max_remaining_days)).timestamp())
+
+
+def compute_expiry_epoch(now: datetime, *, current_expires_at: int | None) -> int:
+    """The expires_at to write for a create (current=None) or renew.
+
+    Adds x402_storage_term_days onto max(now, current expiry), then caps at
+    now + x402_storage_max_remaining_days so remaining storage can never
+    exceed three months.
+    """
+    now_epoch = int(now.timestamp())
+    base = now_epoch if current_expires_at is None else max(now_epoch, current_expires_at)
+    proposed = int(
+        (
+            datetime.fromtimestamp(base, tz=UTC) + timedelta(days=settings.x402_storage_term_days)
+        ).timestamp()
+    )
+    return min(proposed, max_remaining_epoch(now))
+
+
+def at_remaining_cap(backup: StoredBackup, *, now: datetime | None = None) -> bool:
+    """True when this backup already has the maximum remaining retrievable life, so a renew would not extend it."""
+    moment = now or datetime.now(tz=UTC)
+    return backup.expires_at_epoch >= max_remaining_epoch(moment)
+
+
 def validate_declared_size(declared_size_bytes: int) -> None:
     """Refuse a declared size that is not positive or exceeds the hard per-blob cap.
 
@@ -168,9 +196,7 @@ class BackupService:
             content_hash=hashlib.sha256(data).hexdigest(),
             label=label.strip()[:MAX_LABEL_LENGTH],
             created_at_epoch=int(moment.timestamp()),
-            expires_at_epoch=int(
-                (moment + timedelta(days=settings.x402_storage_term_days)).timestamp()
-            ),
+            expires_at_epoch=compute_expiry_epoch(moment, current_expires_at=None),
             status=STATUS_ACTIVE,
             settlement_tx_id=settlement_tx_id,
         )
@@ -215,15 +241,16 @@ class BackupService:
         return backend.get(backup.connector_params)
 
     def delete(self, backup: StoredBackup) -> bool:
-        """Delete the connector bytes, then mark the row deleted. Returns True once the row is marked.
+        """Mark the row deleted, then delete the connector bytes. Returns True once the row is marked.
 
-        Bytes-then-row ordering (not the reverse): a crash between the two
-        steps leaves a `status="deleted"` row pointing at already-gone bytes
-        (a safe, user-facing 404 on any later read) rather than a `status=
-        "active"` row whose bytes silently vanished from disk with nothing
-        recording that they are gone -- the former is a clean failure mode,
-        the latter is an actual, undetected disk leak.
+        Row-then-bytes ordering: a crash between the two steps leaves a
+        `status="deleted"` row (GET/list 404) whose bytes may still sit on
+        disk as an orphan counted by usage_bytes() -- a clean failure mode
+        -- rather than a `status="active"` row whose bytes silently vanished
+        (GET 500 backup_unreadable, still listed). The reaper also walks
+        due rows through this same method.
         """
+        self.store.upsert(replace(backup, status=STATUS_DELETED))
         backend = self.backend_for(backup.connector)
         if backend is not None:
             try:
@@ -231,35 +258,29 @@ class BackupService:
             except Exception:
                 logger.warning(
                     "x402 storage: connector delete failed for wallet=%s backup_id=%s "
-                    "(marking the row deleted anyway)",
+                    "(row already marked deleted)",
                     backup.wallet,
                     backup.backup_id,
                     exc_info=True,
                 )
-        self.store.upsert(replace(backup, status=STATUS_DELETED))
         return True
 
     def renew(
         self, backup: StoredBackup, *, settlement_tx_id: str, now: datetime | None = None
     ) -> StoredBackup:
-        """Extend a backup's expiry by one more configured term and return it.
+        """Extend a backup's expiry by one more configured term, capped at x402_storage_max_remaining_days.
 
-        The new expiry runs from max(now, current expires_at) -- same "later
-        of now and current expiry" rule x402_directory's renew() uses:
-        renewing early adds a full term on top of what is left, renewing
-        after expiry starts a fresh one from now, and neither shortens what
-        was already paid for. Nothing about the stored bytes or their
-        connector changes.
+        Base is max(now, current expires_at) so an already-expired backup
+        (still inside the reaper grace window) starts a fresh term from now,
+        and a still-live backup is refreshed rather than shortened. The cap
+        is applied after that add: remaining storage can never exceed
+        three months from this call's `now`.
         """
         moment = now or datetime.now(tz=UTC)
-        base = max(int(moment.timestamp()), backup.expires_at_epoch)
         renewed = replace(
             backup,
-            expires_at_epoch=int(
-                (
-                    datetime.fromtimestamp(base, tz=UTC)
-                    + timedelta(days=settings.x402_storage_term_days)
-                ).timestamp()
+            expires_at_epoch=compute_expiry_epoch(
+                moment, current_expires_at=backup.expires_at_epoch
             ),
             settlement_tx_id=settlement_tx_id,
         )

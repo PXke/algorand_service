@@ -2,6 +2,8 @@
 
 > **Not Docker.** Local integration and pytest use [docker/README.md](../docker/README.md) (`docker-compose.yml`, testing only). This folder packages and runs the platform on a real host.
 
+Hosts, systemd units, and the separate OpenClaw agent box: [docs/ops-hosts.md](../docs/ops-hosts.md). `deploy.sh` does **not** ship that agent.
+
 Everything is driven by `deploy/deploy.sh`, configured by `deploy/deploy.conf`
 (every value can be overridden from the environment):
 

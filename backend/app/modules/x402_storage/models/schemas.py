@@ -36,10 +36,10 @@ _MAX_LABEL_LENGTH = 256
 # Generous compile-time upper bound on the base64 request body so a wildly
 # oversized upload 400s before it is even fully decoded -- the REAL cap is
 # services/backup_service.validate_declared_size's x402_storage_max_backup_mb
-# check, run before the payment gate. Base64 inflates by ~4/3, so this is
-# comfortably above what even the largest configurable per-blob cap could
-# ever produce.
-_MAX_DATA_B64_LENGTH = 64 * 1024 * 1024
+# check, run before the payment gate. Base64 inflates by ~4/3, so 16 MiB of
+# base64 covers the 10MB raw cap plus JSON wrapping. nginx client_max_body_size
+# on the API vhost must stay above this (20M).
+_MAX_DATA_B64_LENGTH = 16 * 1024 * 1024
 
 
 class ChallengeRequest(msgspec.Struct, kw_only=True):

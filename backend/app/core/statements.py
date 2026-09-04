@@ -1789,12 +1789,12 @@ class X402SocialStmts:
 # x402_storage_backups
 # --------------------------------------------------------------------------- #
 class X402StorageStmts:
-    """Prepared statements for x402 agent backup storage (migration 111).
+    """Prepared statements for x402 agent backup storage (migrations 111 and 112).
 
-    One table, partitioned by wallet, clustered newest-first by backup_id
-    (a timeuuid) -- every access pattern this product needs (list a wallet's
-    own backups, point-read one by id) is single-partition, so no projection
-    table is needed the way the directory/board's global feeds need one.
+    Canonical table is partitioned by wallet, clustered newest-first by
+    backup_id (a timeuuid). The expiry projection (112) is partitioned by
+    the UTC date of expires_at so the reaper can find globally-due rows
+    without ALLOW FILTERING.
     """
 
     # Full INSERT, never a partial UPDATE (CLAUDE.md section 3) -- used for
@@ -1818,6 +1818,19 @@ class X402StorageStmts:
         "SELECT wallet, backup_id, connector, connector_params, size_bytes, content_hash, "
         "label, created_at, expires_at, status, settlement_tx_id "
         "FROM algorand_platform.x402_storage_backups WHERE wallet = ? LIMIT ?"
+    )
+    INSERT_BY_EXPIRY = _Stmt(
+        "INSERT INTO algorand_platform.x402_storage_by_expiry ("
+        "expiry_day, expires_at, wallet, backup_id"
+        ") VALUES (?, ?, ?, ?)"
+    )
+    DELETE_BY_EXPIRY = _Stmt(
+        "DELETE FROM algorand_platform.x402_storage_by_expiry "
+        "WHERE expiry_day = ? AND expires_at = ? AND wallet = ? AND backup_id = ?"
+    )
+    LIST_BY_EXPIRY_DAY = _Stmt(
+        "SELECT expiry_day, expires_at, wallet, backup_id "
+        "FROM algorand_platform.x402_storage_by_expiry WHERE expiry_day = ? LIMIT ?"
     )
 
 

@@ -46,12 +46,16 @@ from app.modules.x402_storage.models.domain import (
     StoredBackup,
 )
 from app.modules.x402_storage.services import auth_service
+from app.modules.x402_storage.services import reaper as reaper_module
 from app.modules.x402_storage.services.backup_service import (
     BackupService,
+    at_remaining_cap,
+    compute_expiry_epoch,
     compute_price,
     mb_units,
     validate_declared_size,
 )
+from app.modules.x402_storage.services.reaper import reap_expired
 from app.modules.x402_storage.stores.memory import InMemoryBackupStore
 
 _PAY_TO = "A" * 58
@@ -80,8 +84,10 @@ class _FakeRedis:
         """Get."""
         return self.store.get(key)
 
-    def set(self, key: str, value: str, *_a: object, **_kw: object) -> bool:
-        """Set."""
+    def set(self, key: str, value: str, *_a: object, **kw: object) -> bool:
+        """Set, honoring nx=True so the reaper lock can contend."""
+        if kw.get("nx") and key in self.store:
+            return False
         self.store[key] = value
         return True
 
@@ -198,6 +204,7 @@ def fake_redis(monkeypatch: pytest.MonkeyPatch) -> _FakeRedis:
     """Fake redis."""
     client = _FakeRedis()
     monkeypatch.setattr(auth_service, "get_redis", lambda: client)
+    monkeypatch.setattr(reaper_module, "get_redis", lambda: client)
     monkeypatch.setattr(rate_limit_core, "get_redis", lambda **_kw: client)
     monkeypatch.setattr(circuit_breaker, "get_redis", lambda **_kw: client)
     return client
@@ -217,7 +224,7 @@ def _stored(
     size_bytes: int = 10,
     content_hash: str = "h" * 64,
     status: str = STATUS_ACTIVE,
-    expires_in_days: int = 180,
+    expires_in_days: int = 90,
     now: datetime | None = None,
 ) -> StoredBackup:
     """Write and return one backup row directly into `store`, bypassing BackupService.create()."""
@@ -470,6 +477,43 @@ def test_cassandra_store_get_returns_none_for_a_malformed_backup_id(
     monkeypatch.setattr("app.core.cassandra.prepare_cached", lambda cql: cql)
     monkeypatch.setattr(cassandra_store, "get_cassandra_session", lambda: _Session())
     assert cassandra_store.CassandraBackupStore().get("W1", "not-a-uuid") is None
+
+
+def test_cassandra_store_upsert_writes_the_expiry_projection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A first insert writes the canonical row then the expiry projection (store before mark)."""
+    from app.modules.x402_storage.stores import cassandra as cassandra_store
+
+    now = datetime(2026, 9, 4, tzinfo=UTC)
+    backup_id = "11111111-1111-1111-1111-111111111111"
+    executed: list[str] = []
+
+    class _Session:
+        def execute(self, stmt: str, params: tuple) -> _CassandraResult:
+            """Execute."""
+            executed.append(stmt)
+            _ = params
+            return _CassandraResult([])
+
+    monkeypatch.setattr("app.core.cassandra.prepare_cached", lambda cql: cql)
+    monkeypatch.setattr(cassandra_store, "get_cassandra_session", lambda: _Session())
+
+    item = StoredBackup(
+        wallet="W1",
+        backup_id=backup_id,
+        connector="local",
+        connector_params={"path": "11/x.bin"},
+        size_bytes=4,
+        content_hash="h" * 64,
+        created_at_epoch=int(now.timestamp()),
+        expires_at_epoch=int((now + timedelta(days=90)).timestamp()),
+        status=STATUS_ACTIVE,
+        settlement_tx_id="T",
+    )
+    cassandra_store.CassandraBackupStore().upsert(item)
+    assert any("x402_storage_backups" in stmt and "INSERT" in stmt for stmt in executed)
+    assert any("x402_storage_by_expiry" in stmt and "INSERT" in stmt for stmt in executed)
 
 
 # --------------------------------------------------------------------------- #
@@ -740,10 +784,10 @@ def test_list_live_excludes_expired_and_deleted_and_is_newest_first(
     assert [i.backup_id for i in items] == [newer.backup_id, older.backup_id]
 
 
-def test_delete_removes_connector_bytes_before_marking_the_row_deleted(
+def test_delete_marks_the_row_deleted_then_removes_connector_bytes(
     store: InMemoryBackupStore,
 ) -> None:
-    """Delete removes connector bytes before marking the row deleted."""
+    """Delete marks the row deleted, then removes connector bytes."""
     backend = _FakeBackend()
     service = BackupService(store=store, backend=backend)
     backup = service.create(
@@ -782,33 +826,37 @@ def test_delete_marks_the_row_deleted_even_if_the_connector_delete_fails(
     assert row.status == STATUS_DELETED
 
 
-def test_renew_extends_from_the_later_of_now_and_current_expiry(
+def test_renew_caps_remaining_term_instead_of_stacking(
     store: InMemoryBackupStore, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Renewing a STILL-LIVE backup extends from its current expiry, not from now -- renewing 10 days into a 180-day term should not just add 10+180 days, it must add a full term ON TOP of what is already left."""
-    monkeypatch.setattr(settings, "x402_storage_term_days", 180)
+    """Renewing a still-live backup refreshes up to max_remaining_days from now, not a stacked extra term."""
+    monkeypatch.setattr(settings, "x402_storage_term_days", 90)
+    monkeypatch.setattr(settings, "x402_storage_max_remaining_days", 90)
     service = BackupService(store=store, backend=_FakeBackend())
     now = datetime.now(tz=UTC)
-    backup = _stored(store, wallet="W1", now=now, expires_in_days=180)
+    backup = _stored(store, wallet="W1", now=now, expires_in_days=80)
 
-    renewed = service.renew(backup, settlement_tx_id="TX-RENEW", now=now + timedelta(days=10))
+    renewed = service.renew(backup, settlement_tx_id="TX-RENEW", now=now)
 
-    # base = max(now+10d, current expiry now+180d) = now+180d, then +180d more.
-    expected = int((now + timedelta(days=360)).timestamp())
+    expected = int((now + timedelta(days=90)).timestamp())
     assert abs(renewed.expires_at_epoch - expected) <= 1
     assert renewed.settlement_tx_id == "TX-RENEW"
 
 
-def test_renew_resurrects_an_already_expired_backup_from_now(store: InMemoryBackupStore) -> None:
-    """Renew resurrects an already expired backup from now."""
+def test_renew_resurrects_an_already_expired_backup_from_now(
+    store: InMemoryBackupStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Renew resurrects an already expired backup from now, still capped at max remaining."""
+    monkeypatch.setattr(settings, "x402_storage_term_days", 90)
+    monkeypatch.setattr(settings, "x402_storage_max_remaining_days", 90)
     service = BackupService(store=store, backend=_FakeBackend())
     now = datetime.now(tz=UTC)
-    backup = _stored(store, wallet="W1", now=now - timedelta(days=400), expires_in_days=180)
+    backup = _stored(store, wallet="W1", now=now - timedelta(days=91), expires_in_days=90)
     assert backup.is_live(now_epoch=int(now.timestamp())) is False
 
     renewed = service.renew(backup, settlement_tx_id="TX-RENEW", now=now)
 
-    expected = int((now + timedelta(days=180)).timestamp())
+    expected = int((now + timedelta(days=90)).timestamp())
     assert abs(renewed.expires_at_epoch - expected) <= 1
 
 
@@ -1231,7 +1279,7 @@ def test_renew_by_another_wallet_settles_but_is_refused_and_never_refunded(
     monkeypatch.setattr(
         storage_routes, "backup_service", BackupService(store=store, backend=_FakeBackend())
     )
-    backup = _stored(store, wallet=owner)
+    backup = _stored(store, wallet=owner, expires_in_days=40)
     monkeypatch.setattr(
         storage_routes,
         "require_paid_request",
@@ -1274,7 +1322,7 @@ def test_renew_by_the_owner_extends_the_term_and_marks_fulfilled(
     monkeypatch.setattr(
         storage_routes, "backup_service", BackupService(store=store, backend=_FakeBackend())
     )
-    backup = _stored(store, wallet=owner)
+    backup = _stored(store, wallet=owner, expires_in_days=40)
     monkeypatch.setattr(
         storage_routes,
         "require_paid_request",
@@ -1307,7 +1355,7 @@ def test_renew_write_failure_after_ownership_confirmed_is_refunded_not_500(
     owner = "O" * 58
     service = BackupService(store=store, backend=_FakeBackend())
     monkeypatch.setattr(storage_routes, "backup_service", service)
-    backup = _stored(store, wallet=owner)
+    backup = _stored(store, wallet=owner, expires_in_days=40)
     monkeypatch.setattr(
         storage_routes,
         "require_paid_request",
@@ -1374,3 +1422,133 @@ def test_delete_backup_is_idempotent_second_call_is_404(
     second = _authed_delete()
     assert isinstance(second, Response)
     assert second.status_code == 404
+
+
+@pytest.mark.usefixtures("fake_redis")
+def test_renew_at_remaining_cap_is_refused_before_the_payment_gate(
+    monkeypatch: pytest.MonkeyPatch, store: InMemoryBackupStore
+) -> None:
+    """A backup already at the 90-day remaining ceiling is a free 400, never charged."""
+    monkeypatch.setattr(settings, "x402_storage_max_remaining_days", 90)
+    owner = "O" * 58
+    now = datetime.now(tz=UTC)
+    backup = _stored(store, wallet=owner, now=now, expires_in_days=91)
+    assert at_remaining_cap(backup, now=now)
+    monkeypatch.setattr(
+        storage_routes, "backup_service", BackupService(store=store, backend=_FakeBackend())
+    )
+    monkeypatch.setattr(storage_routes, "require_paid_request", _must_not_charge)
+
+    response = storage_routes.x402_storage_renew_backup(
+        _request(
+            method="POST",
+            path_params={"backup_id": backup.backup_id},
+            body=json.dumps({"wallet": owner}).encode(),
+        )
+    )
+
+    assert isinstance(response, Response)
+    assert response.status_code == 400
+    assert "term_at_maximum" in response.description
+
+
+@pytest.mark.usefixtures("fake_redis")
+def test_reaper_leaves_grace_window_untouched(store: InMemoryBackupStore) -> None:
+    """A backup that expired yesterday is still inside the 2-day grace window: not reaped, still renewable."""
+    backend = _FakeBackend()
+    service = BackupService(store=store, backend=backend)
+    now = datetime.now(tz=UTC)
+    backup = service.create(
+        wallet="W1",
+        data=b"keep-me",
+        declared_size_bytes=8,
+        label="",
+        settlement_tx_id="T",
+        now=now - timedelta(days=91),
+    )
+    assert backup.is_live(now_epoch=int(now.timestamp())) is False
+
+    result = reap_expired(service, now=now)
+
+    assert result["status"] == "ok"
+    assert result["reaped"] == 0
+    assert result["skipped_in_grace"] == 1
+    row = store.get("W1", backup.backup_id)
+    assert row is not None
+    assert row.status == STATUS_ACTIVE
+    assert backend.get(backup.connector_params) == b"keep-me"
+
+
+@pytest.mark.usefixtures("fake_redis")
+def test_reaper_deletes_after_grace(store: InMemoryBackupStore) -> None:
+    """A backup expired more than grace_days ago is marked deleted and its bytes removed."""
+    backend = _FakeBackend()
+    service = BackupService(store=store, backend=backend)
+    now = datetime.now(tz=UTC)
+    backup = service.create(
+        wallet="W1",
+        data=b"gone",
+        declared_size_bytes=4,
+        label="",
+        settlement_tx_id="T",
+        now=now - timedelta(days=93),
+    )
+
+    result = reap_expired(service, now=now)
+
+    assert result["status"] == "ok"
+    assert result["reaped"] == 1
+    row = store.get("W1", backup.backup_id)
+    assert row is not None
+    assert row.status == STATUS_DELETED
+    assert backend.get(backup.connector_params) is None
+
+
+@pytest.mark.usefixtures("fake_redis")
+def test_reap_route_404s_when_token_is_empty(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Reap route 404s when the token is unset -- empty = disabled."""
+    monkeypatch.setattr(settings, "x402_storage_reaper_token", "")
+    response = storage_routes.x402_storage_reap(_request(method="POST"))
+    assert isinstance(response, Response)
+    assert response.status_code == 404
+
+
+@pytest.mark.usefixtures("fake_redis")
+def test_reap_route_rejects_a_wrong_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Reap route rejects a wrong token."""
+    monkeypatch.setattr(settings, "x402_storage_reaper_token", "secret-token")
+    response = storage_routes.x402_storage_reap(
+        _request(method="POST", headers={"X-Storage-Reaper-Token": "nope"})
+    )
+    assert isinstance(response, Response)
+    assert response.status_code == 401
+
+
+@pytest.mark.usefixtures("fake_redis")
+def test_reap_route_runs_when_token_matches(
+    monkeypatch: pytest.MonkeyPatch, store: InMemoryBackupStore
+) -> None:
+    """Reap route runs the walk when the token matches."""
+    monkeypatch.setattr(settings, "x402_storage_reaper_token", "secret-token")
+    monkeypatch.setattr(
+        storage_routes, "backup_service", BackupService(store=store, backend=_FakeBackend())
+    )
+    result = storage_routes.x402_storage_reap(
+        _request(method="POST", headers={"X-Storage-Reaper-Token": "secret-token"})
+    )
+    assert isinstance(result, dict)
+    assert result["status"] == "ok"
+
+
+def test_compute_expiry_epoch_never_exceeds_max_remaining(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Create and renew expiry math never grants more than max_remaining_days from now."""
+    monkeypatch.setattr(settings, "x402_storage_term_days", 90)
+    monkeypatch.setattr(settings, "x402_storage_max_remaining_days", 90)
+    now = datetime(2026, 9, 4, tzinfo=UTC)
+    created = compute_expiry_epoch(now, current_expires_at=None)
+    assert created == int((now + timedelta(days=90)).timestamp())
+    already_long = int((now + timedelta(days=80)).timestamp())
+    renewed = compute_expiry_epoch(now, current_expires_at=already_long)
+    assert renewed == int((now + timedelta(days=90)).timestamp())
