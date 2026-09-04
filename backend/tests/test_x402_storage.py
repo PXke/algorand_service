@@ -23,6 +23,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Never
+from unittest.mock import patch
 
 import pytest
 
@@ -33,6 +34,7 @@ from algosdk import account, util
 from app.core import rate_limit as rate_limit_core
 from app.core.config import settings
 from app.core.http import QueryParams, Request, Response
+from app.modules.admin.api import routes as admin_routes
 from app.modules.x402 import circuit_breaker
 from app.modules.x402 import guard as x402_guard
 from app.modules.x402 import paid_request as paid_request_module
@@ -1552,3 +1554,173 @@ def test_compute_expiry_epoch_never_exceeds_max_remaining(
     already_long = int((now + timedelta(days=80)).timestamp())
     renewed = compute_expiry_epoch(now, current_expires_at=already_long)
     assert renewed == int((now + timedelta(days=90)).timestamp())
+
+
+# --------------------------------------------------------------------------- #
+# Admin inspect/force-delete (require_admin_wallet-gated, no owner check)
+# --------------------------------------------------------------------------- #
+def test_admin_inspect_denied_without_admin_auth() -> None:
+    """No require_admin_wallet stub patched in -- the real function runs and refuses."""
+    denied = admin_routes.admin_x402_storage_inspect(
+        _request(
+            method="GET",
+            query={"wallet": "W1", "backup_id": "B1"},
+            path="/api/v1/admin/x402-storage/inspect",
+        )
+    )
+    assert isinstance(denied, Response)
+    assert denied.status_code in (401, 403, 503)
+
+
+def test_admin_remove_denied_without_admin_auth() -> None:
+    """No require_admin_wallet stub patched in -- the real function runs and refuses."""
+    denied = admin_routes.admin_x402_storage_remove(
+        _request(
+            method="POST",
+            query={"wallet": "W1", "backup_id": "B1"},
+            path="/api/v1/admin/x402-storage/remove",
+        )
+    )
+    assert isinstance(denied, Response)
+    assert denied.status_code in (401, 403, 503)
+
+
+def test_admin_lookup_requires_both_wallet_and_backup_id(store: InMemoryBackupStore) -> None:
+    """Both admin routes 400 when either query param is missing."""
+    with (
+        patch.object(admin_routes, "require_admin_wallet", return_value=None),
+        patch.object(admin_routes, "verified_admin_wallet", return_value="ADMIN"),
+        patch.object(admin_routes, "backup_service", BackupService(store=store)),
+    ):
+        missing_backup_id = admin_routes.admin_x402_storage_inspect(
+            _request(method="GET", query={"wallet": "W1"})
+        )
+        assert isinstance(missing_backup_id, Response)
+        assert missing_backup_id.status_code == 400
+
+        missing_wallet = admin_routes.admin_x402_storage_remove(
+            _request(method="POST", query={"backup_id": "B1"})
+        )
+        assert isinstance(missing_wallet, Response)
+        assert missing_wallet.status_code == 400
+
+
+def test_admin_inspect_returns_data_and_verifies_hash_for_any_wallet(
+    tmp_path: Path, store: InMemoryBackupStore
+) -> None:
+    """Admin inspect works for a wallet that never authenticated -- no wallet-signature check."""
+    backend = LocalDiskStorageBackend(str(tmp_path))
+    params = backend.put(b"payload-bytes")
+    content_hash = hashlib.sha256(b"payload-bytes").hexdigest()
+    _stored(
+        store,
+        wallet="SOME-OTHER-WALLET",
+        backup_id="admin-inspect-1",
+        content_hash=content_hash,
+    )
+    row = store.get("SOME-OTHER-WALLET", "admin-inspect-1")
+    assert row is not None
+    store.upsert(
+        StoredBackup(
+            wallet=row.wallet,
+            backup_id=row.backup_id,
+            connector="local",
+            connector_params=params,
+            size_bytes=len(b"payload-bytes"),
+            content_hash=content_hash,
+            label=row.label,
+            created_at_epoch=row.created_at_epoch,
+            expires_at_epoch=row.expires_at_epoch,
+            status=row.status,
+            settlement_tx_id=row.settlement_tx_id,
+        )
+    )
+
+    with (
+        patch.object(admin_routes, "require_admin_wallet", return_value=None),
+        patch.object(admin_routes, "verified_admin_wallet", return_value="ADMIN"),
+        patch.object(admin_routes, "backup_service", BackupService(store=store, backend=backend)),
+    ):
+        result = admin_routes.admin_x402_storage_inspect(
+            _request(
+                method="GET",
+                query={"wallet": "SOME-OTHER-WALLET", "backup_id": "admin-inspect-1"},
+            )
+        )
+
+    assert isinstance(result, dict)
+    assert result["wallet"] == "SOME-OTHER-WALLET"
+    assert base64.b64decode(result["data"]) == b"payload-bytes"
+    assert result["content_hash_verified"] is True
+
+
+def test_admin_inspect_404s_for_unknown_wallet_backup_id_pair(store: InMemoryBackupStore) -> None:
+    """A well-formed but unknown wallet/backup_id pair is a plain 404."""
+    with (
+        patch.object(admin_routes, "require_admin_wallet", return_value=None),
+        patch.object(admin_routes, "verified_admin_wallet", return_value="ADMIN"),
+        patch.object(admin_routes, "backup_service", BackupService(store=store)),
+    ):
+        result = admin_routes.admin_x402_storage_inspect(
+            _request(method="GET", query={"wallet": "NOBODY", "backup_id": "NOTHING"})
+        )
+    assert isinstance(result, Response)
+    assert result.status_code == 404
+
+
+def test_admin_remove_force_deletes_regardless_of_owner(
+    tmp_path: Path, store: InMemoryBackupStore
+) -> None:
+    """No wallet-signature/ownership check -- the admin route deletes on the (wallet, backup_id) pair alone."""
+    backend = LocalDiskStorageBackend(str(tmp_path))
+    params = backend.put(b"x")
+    row = _stored(store, wallet="VICTIM-OR-ABUSER", backup_id="admin-remove-1")
+    store.upsert(
+        StoredBackup(
+            wallet=row.wallet,
+            backup_id=row.backup_id,
+            connector="local",
+            connector_params=params,
+            size_bytes=row.size_bytes,
+            content_hash=row.content_hash,
+            label=row.label,
+            created_at_epoch=row.created_at_epoch,
+            expires_at_epoch=row.expires_at_epoch,
+            status=row.status,
+            settlement_tx_id=row.settlement_tx_id,
+        )
+    )
+
+    with (
+        patch.object(admin_routes, "require_admin_wallet", return_value=None),
+        patch.object(admin_routes, "verified_admin_wallet", return_value="ADMIN"),
+        patch.object(admin_routes, "backup_service", BackupService(store=store, backend=backend)),
+    ):
+        result = admin_routes.admin_x402_storage_remove(
+            _request(
+                method="POST",
+                query={"wallet": "VICTIM-OR-ABUSER", "backup_id": "admin-remove-1"},
+            )
+        )
+
+    assert isinstance(result, dict)
+    assert result == {"deleted": True, "wallet": "VICTIM-OR-ABUSER", "backup_id": "admin-remove-1"}
+    reloaded = store.get("VICTIM-OR-ABUSER", "admin-remove-1")
+    assert reloaded is not None
+    assert reloaded.status == STATUS_DELETED
+    assert backend.get(params) is None
+
+
+def test_admin_remove_404s_for_already_deleted(store: InMemoryBackupStore) -> None:
+    """Same not_found shape as the owner route for an already-deleted backup."""
+    _stored(store, wallet="W1", backup_id="already-gone", status=STATUS_DELETED)
+    with (
+        patch.object(admin_routes, "require_admin_wallet", return_value=None),
+        patch.object(admin_routes, "verified_admin_wallet", return_value="ADMIN"),
+        patch.object(admin_routes, "backup_service", BackupService(store=store)),
+    ):
+        result = admin_routes.admin_x402_storage_remove(
+            _request(method="POST", query={"wallet": "W1", "backup_id": "already-gone"})
+        )
+    assert isinstance(result, Response)
+    assert result.status_code == 404

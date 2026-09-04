@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import logging
 from dataclasses import asdict
 
@@ -32,6 +34,8 @@ from app.modules.x402_social.models.domain import (
     SocialError,
 )
 from app.modules.x402_social.models.schemas import AdminModerationRemoveRequest
+from app.modules.x402_storage.api.routes import backup_metadata_json, backup_service
+from app.modules.x402_storage.models.domain import STATUS_DELETED
 
 logger = logging.getLogger(__name__)
 
@@ -2079,6 +2083,103 @@ def admin_x402_social_moderation_remove(request: Request) -> Response | dict:
     }
 
 
+def _admin_storage_lookup(request: Request) -> tuple[str, str] | Response:
+    """Shared `?wallet=&backup_id=` parsing for the two admin storage routes below.
+
+    The backups table is partitioned by `(wallet, backup_id)` -- there is no
+    admin-wide listing across wallets (that would need a new secondary
+    index, a separate design decision), so both routes require the caller
+    to already know which wallet owns the backup_id in question, same as
+    any real abuse report would name both.
+    """
+    wallet = query_param(request.query_params.get("wallet", ""))
+    backup_id = query_param(request.query_params.get("backup_id", ""))
+    if not wallet or not backup_id:
+        return json_error_response(400, "invalid_request", "wallet and backup_id are both required")
+    return wallet, backup_id
+
+
+def admin_x402_storage_inspect(request: Request) -> Response | dict:
+    """Admin-only: one backup's metadata plus its restored bytes (base64, sha256-verified), regardless of owner/expiry/deleted status.
+
+    Exists because x402_storage's opaque-content design (CLAUDE.md/catalog:
+    "no confidentiality guarantee beyond owner-only access") has no built-in
+    way to review what was actually stored -- an abuse report or a legal
+    request needs an operator to be able to look, which the owner-only
+    wallet-signature routes structurally cannot provide. Every call is
+    logged with the admin wallet for audit (same convention as the social
+    moderation lever above).
+    """
+    denied = require_admin_wallet(request)
+    if denied is not None:
+        return denied
+
+    lookup = _admin_storage_lookup(request)
+    if isinstance(lookup, Response):
+        return lookup
+    wallet, backup_id = lookup
+
+    admin_wallet = verified_admin_wallet(request)
+    logger.warning(
+        "x402 storage admin inspect: wallet=%s backup_id=%s admin_wallet=%s",
+        wallet,
+        backup_id,
+        admin_wallet or "unknown",
+    )
+
+    backup = backup_service.get(wallet, backup_id)
+    if backup is None:
+        return json_error_response(404, "not_found", "No backup with that wallet/backup_id")
+
+    payload = {**backup_metadata_json(backup), "wallet": wallet}
+    data = backup_service.read_bytes(backup)
+    if data is None:
+        payload["data"] = None
+        payload["data_error"] = "connector_unreadable"
+        return payload
+    actual_hash = hashlib.sha256(data).hexdigest()
+    payload["data"] = base64.b64encode(data).decode("ascii")
+    payload["content_hash_verified"] = actual_hash == backup.content_hash
+    return payload
+
+
+def admin_x402_storage_remove(request: Request) -> Response | dict:
+    """Admin-only: force-delete one backup regardless of owner, status, or expiry.
+
+    Same underlying mechanics as the owner's own DELETE route
+    (backup_service.delete -- mark deleted, then remove the connector
+    bytes), just without the wallet-signature/ownership check. For content
+    an operator has decided needs to come down now (illegal content, abuse
+    report, or similar) -- this route does not and cannot verify that
+    judgment call was made correctly, same trust-the-authenticated-admin
+    framing as the social moderation lever above. Every call is logged with
+    the admin wallet for audit.
+    """
+    denied = require_admin_wallet(request)
+    if denied is not None:
+        return denied
+
+    lookup = _admin_storage_lookup(request)
+    if isinstance(lookup, Response):
+        return lookup
+    wallet, backup_id = lookup
+
+    admin_wallet = verified_admin_wallet(request)
+    logger.warning(
+        "x402 storage admin remove: wallet=%s backup_id=%s admin_wallet=%s",
+        wallet,
+        backup_id,
+        admin_wallet or "unknown",
+    )
+
+    backup = backup_service.get(wallet, backup_id)
+    if backup is None or backup.status == STATUS_DELETED:
+        return json_error_response(404, "not_found", "No backup with that wallet/backup_id")
+
+    backup_service.delete(backup)
+    return {"deleted": True, "wallet": wallet, "backup_id": backup_id}
+
+
 def register_admin_routes(app: Router) -> None:
     """Register all admin API endpoints on the given Falcon app."""
     app.get("/api/v1/admin/analytics")(admin_analytics)
@@ -2157,3 +2258,8 @@ def register_admin_routes(app: Router) -> None:
     # "memory" (same product-store gate every x402_social route sits
     # behind, see app/modules/x402_social/api/routes.py and falcon_main.py).
     app.post("/api/v1/admin/x402-social/moderation/remove")(admin_x402_social_moderation_remove)
+    # Same "unconditionally registered, gated by require_admin_wallet only"
+    # shape -- only meaningfully durable once x402_storage_meta_store is off
+    # "memory" (see app/modules/x402_storage/api/routes.py, falcon_main.py).
+    app.get("/api/v1/admin/x402-storage/inspect")(admin_x402_storage_inspect)
+    app.post("/api/v1/admin/x402-storage/remove")(admin_x402_storage_remove)

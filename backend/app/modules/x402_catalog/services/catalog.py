@@ -857,8 +857,11 @@ PRODUCTS: tuple[Product, ...] = (
                     "x402_storage_price_per_mb per megabyte, capped at "
                     "x402_storage_max_backup_mb). Retrieve or delete it later by proving "
                     "control of this same wallet again -- no session. Stored content is "
-                    "OPAQUE with no confidentiality guarantee beyond owner-only access: "
-                    "encrypt sensitive data yourself before uploading."
+                    "OPAQUE: never scanned, indexed, or acted on by us. Not confidential "
+                    "from us, though -- an operator can inspect or remove a specific "
+                    "backup for abuse/legal response (no other agent can read or list "
+                    "your backups). Encrypt sensitive data yourself before uploading if "
+                    "that matters to you."
                 ),
                 price_setting="x402_storage_price_per_mb",
                 resource="x402-storage-backup-create",

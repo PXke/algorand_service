@@ -68,7 +68,7 @@ _OUTPUT_EXAMPLE = {
 }
 
 
-def _backup_json(item: StoredBackup) -> dict:
+def backup_metadata_json(item: StoredBackup) -> dict:
     """Serialize a stored backup's metadata for the wire.
 
     NEVER `connector` / `connector_params` -- an internal implementation
@@ -232,9 +232,11 @@ def x402_storage_create_backup(request: Request) -> Response:
             f"retrievable and deletable for up to {settings.x402_storage_max_remaining_days} days "
             "(one paid term, not stackable past that ceiling) by proving control of this same "
             "wallet again (no session -- POST .../auth/challenge then GET/DELETE "
-            "/storage/backups with the signed proof). Stored content is OPAQUE with NO "
-            "confidentiality guarantee beyond owner-only access control: encrypt sensitive "
-            "data yourself before uploading."
+            "/storage/backups with the signed proof). Stored content is OPAQUE: never "
+            "scanned, indexed, or acted on by us. Not confidential from us, though -- an "
+            "operator can inspect or remove a specific backup for abuse/legal response "
+            "(no other agent can). Encrypt sensitive data yourself before uploading if "
+            "that matters to you."
         ),
         extensions=describe_json_endpoint(
             body_type="json",
@@ -259,7 +261,7 @@ def x402_storage_create_backup(request: Request) -> Response:
     outcome = run_with_refund(
         result,
         resource=_RESOURCE_CREATE,
-        product_write=lambda: _backup_json(
+        product_write=lambda: backup_metadata_json(
             backup_service.create(
                 wallet=result.payer,
                 data=data,
@@ -385,7 +387,7 @@ def x402_storage_renew_backup(request: Request) -> Response:
     outcome = run_with_refund(
         result,
         resource=_RESOURCE_RENEW,
-        product_write=lambda: _backup_json(
+        product_write=lambda: backup_metadata_json(
             backup_service.renew(backup, settlement_tx_id=result.payment_txid or "")
         ),
         request=request,
@@ -414,7 +416,7 @@ def x402_storage_list_backups(request: Request) -> Response | dict:
         return json_error_response(400, "invalid_request", "limit must be an integer")
 
     items = backup_service.list_live(wallet, limit=limit)
-    return {"items": [_backup_json(item) for item in items]}
+    return {"items": [backup_metadata_json(item) for item in items]}
 
 
 def x402_storage_get_backup(request: Request) -> Response | dict:
@@ -462,13 +464,13 @@ def x402_storage_get_backup(request: Request) -> Response | dict:
             500, "integrity_check_failed", "Stored data failed integrity verification"
         )
 
-    return {**_backup_json(backup), "data": base64.b64encode(data).decode("ascii")}
+    return {**backup_metadata_json(backup), "data": base64.b64encode(data).decode("ascii")}
 
 
 def x402_storage_delete_backup(request: Request) -> Response | dict:
     """Free, wallet-signature-authenticated, owner-only: delete one backup outright.
 
-    Deletes the connector bytes first, then marks the row deleted (see
+    Marks the row deleted first, then deletes the connector bytes (see
     backup_service.delete()'s own docstring for why that ordering matters).
     404 covers not-found, not-owned and already-deleted, same reasoning as
     x402_storage_get_backup.
