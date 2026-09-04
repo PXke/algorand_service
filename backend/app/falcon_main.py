@@ -42,6 +42,7 @@ from app.modules.x402_receipts.api.routes import register_x402_receipts_routes
 from app.modules.x402_scan.api.routes import register_x402_scan_routes
 from app.modules.x402_social.api.routes import register_x402_social_routes
 from app.modules.x402_storage.api.routes import register_x402_storage_routes
+from app.modules.x402_uptime.api.routes import register_x402_uptime_routes
 from app.modules.x402_wellknown.api.routes import register_x402_wellknown_routes
 
 
@@ -192,6 +193,13 @@ def _register_x402_routes(router: FalconRouter) -> None:
     # safe to flip on for real traffic.
     if settings.x402_scan_enabled:
         register_x402_scan_routes(router)
+    # Prototype, off by default -- see modules/x402_uptime/__init__.py and
+    # docs/x402-uptime-check-design.md for the reasoned-but-not-owner-
+    # confirmed pricing/rate-limit/cache-TTL defaults still outstanding
+    # before this is safe to flip on for real traffic. Pulled into its own
+    # function (same reason _register_x402_storage_if_enabled is) purely to
+    # keep this function's branch count under ruff's C901 threshold.
+    _register_x402_uptime_if_enabled(router)
     # Phase S0 only (identity/foundation layer) -- see
     # docs/x402-social-design.md sections 1, 7 and app/modules/x402_social/.
     # Same "memory" gate as every other product: a paid write against a
@@ -224,6 +232,19 @@ def _register_x402_routes(router: FalconRouter) -> None:
     # catalog itself: no product store gate of their own, they just reshape
     # whatever register_x402_catalog_routes's build_catalog() already produced.
     register_x402_wellknown_routes(router)
+
+
+def _register_x402_uptime_if_enabled(router: FalconRouter) -> None:
+    """Register the x402 uptime/reachability check's one route iff settings.x402_uptime_enabled.
+
+    Extracted out of _register_x402_routes purely to keep that function's
+    branch count under ruff's C901 threshold (same reason
+    _register_x402_storage_if_enabled is its own function) -- no second
+    condition here, unlike storage's ANDed pair, this product has exactly
+    one plain boolean gate.
+    """
+    if settings.x402_uptime_enabled:
+        register_x402_uptime_routes(router)
 
 
 def _register_x402_storage_if_enabled(router: FalconRouter) -> None:

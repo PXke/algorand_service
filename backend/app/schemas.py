@@ -576,6 +576,19 @@ class X402ScanUrlRequest(msgspec.Struct, kw_only=True):
     url: Annotated[str, Meta(min_length=8, max_length=2048)]
 
 
+# ── x402 uptime/reachability check ────────────────────────────────────────
+class X402UptimeCheckRequest(msgspec.Struct, kw_only=True):
+    """Request body for POST /api/v1/x402/uptime/check — one paid reachability check.
+
+    `url` is fetched server-side (SSRF-pinned, no body ever downloaded — see
+    modules/x402_uptime/services/checker.py); scheme (http/https only) is
+    validated by normalize_url at the route, not here, since Meta has no
+    scheme constraint.
+    """
+
+    url: Annotated[str, Meta(min_length=8, max_length=2048)]
+
+
 class X402PromoCreateRequest(msgspec.Struct, kw_only=True):
     """Request body for POST /api/v1/admin/x402/promo — issue one promo code.
 

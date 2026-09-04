@@ -476,6 +476,30 @@ PRODUCTS: tuple[Product, ...] = (
         ),
     ),
     Product(
+        key="uptime",
+        title="Uptime / reachability check",
+        store_setting=None,
+        bool_setting="x402_uptime_enabled",
+        routes=(
+            CatalogRoute(
+                method="POST",
+                path="/api/v1/x402/uptime/check",
+                description=(
+                    "Reachability check of a caller-supplied URL from our servers: HTTP "
+                    "status, response time, redirect chain and resolved IP. Never "
+                    "downloads the response body, never forwards caller-supplied headers "
+                    "to the target. A 'down' result is a normal, fully-charged answer, "
+                    "same as 'up'."
+                ),
+                price_setting="x402_uptime_price",
+                resource="x402-uptime-check",
+                input_example={"url": _EXAMPLE_URL},
+                supports_promo=True,
+                supports_receipts=True,
+            ),
+        ),
+    ),
+    Product(
         key="kya",
         title="Know Your Agent",
         store_setting="kyc_store",

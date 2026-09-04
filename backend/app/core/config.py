@@ -558,6 +558,51 @@ class Settings(msgspec.Struct, kw_only=True):
     x402_scan_rate_limit_per_hour: int = 30
     # ── end x402 file/tarball scan ──
 
+    # ── x402 uptime/reachability check. See app/modules/x402_uptime/ and
+    # docs/x402-uptime-check-design.md. Prototype/v0: a single GET, no
+    # response body ever downloaded (status line + headers + timing only),
+    # SSRF-guarded on every hop (reuses media's _resolve_public_ip, same
+    # shortcut x402_scan already takes), cached per target with an
+    # asymmetric TTL, rate-limited on two independent dimensions (caller IP
+    # and target host). Disabled by default — this is a design prototype,
+    # not a live product; the price is directly anchored against
+    # x402_ping_price/x402_news_search_price (both $0.001), but both
+    # rate-limit numbers and the cache TTLs below are reasoned defaults, not
+    # owner-confirmed operating parameters — see the design doc's Open
+    # Questions before flipping this on.
+    x402_uptime_enabled: bool = False
+    x402_uptime_price: str = "$0.001"
+    # Per caller IP, covering the free pre-payment surface (URL validation,
+    # a 402 offer lookup) the same way x402_scan_rate_limit_per_hour does —
+    # 120/hour matches the majority convention in this codebase
+    # (news/board/features/grading/catalog) rather than scan's tighter
+    # 30/hour, because this endpoint's pre-payment work is cheap (URL
+    # parsing only, no sandbox/container spin-up).
+    x402_uptime_rate_limit_per_hour: int = 120
+    # Per target host[:port], counting only REAL fetches (cache hits never
+    # increment it) — the actual DDoS defense: bounds real outbound traffic
+    # to any one target regardless of how many different callers/wallets pay
+    # for a check. No existing precedent in this codebase for a
+    # caller-chosen-destination limit; 20/hour (~1 real check every 3
+    # minutes per target) is a fresh judgment call, not derived from
+    # anything else here.
+    x402_uptime_target_rate_limit_per_hour: int = 20
+    # Asymmetric cache freshness window: a "down" result (unreachable or a
+    # 5xx) is trusted for less time than an "up" one, same direction as the
+    # media proxy's own asymmetric TTL (24h success vs 1h failure
+    # placeholder) — a real recovery should become visible again quickly.
+    # Which direction is actually SAFER to get wrong is an open product-trust
+    # question the owner hasn't stated; see the design doc.
+    x402_uptime_cache_ttl_up_seconds: int = 180
+    x402_uptime_cache_ttl_down_seconds: int = 30
+    # Per-hop connect+read-headers timeout. No separate overall deadline is
+    # needed the way x402_scan/the x402 probe require one: there is no
+    # response body to slow-drip here, so the worst case is bounded by this
+    # value times (x402_uptime_max_redirects + 1).
+    x402_uptime_check_timeout_s: float = 5.0
+    x402_uptime_max_redirects: int = 3
+    # ── end x402 uptime/reachability check ──
+
     # ── x402 agent backup storage (roadmap item 12: pay-per-MB storage; owner
     # design decision made 2026-09-03, this is the "starts local-disk-only"
     # first cut -- a second cloud connector (Wasabi) is a documented future

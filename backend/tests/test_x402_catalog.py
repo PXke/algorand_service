@@ -64,6 +64,7 @@ _STORAGE_LOCAL_ROOT_PLACEHOLDER = "/tmp/x402-storage-catalog-test-root"
 # cross-check tests passed vacuously without ever exercising it.
 _BOOL_GATES = {
     "scan": "x402_scan_enabled",
+    "uptime": "x402_uptime_enabled",
 }
 
 # A THIRD gating shape, distinct from both dicts above: a bool setting that
