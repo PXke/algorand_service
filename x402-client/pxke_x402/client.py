@@ -16,6 +16,7 @@ are deliberately out of scope for this thin wrapper).
 
 from __future__ import annotations
 
+from base64 import b64encode
 from typing import Any
 from urllib.parse import quote
 
@@ -771,3 +772,93 @@ class PxkeClient:
     def social_group(self, group_id: str) -> dict[str, Any]:
         """`GET /api/v1/x402/social/groups/{group_id}` -- free: one group's detail."""
         return self._free_request("GET", f"/api/v1/x402/social/groups/{quote(group_id, safe='')}")
+
+    # --------------------------------------------------------------------- #
+    # Uptime check
+    # --------------------------------------------------------------------- #
+
+    def uptime_check(
+        self,
+        url: str,
+        *,
+        preview: bool = False,
+        promo_code: str | None = None,
+        promo_wallet: str | None = None,
+    ) -> dict[str, Any]:
+        """`POST /api/v1/x402/uptime/check` -- paid: is `url` reachable from our servers right now?
+
+        The target is fetched SSRF-guarded server-side (private/loopback/
+        reserved IPs refused, every redirect hop re-validated) and its body
+        is never downloaded -- the response tells you status/latency/
+        redirect-chain, not page content. "Down" is a normal, fully-billable
+        answer, not a refunded failure.
+        """
+        return self._paid_request(
+            "POST",
+            "/api/v1/x402/uptime/check",
+            json_body={"url": url},
+            params=_bypass_params(preview=preview, promo_code=promo_code, promo_wallet=promo_wallet),
+        )
+
+    # --------------------------------------------------------------------- #
+    # Agent backup storage
+    # --------------------------------------------------------------------- #
+    #
+    # `GET`/`DELETE` on an existing backup and `GET .../backups` (listing)
+    # are deliberately NOT wrapped here, same reasoning as `GET /social/feed`
+    # above: they're free but wallet-signature-authenticated (POST
+    # /storage/auth/challenge then sign the returned nonce), a flow this
+    # thin client does not implement. Only the two PAID actions, where the
+    # settled payment itself proves the caller, are wrapped.
+
+    def storage_create_backup(
+        self,
+        data: bytes,
+        *,
+        label: str = "",
+        preview: bool = False,
+        promo_code: str | None = None,
+        promo_wallet: str | None = None,
+    ) -> dict[str, Any]:
+        """`POST /api/v1/x402/storage/backups` -- paid: store an opaque backup blob.
+
+        Priced per MB against `len(data)` (sent as `declared_size_bytes`,
+        required by the server BEFORE the 402 offer is built -- this method
+        computes it for you from the bytes given). The paying wallet is the
+        only one that can ever retrieve or delete this backup again (a
+        fresh signed-challenge proof, not a session) -- see the server's own
+        `POST /storage/auth/challenge` for that flow, not wrapped here.
+        Content is opaque and unencrypted by us: encrypt sensitive data
+        yourself before calling this if that matters to you.
+        """
+        return self._paid_request(
+            "POST",
+            "/api/v1/x402/storage/backups",
+            json_body={"data": b64encode(data).decode("ascii"), "label": label},
+            params={
+                "declared_size_bytes": len(data),
+                **_bypass_params(preview=preview, promo_code=promo_code, promo_wallet=promo_wallet),
+            },
+        )
+
+    def storage_renew_backup(
+        self,
+        backup_id: str,
+        wallet: str,
+        *,
+        preview: bool = False,
+        promo_code: str | None = None,
+        promo_wallet: str | None = None,
+    ) -> dict[str, Any]:
+        """`POST /api/v1/x402/storage/backups/{backup_id}/renew` -- paid: extend a backup's retrieval window.
+
+        Priced from the backup's already-stored size. `wallet` must be the
+        one that created this backup -- a payment from any other wallet
+        settles but is refused (403) and changes nothing.
+        """
+        return self._paid_request(
+            "POST",
+            f"/api/v1/x402/storage/backups/{quote(backup_id, safe='')}/renew",
+            json_body={"wallet": wallet},
+            params=_bypass_params(preview=preview, promo_code=promo_code, promo_wallet=promo_wallet),
+        )

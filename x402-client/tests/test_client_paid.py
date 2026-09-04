@@ -277,3 +277,58 @@ def test_social_agent_search_sends_comma_joined_interests_as_a_query_param() -> 
     retry_call = session.calls[1]
     assert retry_call.url == f"{BASE_URL}/api/v1/x402/social/agents/search"
     assert retry_call.params == {"interests": "defi,nft", "limit": 10}
+
+
+# --------------------------------------------------------------------------- #
+# Uptime check
+# --------------------------------------------------------------------------- #
+def test_uptime_check_sends_the_url_in_the_body() -> None:
+    session = FakeSession(
+        [
+            FakeResponse(402, headers=_offer_headers()),
+            FakeResponse(200, {"reachable": True, "settlement_tx_id": "TX1"}),
+        ]
+    )
+    client = PxkeClient(session=session, http_client=FakePaymentHTTPClient())
+
+    client.uptime_check("https://example.com")
+
+    retry_call = session.calls[1]
+    assert retry_call.url == f"{BASE_URL}/api/v1/x402/uptime/check"
+    assert retry_call.json_body == {"url": "https://example.com"}
+
+
+# --------------------------------------------------------------------------- #
+# Agent backup storage
+# --------------------------------------------------------------------------- #
+def test_storage_create_backup_base64_encodes_data_and_declares_its_size() -> None:
+    session = FakeSession(
+        [
+            FakeResponse(402, headers=_offer_headers()),
+            FakeResponse(200, {"backup_id": "b1", "settlement_tx_id": "TX1"}),
+        ]
+    )
+    client = PxkeClient(session=session, http_client=FakePaymentHTTPClient())
+
+    client.storage_create_backup(b"hello world", label="my backup")
+
+    first_call, retry_call = session.calls
+    assert first_call.url == f"{BASE_URL}/api/v1/x402/storage/backups"
+    assert first_call.params == {"declared_size_bytes": 11}
+    assert retry_call.json_body == {"data": "aGVsbG8gd29ybGQ=", "label": "my backup"}
+
+
+def test_storage_renew_backup_sends_wallet_in_the_body() -> None:
+    session = FakeSession(
+        [
+            FakeResponse(402, headers=_offer_headers()),
+            FakeResponse(200, {"backup_id": "b1", "settlement_tx_id": "TX1"}),
+        ]
+    )
+    client = PxkeClient(session=session, http_client=FakePaymentHTTPClient())
+
+    client.storage_renew_backup("b/1", "WALLETADDR")
+
+    retry_call = session.calls[1]
+    assert retry_call.url == f"{BASE_URL}/api/v1/x402/storage/backups/b%2F1/renew"
+    assert retry_call.json_body == {"wallet": "WALLETADDR"}

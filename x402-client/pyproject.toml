@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pxke-x402-client"
-version = "0.4.0"
+version = "0.5.0"
 description = "Thin client for PXke's x402 marketplace (https://algorand-api.pxke.me): free reads plus x402-signed paid calls on Algorand mainnet."
 readme = "README.md"
 requires-python = ">=3.10"
