@@ -32,6 +32,18 @@ _PARAM_RE = re.compile(r":([A-Za-z_][A-Za-z0-9_]*)")
 
 # Every store setting falcon_main.py gates a product on, plus the product key
 # the catalog files that product under.
+#
+# "storage" is a SECOND special case (see the "storage" Product's own
+# nonempty_string_setting="x402_storage_local_root" in services/catalog.py):
+# its registration needs BOTH this store durable AND a connector root
+# configured, so toggling x402_storage_meta_store alone (as
+# test_each_product_gate_matches_create_app below does for every entry in
+# this dict) is only correct here because _configure() below ALWAYS sets
+# x402_storage_local_root to a valid placeholder in its baseline (the same
+# "just make it valid, not a per-test toggle" treatment as
+# x402_pay_to_address/x402_network) -- test_storage_requires_both_meta_store_
+# and_local_root separately proves the second half of the AND actually
+# matters.
 _STORE_GATES = {
     "directory": "x402_directory_store",
     "board": "x402_board_store",
@@ -40,7 +52,10 @@ _STORE_GATES = {
     "news": "news_store",
     "kya": "kyc_store",
     "social": "x402_social_store",
+    "storage": "x402_storage_meta_store",
 }
+
+_STORAGE_LOCAL_ROOT_PLACEHOLDER = "/tmp/x402-storage-catalog-test-root"
 
 # Same idea for a product gated on a plain boolean instead of a store setting
 # (Product.bool_setting) -- added 2026-09-01 after x402_scan shipped with a
@@ -111,6 +126,11 @@ def _configure(monkeypatch: pytest.MonkeyPatch, *, enabled: bool = True, **store
     monkeypatch.setattr(settings, "x402_enabled", enabled)
     monkeypatch.setattr(settings, "x402_network", ALGORAND_TESTNET_CAIP2)
     monkeypatch.setattr(settings, "x402_pay_to_address", _PAY_TO)
+    # Baseline "just make it valid" infra constant, same treatment as
+    # x402_pay_to_address/x402_network above -- see _STORE_GATES's own
+    # comment on why "storage" needs this set for its single-axis store-gate
+    # parametrization to mean what it means for every other product here.
+    monkeypatch.setattr(settings, "x402_storage_local_root", _STORAGE_LOCAL_ROOT_PLACEHOLDER)
     for setting in _STORE_GATES.values():
         monkeypatch.setattr(settings, setting, "memory")
     for setting in _BOOL_GATES.values():
@@ -219,6 +239,39 @@ def test_each_bool_gated_product_matches_create_app(
             continue
         for route in other.routes:
             assert route.method not in _registered_methods(app, route.path), route.path
+
+
+def test_storage_requires_both_meta_store_and_local_root(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The "storage" product is the one _STORE_GATES entry with a SECOND gate (Product.nonempty_string_setting="x402_storage_local_root") -- neither its store nor its root alone is enough, unlike every other product in that dict.
+
+    test_each_product_gate_matches_create_app above only exercises the store
+    half (it relies on _configure()'s baseline always setting a valid
+    local_root placeholder); this proves the AND actually holds both ways.
+    """
+    probe_path = "/api/v1/x402/storage/backups"
+
+    _configure(monkeypatch, x402_storage_meta_store="cassandra", x402_storage_local_root="")
+    app = create_app()
+    assert not _registered_methods(app, probe_path)
+    assert not any(route["product"] == "storage" for route in _catalog_routes(monkeypatch))
+
+    _configure(
+        monkeypatch,
+        x402_storage_meta_store="memory",
+        x402_storage_local_root=_STORAGE_LOCAL_ROOT_PLACEHOLDER,
+    )
+    app = create_app()
+    assert not _registered_methods(app, probe_path)
+    assert not any(route["product"] == "storage" for route in _catalog_routes(monkeypatch))
+
+    _configure(
+        monkeypatch,
+        x402_storage_meta_store="cassandra",
+        x402_storage_local_root=_STORAGE_LOCAL_ROOT_PLACEHOLDER,
+    )
+    app = create_app()
+    assert _registered_methods(app, probe_path)
+    assert any(route["product"] == "storage" for route in _catalog_routes(monkeypatch))
 
 
 def test_social_moderation_routes_need_their_own_extra_gate_on_top_of_the_store_gate(
@@ -377,6 +430,16 @@ _PROMO_UNWIRED_RESOURCES = {
     # candidate for `supports_promo=True` if this module's promo stance is
     # ever revisited.
     "x402-social-agent-search",
+    # x402_storage's two paid routes (backup create, renew): same reasoning
+    # as x402_social's reversal above -- PaymentResult.payer is fed straight
+    # in as the ROW'S OWNING WALLET (x402_storage_backups is partitioned by
+    # it), not just payment attribution. A promo bypass has no proven payer
+    # at all (modules/x402/promo.py's own docstring), which would make the
+    # backup's owner an unauthenticated caller-supplied identity with no
+    # wallet-control proof behind it -- exactly the gap the social reversal
+    # closed for the same reason.
+    "x402-storage-backup-create",
+    "x402-storage-backup-renew",
 }
 
 

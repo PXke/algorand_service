@@ -106,9 +106,16 @@ class Product:
     PRODUCTS entry at all, so it never appeared in the catalog or
     /.well-known/x402 -- store_setting alone had no way to express a plain
     boolean gate, so a product like this was easy to add to falcon_main.py
-    and simply forget here. Both gates apply (AND'd) when both are set; a
-    product with neither gate (only the catalog itself) is registered
-    whenever x402 is enabled.
+    and simply forget here.
+    `nonempty_string_setting` is a plain string settings attribute that must
+    be non-empty once trimmed (e.g. x402_storage_local_root -- "empty path =
+    disabled", the same convention geoip_db_path uses). None means no such
+    gate. Added for x402_storage (2026-09-04): its registration needs BOTH
+    its own store durable AND a connector root actually configured, and
+    neither store_setting nor bool_setting alone could express the second,
+    inherently-a-path condition.
+    All set gates apply (AND'd); a product with none of the three (only the
+    catalog itself) is registered whenever x402 is enabled.
     """
 
     key: str
@@ -116,6 +123,7 @@ class Product:
     store_setting: str | None
     routes: tuple[CatalogRoute, ...]
     bool_setting: str | None = None
+    nonempty_string_setting: str | None = None
 
     def enabled(self) -> bool:
         """The same condition falcon_main.py registers this product under."""
@@ -123,9 +131,11 @@ class Product:
             return False
         if self.store_setting is not None and getattr(settings, self.store_setting) == "memory":
             return False
-        if self.bool_setting is not None:
-            return bool(getattr(settings, self.bool_setting))
-        return True
+        if self.bool_setting is not None and not bool(getattr(settings, self.bool_setting)):
+            return False
+        return self.nonempty_string_setting is None or bool(
+            str(getattr(settings, self.nonempty_string_setting)).strip()
+        )
 
 
 _EXAMPLE_URL = "https://api.example.com/v1/quote"
@@ -814,6 +824,84 @@ PRODUCTS: tuple[Product, ...] = (
                 path="/api/v1/x402/social/agents/:wallet/standing",
                 description="Free: one agent's moderation standing (offenses, cooldowns, bans).",
                 extra_bool_setting="x402_social_moderation_enabled",
+            ),
+        ),
+    ),
+    Product(
+        key="storage",
+        title="Agent backup storage",
+        store_setting="x402_storage_meta_store",
+        nonempty_string_setting="x402_storage_local_root",
+        routes=(
+            CatalogRoute(
+                method="POST",
+                path="/api/v1/x402/storage/auth/challenge",
+                description=(
+                    "Free: mint a short-TTL, single-use nonce for one wallet to sign, "
+                    "proving control for exactly one following call to GET/DELETE "
+                    "/storage/backups (JSON body: wallet). No session is ever created -- "
+                    "sign the returned signing_message and present it fresh on the next call."
+                ),
+            ),
+            CatalogRoute(
+                method="POST",
+                path="/api/v1/x402/storage/backups",
+                description=(
+                    "Store one opaque backup blob for x402_storage_term_days (JSON body: "
+                    "base64 data, optional label; query param declared_size_bytes=<N>, "
+                    "priced at ceil(N/1MB) * x402_storage_price_per_mb, capped at "
+                    "x402_storage_max_backup_mb). Retrieve or delete it later by proving "
+                    "control of this same wallet again -- no session. Stored content is "
+                    "OPAQUE with no confidentiality guarantee beyond owner-only access: "
+                    "encrypt sensitive data yourself before uploading."
+                ),
+                price_setting="x402_storage_price_per_mb",
+                resource="x402-storage-backup-create",
+                input_example={"data": "<base64>", "label": "my-agent-state-backup"},
+                supports_promo=False,
+                supports_receipts=False,
+            ),
+            CatalogRoute(
+                method="GET",
+                path="/api/v1/x402/storage/backups",
+                description=(
+                    "Free, wallet-signature-authenticated (query params: wallet, nonce, "
+                    "proof_method, signature_b64 from the challenge above): this wallet's "
+                    "own active, unexpired backups, newest first."
+                ),
+            ),
+            CatalogRoute(
+                method="GET",
+                path="/api/v1/x402/storage/backups/:backup_id",
+                description=(
+                    "Free, wallet-signature-authenticated, owner-only: one backup's metadata "
+                    "plus its restored bytes (base64), sha256-verified against the hash taken "
+                    "at upload time."
+                ),
+            ),
+            CatalogRoute(
+                method="POST",
+                path="/api/v1/x402/storage/backups/:backup_id/renew",
+                description=(
+                    "Extend an existing backup's retrieval window by x402_storage_term_days "
+                    "more days, from the later of now and its current expiry (JSON body: "
+                    "wallet), priced from the backup's already-stored size. Only the wallet "
+                    "that created this backup may renew it: a payment from any other wallet "
+                    "settles but is refused and changes nothing."
+                ),
+                price_setting="x402_storage_price_per_mb",
+                resource="x402-storage-backup-renew",
+                input_example={"wallet": "A" * 58},
+                supports_promo=False,
+                supports_receipts=False,
+            ),
+            CatalogRoute(
+                method="DELETE",
+                path="/api/v1/x402/storage/backups/:backup_id",
+                description=(
+                    "Free, wallet-signature-authenticated, owner-only: delete one backup "
+                    "outright (connector bytes removed before the row is marked deleted)."
+                ),
             ),
         ),
     ),

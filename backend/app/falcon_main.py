@@ -41,11 +41,12 @@ from app.modules.x402_news.api.routes import register_x402_news_routes
 from app.modules.x402_receipts.api.routes import register_x402_receipts_routes
 from app.modules.x402_scan.api.routes import register_x402_scan_routes
 from app.modules.x402_social.api.routes import register_x402_social_routes
+from app.modules.x402_storage.api.routes import register_x402_storage_routes
 from app.modules.x402_wellknown.api.routes import register_x402_wellknown_routes
 
 
 class CorsMiddleware:
-    """CORS handling equivalent to previous Robyn hooks."""
+    """CORS handling via Falcon middleware."""
 
     def __init__(self, origins: list[str]) -> None:
         self._origins = origins
@@ -199,6 +200,12 @@ def _register_x402_routes(router: FalconRouter) -> None:
     # to something durable.
     if settings.x402_social_store != "memory":
         register_x402_social_routes(router)
+    # Roadmap item 12 ("pay-per-MB storage") -- see app/modules/x402_storage/
+    # and _register_x402_storage_if_enabled's own docstring. Pulled into its
+    # own function (rather than an inline `if` here) purely to keep this
+    # function's branch count from crossing ruff's C901 threshold on this one
+    # extra product -- CLAUDE.md section 3: extract before adding a branch.
+    _register_x402_storage_if_enabled(router)
     # Signed fulfillment receipts (docs/x402-execution-trust-evaluation.md
     # item 1): the free read side, GET /api/v1/x402/receipts/{receipt_id}.
     # Generation itself (modules/x402/receipts.py, hooked into every
@@ -217,6 +224,21 @@ def _register_x402_routes(router: FalconRouter) -> None:
     # catalog itself: no product store gate of their own, they just reshape
     # whatever register_x402_catalog_routes's build_catalog() already produced.
     register_x402_wellknown_routes(router)
+
+
+def _register_x402_storage_if_enabled(router: FalconRouter) -> None:
+    """Register x402 agent backup storage's routes iff settings.x402_storage_registered.
+
+    That property ANDs a SECOND condition on top of the usual "memory"
+    durability gate every other product above uses: an empty
+    x402_storage_local_root means no connector can actually accept a write,
+    so registering anyway would 503 every paid request instead of a clean
+    404 for a product that was never really available. Same "empty path =
+    disabled" convention as geoip_db_path. See that property's own docstring
+    in app/core/config.py.
+    """
+    if settings.x402_storage_registered:
+        register_x402_storage_routes(router)
 
 
 app = create_app()

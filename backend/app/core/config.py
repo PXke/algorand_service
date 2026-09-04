@@ -95,6 +95,11 @@ class Settings(msgspec.Struct, kw_only=True):
     # If ALGOD_TOKEN is empty, read the node token from this path (world-readable
     # on a typical package install: /var/lib/algorand/algod.token).
     algod_token_file: str = ""
+    # /api/v1/algod/* is unauthenticated by design (see algod_proxy.py) --
+    # including the long-poll v2/status/wait-for-block-after route, which
+    # ties up a proxy connection until algod produces a block. Per-IP budget,
+    # same shape as img_proxy_rate_limit_per_hour.
+    algod_proxy_rate_limit_per_hour: int = 600
 
     redis_url: str = "redis://localhost:6379/0"
     # Wallet login session lifetime in Redis (default ~30 days).
@@ -553,6 +558,54 @@ class Settings(msgspec.Struct, kw_only=True):
     x402_scan_rate_limit_per_hour: int = 30
     # ── end x402 file/tarball scan ──
 
+    # ── x402 agent backup storage (roadmap item 12: pay-per-MB storage; owner
+    # design decision made 2026-09-03, this is the "starts local-disk-only"
+    # first cut -- a second cloud connector (Wasabi) is a documented future
+    # addition, not built here). See app/modules/x402_storage/.
+    x402_storage_meta_store: str = "memory"
+    # Storage connector root directory on local disk. Empty = not configured
+    # -- same "empty path = disabled" convention as geoip_db_path above. The
+    # product does not register at all (see falcon_main.py) unless this AND
+    # x402_storage_meta_store are both set, so a durable metadata store with
+    # no connector root never registers and then 503s every request.
+    x402_storage_local_root: str = ""
+    # Which connector backends/factory.py resolves for a NEW upload. Existing
+    # rows always use whatever connector they were written with (the row's
+    # own `connector` column), so flipping this only affects future writes.
+    # Only "local" resolves today -- "wasabi" is a documented future addition.
+    x402_storage_backend: str = "local"
+    # Money string per MB, parsed by the tagged money parser in
+    # modules/x402/client.py. The route prices a paid upload at
+    # ceil(declared_size_bytes / 1MB) * this rate, computed before the
+    # payment gate (the price must be fixed before the 402 offer).
+    x402_storage_price_per_mb: str = "$0.02"
+    # Hard cap on one backup, regardless of what declared_size_bytes claims.
+    # Checked on the free initial request, before the payment gate -- a
+    # cheap early rejection nobody pays for.
+    x402_storage_max_backup_mb: int = 10
+    # Global local-disk ceiling across every stored backup on this connector.
+    # Checked at write time via the connector's own usage_bytes(). Unlike the
+    # declared/actual size-mismatch refusal (the payer's fault, payment kept,
+    # never refunded), hitting this ceiling is OUR capacity problem, not the
+    # payer's -- backup_service.create() raises StorageCapacityUnavailable
+    # (deliberately not a StorageError/PlatformError) so
+    # modules/x402/paid_request.run_with_refund's generic-exception path
+    # refunds the payer and counts the failure against the resource's
+    # circuit breaker (see StorageCapacityUnavailable's own docstring).
+    x402_storage_local_max_total_mb: int = 5000
+    # How long a paid backup (or a renewal) stays retrievable before
+    # expires_at. Stated in the 402 offer's description before the payer
+    # commits.
+    x402_storage_term_days: int = 180
+    # Free-endpoint abuse gate (CLAUDE.md section 9: rate limit every free
+    # endpoint per IP), counted under its own key prefix. Covers the free
+    # challenge-issuance, list, detail and delete routes.
+    x402_storage_rate_limit_per_hour: int = 120
+    # Hard cap on a backup listing page -- no unbounded listings (CLAUDE.md
+    # section 4).
+    x402_storage_max_results: int = 100
+    # ── end x402 agent backup storage ──
+
     # ── x402 agent social network, Phase S0 only (identity/foundation layer;
     # see docs/x402-social-design.md and CLAUDE.md section 9 roadmap). The
     # module directory is app/modules/x402_social/. S1 (posts/comments/
@@ -742,6 +795,26 @@ class Settings(msgspec.Struct, kw_only=True):
         if not raw:
             return []
         return [origin.strip() for origin in raw.split(",") if origin.strip()]
+
+    @property
+    def x402_storage_registered(self) -> bool:
+        """Both x402_storage_meta_store is durable AND a local connector root is configured.
+
+        Read-only derived flag so falcon_main.py's own registration check
+        (`if settings.x402_storage_registered:`) stays a single-condition
+        `if`, not an `and` -- purely to keep _register_x402_routes's cyclomatic
+        complexity from crossing ruff's C901 threshold on this one extra
+        product. catalog.py's "storage" Product independently re-derives the
+        identical condition from the same two raw settings via its own
+        generic store_setting/nonempty_string_setting mechanism (Product.
+        enabled()'s own docstring: "the same condition falcon_main.py
+        registers this product under" -- every other product's gate is
+        already re-evaluated this same way in two places, this is not new
+        duplication).
+        """
+        return self.x402_storage_meta_store != "memory" and bool(
+            self.x402_storage_local_root.strip()
+        )
 
 
 _TRUTHY = {"1", "true", "yes", "on"}
