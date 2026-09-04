@@ -5,6 +5,24 @@ nginx only proxies `location ^~ /api/` to this backend on the API host and
 answers everything else with 404 (deploy/nginx/algorand-platform.conf), so a
 bare /x402/board would be unreachable in production without an nginx change
 this change is not authorized to deploy.
+
+Neither paid write route (x402_board_place, x402_board_renew) accepts
+modules/x402/promo.py's promo-code bypass (deliberately -- they never pass
+promo_code/promo_wallet into require_paid_request). Found and closed
+2026-09-04, the same pattern already found and fixed in x402_social
+2026-09-03: promo.py's own docstring says a promo redemption's wallet is
+checked for SYNTACTIC validity only ("a successful redemption is not proof
+the caller controls that wallet") -- fine for a route where payer is just
+payment attribution, but both routes here feed the payer straight in as the
+wallet that OWNS the placement (create's attribution, renew's
+`attributed != placement.payer` check, enforced identically inside
+board_service.renew()), so a promo bypass would have let anyone place "as"
+any wallet via `?promo_wallet=`, or free-renew (or otherwise probe the
+ownership check of) a placement they do not own by guessing/reading its
+public payer address. There is no cheap fix that keeps promo working here
+short of the same signed-challenge proof x402_social flagged needing (a real
+design task, not done) -- so promo is off for these two routes until that
+exists, full stop.
 """
 
 from __future__ import annotations
@@ -18,7 +36,6 @@ from app.modules.admin.auth import require_admin_wallet
 from app.modules.x402 import circuit_breaker
 from app.modules.x402.discovery import describe_json_endpoint
 from app.modules.x402.paid_request import mark_fulfilled, require_paid_request, run_with_refund
-from app.modules.x402.promo import promo_request_params
 from app.modules.x402_board.models.domain import BoardError, StoredPlacement
 from app.modules.x402_board.services.board_service import BoardService, normalize_link
 from app.modules.x402_board.services.rate_limit import (
@@ -80,14 +97,13 @@ def x402_board_place(request: Request) -> Response:
     Nothing is written before the payment settles, and once it has settled the
     placement is stored and returned -- a settled payment never yields a 4xx.
 
-    Auto-refund (migration 102): once a real (non-promo) payment settles, the
-    write goes through run_with_refund -- a product-write failure refunds the
-    payer from the dedicated refund wallet instead of leaving a bare 500 for
-    an operator to reconcile by hand. `circuit_breaker.is_tripped` is checked
+    Auto-refund (migration 102): once the payment settles, the write goes
+    through run_with_refund -- a product-write failure refunds the payer
+    from the dedicated refund wallet instead of leaving a bare 500 for an
+    operator to reconcile by hand. `circuit_breaker.is_tripped` is checked
     first, before the payment gate, so a resource with too many recent
-    refund-triggering failures is refused before anyone is charged again. A
-    promo redemption settles nothing, so it is written directly, outside
-    run_with_refund (which requires a real settled PaymentResult).
+    refund-triggering failures is refused before anyone is charged again.
+    No promo branch here -- see this module's own docstring for why.
     """
     if circuit_breaker.is_tripped(_RESOURCE_PLACE):
         return json_error_response(
@@ -108,13 +124,10 @@ def x402_board_place(request: Request) -> Response:
         return json_error_from_platform(exc)
 
     term_days = settings.x402_board_term_days
-    promo_code, promo_wallet = promo_request_params(request)
     result = require_paid_request(
         request,
         price=settings.x402_board_price,
         resource=_RESOURCE_PLACE,
-        promo_code=promo_code,
-        promo_wallet=promo_wallet,
         # Reaches the payer as the 402's resource.description, before they
         # commit — the term length is not derivable from the price alone.
         description=(
@@ -146,33 +159,6 @@ def x402_board_place(request: Request) -> Response:
     )
     if result.error:
         return result.error
-
-    if result.is_promo:
-        # Settles nothing, so this bypasses run_with_refund entirely (its
-        # own contract requires a real, non-promo PaymentResult) -- there is
-        # no payment here to refund if create() were to fail.
-        try:
-            placement = board_service.create(
-                normalized_link=normalized_link,
-                name=payload.name,
-                pitch=payload.pitch,
-                payer=promo_wallet,
-                settlement_tx_id="",
-            )
-        except BoardError as exc:
-            return json_error_from_platform(exc)
-        return Response(
-            status_code=200,
-            headers={"Content-Type": "application/json", **result.settlement_headers},
-            description=serialization.dumps(
-                {
-                    "placement": _placement_json(placement),
-                    "settlement_tx_id": "",
-                    "term_days": term_days,
-                    "via": "promo",
-                }
-            ),
-        )
 
     outcome = run_with_refund(
         result,
@@ -281,13 +267,10 @@ def x402_board_renew(request: Request) -> Response:
         )
 
     term_days = settings.x402_board_term_days
-    promo_code, promo_wallet = promo_request_params(request)
     result = require_paid_request(
         request,
         price=settings.x402_board_price,
         resource=_RESOURCE_RENEW,
-        promo_code=promo_code,
-        promo_wallet=promo_wallet,
         description=(
             f"Extend your existing PXke x402 board placement by {term_days} more days, "
             f"from the later of now and its current term end. Only the wallet that "
@@ -313,34 +296,6 @@ def x402_board_renew(request: Request) -> Response:
     )
     if result.error:
         return result.error
-
-    if result.is_promo:
-        # Settles nothing, so this bypasses run_with_refund entirely (its
-        # own contract requires a real, non-promo PaymentResult).
-        try:
-            renewed = board_service.renew(
-                placement=placement, payer=promo_wallet, settlement_tx_id=""
-            )
-        except BoardError as exc:
-            return Response(
-                status_code=exc.http_status,
-                headers={"Content-Type": "application/json", **result.settlement_headers},
-                description=serialization.dumps(
-                    {"error": {"code": exc.code, "message": exc.message}}
-                ),
-            )
-        return Response(
-            status_code=200,
-            headers={"Content-Type": "application/json", **result.settlement_headers},
-            description=serialization.dumps(
-                {
-                    "placement": _placement_json(renewed),
-                    "settlement_tx_id": "",
-                    "term_days": term_days,
-                    "via": "promo",
-                }
-            ),
-        )
 
     # Same condition as board_service.renew()'s own BoardError raise, kept
     # in sync deliberately -- see this function's docstring for why this is

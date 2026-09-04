@@ -1088,3 +1088,86 @@ def test_the_real_board_breaker_trips_after_enough_recorded_failures(
     assert circuit_breaker.is_tripped(resource) is False
     circuit_breaker.record_refund_failure(resource)
     assert circuit_breaker.is_tripped(resource) is True
+
+
+def test_cassandra_epoch_treats_a_naive_driver_datetime_as_utc() -> None:
+    """_epoch must treat a timezone-naive datetime as UTC, not the interpreter's local zone.
+
+    That's what the real Cassandra driver actually returns for a `timestamp` column. Same bug
+    class root-caused 2026-09-03 live on prod (a CEST/UTC+2 host) in x402_social's identical
+    _epoch helper: a value written correctly via _dt(epoch) = datetime.fromtimestamp(epoch,
+    tz=UTC) read back exactly 2 hours earlier than it was written, because `value.timestamp()`
+    on a naive datetime assumes the *local* system zone. This module's _epoch had the identical
+    bug, unfixed at the time (flagged, not fixed, in the x402_social fix commit).
+
+    Constructs the naive datetime explicitly rather than relying on this test's own execution
+    environment happening to run in a non-UTC zone (which would make the bug invisible in CI).
+    """
+    from app.modules.x402_board.stores import cassandra as cassandra_store
+
+    naive = datetime(2026, 9, 4, 13, 18, 17)  # noqa: DTZ001 -- naive on purpose, see docstring
+    assert naive.tzinfo is None
+    assert cassandra_store._epoch(naive) == 1788527897  # the correct UTC epoch
+    assert cassandra_store._epoch(None) == 0
+
+
+# --------------------------------------------------------------------------- #
+# Promo-bypass identity spoofing (found 2026-09-04, same pattern as the
+# x402_social reversal in commit f8d84a6): x402_board_place and
+# x402_board_renew both feed `payer` in as the wallet that OWNS the
+# placement (create()'s owner attribution, renew()'s
+# `attributed != placement.payer` check, enforced identically inside
+# board_service.renew()) -- not merely payment attribution.
+# modules/x402/promo.py's own docstring says a promo redemption's wallet is
+# checked for SYNTACTIC validity only ("a successful redemption is not proof
+# the caller controls that wallet"), so a promo bypass would have let anyone
+# place "as" any wallet, or free-renew (or probe the ownership check of) a
+# placement they do not own, via `?promo_wallet=`. Closed by never reading
+# promo params on these two routes at all. These tests lock in the opposite
+# invariant: promo params in the query string are ignored, not honored.
+# --------------------------------------------------------------------------- #
+@pytest.mark.usefixtures("fake_redis")
+@pytest.mark.parametrize("route_name", ["x402_board_place", "x402_board_renew"])
+def test_place_and_renew_never_forward_promo_params(
+    store: InMemoryPlacementStore,
+    monkeypatch: pytest.MonkeyPatch,
+    route_name: str,
+) -> None:
+    """Neither paid write route may pass ?promo=/?promo_wallet= into require_paid_request, even when present in the query string."""
+    monkeypatch.setattr(board_routes, "board_service", BoardService(store))
+    routes_by_name = {
+        "x402_board_place": (
+            "/api/v1/x402/board",
+            {"body": b'{"link":"https://agent.example.com/home"}'},
+        ),
+        "x402_board_renew": (
+            "/api/v1/x402/board/{entry_id}/renew",
+            {},
+        ),
+    }
+    path, extra_kwargs = routes_by_name[route_name]
+    if route_name == "x402_board_renew":
+        placement = _placed(store)
+        path = f"/api/v1/x402/board/{placement.entry_id}/renew"
+        extra_kwargs = {"path_params": {"entry_id": placement.entry_id}}
+
+    captured: dict = {}
+
+    def _spy_require_paid_request(*_args: object, **kwargs: object) -> object:
+        captured.update(kwargs)
+        return _settled_result()
+
+    monkeypatch.setattr(board_routes, "require_paid_request", _spy_require_paid_request)
+    monkeypatch.setattr(board_routes, "mark_fulfilled", lambda *_a, **_kw: None)
+
+    route = getattr(board_routes, route_name)
+    route(
+        _request(
+            query={"promo": "LAUNCH1000-TEST", "promo_wallet": _PAYER},
+            path=path,
+            **extra_kwargs,
+        )
+    )
+
+    assert "promo_code" not in captured
+    assert "promo_wallet" not in captured

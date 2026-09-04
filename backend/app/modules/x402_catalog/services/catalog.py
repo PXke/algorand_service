@@ -211,7 +211,11 @@ PRODUCTS: tuple[Product, ...] = (
                     "reimburses": False,
                     "contact": "support@example.com",
                 },
-                supports_promo=True,
+                # Promo unwired 2026-09-04: `payer` becomes the listing's owner
+                # (create()'s first-claim-wins ownership check), the same
+                # identity-not-attribution pattern closed in x402_social. See
+                # x402_directory/api/routes.py's own module docstring.
+                supports_promo=False,
                 supports_receipts=True,
             ),
             CatalogRoute(
@@ -226,7 +230,10 @@ PRODUCTS: tuple[Product, ...] = (
                 price_setting="x402_listing_price",
                 resource="x402-directory-renew",
                 input_example={"url": _EXAMPLE_URL},
-                supports_promo=True,
+                # Promo unwired 2026-09-04: same reason as x402-directory-list --
+                # renewal's ownership check compares `payer` against the
+                # listing's existing owner.
+                supports_promo=False,
                 supports_receipts=True,
             ),
             CatalogRoute(
@@ -285,7 +292,11 @@ PRODUCTS: tuple[Product, ...] = (
                     "name": "Example Agent",
                     "pitch": "Autonomous FX arbitrage agent. Live on Algorand since 2026.",
                 },
-                supports_promo=True,
+                # Promo unwired 2026-09-04: `payer` becomes the placement's
+                # owner attribution, the same identity-not-attribution pattern
+                # closed in x402_social. See x402_board/api/routes.py's own
+                # module docstring.
+                supports_promo=False,
                 supports_receipts=True,
             ),
             CatalogRoute(
@@ -302,7 +313,10 @@ PRODUCTS: tuple[Product, ...] = (
                 ),
                 price_setting="x402_board_price",
                 resource="x402-board-renew",
-                supports_promo=True,
+                # Promo unwired 2026-09-04: same reason as x402-board-place --
+                # renewal's ownership check compares `payer` against the
+                # placement's existing owner.
+                supports_promo=False,
                 supports_receipts=True,
             ),
             CatalogRoute(

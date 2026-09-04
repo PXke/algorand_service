@@ -454,6 +454,21 @@ _PROMO_UNWIRED_RESOURCES = {
     # closed for the same reason.
     "x402-storage-backup-create",
     "x402-storage-backup-renew",
+    # x402_directory's paid list/renew routes (2026-09-04): the identical
+    # result.payer-as-ownership pattern flagged, not fixed, alongside the
+    # x402_social reversal above (commit f8d84a6) -- `payer` becomes the
+    # listing's owner (create()'s first-claim-wins check, renew()'s
+    # `existing.payer != payer` check), so a promo bypass would let anyone
+    # claim/grief a url or free-renew a listing by its already-public payer
+    # address. See x402_directory/api/routes.py's own module docstring.
+    "x402-directory-list",
+    "x402-directory-renew",
+    # x402_board's paid place/renew routes (2026-09-04): same pattern --
+    # `payer` becomes the placement's owner attribution (create()'s
+    # attribution, renew()'s `attributed != placement.payer` check). See
+    # x402_board/api/routes.py's own module docstring.
+    "x402-board-place",
+    "x402-board-renew",
 }
 
 

@@ -816,39 +816,6 @@ def test_a_schema_within_the_cap_is_still_accepted(
     assert listing["schema"] == {"type": "object", "properties": {"pair": {"type": "string"}}}
 
 
-@pytest.mark.usefixtures("fake_redis")
-def test_a_promo_redemption_lists_the_endpoint_attributed_to_the_promo_wallet(
-    store: InMemoryListingStore, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """?promo=&promo_wallet= lists the endpoint for real, owned by the promo wallet (result.payer is empty on a promo hit, so the route falls back to it), settles nothing, and is never marked fulfilled."""
-    monkeypatch.setattr(directory_routes, "listing_service", ListingService(store))
-    monkeypatch.setattr(
-        directory_routes,
-        "require_paid_request",
-        lambda *_a, **_kw: x402_guard.PaymentResult(error=None, is_promo=True),
-    )
-    fulfilled: list[tuple[str, str]] = []
-    monkeypatch.setattr(
-        directory_routes,
-        "mark_fulfilled",
-        lambda txid, *, resource: fulfilled.append((txid, resource)),
-    )
-
-    response = directory_routes.x402_list(
-        _request(
-            query={"promo": "LAUNCH50", "promo_wallet": "PROMOWALLET" + "A" * 47},
-            body=json.dumps({"url": "https://api.example.com/v1/quote", "price": "$0.01"}).encode(),
-        )
-    )
-
-    assert response.status_code == 200
-    body = json.loads(response.description)
-    assert body["listing"]["payer"] == "PROMOWALLET" + "A" * 47
-    assert body["settlement_tx_id"] == ""
-    assert body["via"] == "promo"
-    assert fulfilled == []
-
-
 @pytest.mark.parametrize("field_name", ["assets", "tags"])
 def test_an_overlong_asset_or_tag_item_is_rejected_at_decode(field_name: str) -> None:
     """Each item of assets/tags is length-bounded, not just the item count — one paid listing cannot carry an unbounded string per item.
@@ -2749,3 +2716,83 @@ def test_search_and_listing_detail_both_serve_the_new_flags(
     detail = _detail("https://api.example.com/q")
     assert detail["listing"]["reimburses"] is True
     assert detail["listing"]["contact"] == "support@example.com"
+
+
+def test_cassandra_epoch_treats_a_naive_driver_datetime_as_utc() -> None:
+    """_epoch must treat a timezone-naive datetime as UTC, not the interpreter's local zone.
+
+    That's what the real Cassandra driver actually returns for a `timestamp` column. Same bug
+    class root-caused 2026-09-03 live on prod (a CEST/UTC+2 host) in x402_social's identical
+    _epoch helper: a value written correctly via _dt(epoch) = datetime.fromtimestamp(epoch,
+    tz=UTC) read back exactly 2 hours earlier than it was written, because `value.timestamp()`
+    on a naive datetime assumes the *local* system zone. This module's _epoch had the identical
+    bug, unfixed at the time (flagged, not fixed, in the x402_social fix commit).
+
+    Constructs the naive datetime explicitly rather than relying on this test's own execution
+    environment happening to run in a non-UTC zone (which would make the bug invisible in CI).
+    """
+    from app.modules.x402_directory.stores import cassandra as cassandra_store
+
+    naive = datetime(2026, 9, 4, 13, 18, 17)  # noqa: DTZ001 -- naive on purpose, see docstring
+    assert naive.tzinfo is None
+    assert cassandra_store._epoch(naive) == 1788527897  # the correct UTC epoch
+    assert cassandra_store._epoch(None) == 0
+
+
+# --------------------------------------------------------------------------- #
+# Promo-bypass identity spoofing (found 2026-09-04, same pattern as the
+# x402_social reversal in commit f8d84a6): x402_list and x402_renew both feed
+# `payer` in as the wallet that OWNS the listing (create()'s first-claim-wins
+# ownership check, renew()'s `existing.payer != payer` check) -- not merely
+# payment attribution. modules/x402/promo.py's own docstring says a promo
+# redemption's wallet is checked for SYNTACTIC validity only ("a successful
+# redemption is not proof the caller controls that wallet"), so a promo
+# bypass would have let anyone claim/grief a url, or free-renew (or probe the
+# ownership check of) a listing they do not own, via `?promo_wallet=`. Closed
+# by never reading promo params on these two routes at all. These tests lock
+# in the opposite invariant: promo params in the query string are ignored,
+# not honored.
+# --------------------------------------------------------------------------- #
+@pytest.mark.usefixtures("fake_redis")
+@pytest.mark.parametrize("route_name", ["x402_list", "x402_renew"])
+def test_list_and_renew_never_forward_promo_params(
+    store: InMemoryListingStore,
+    monkeypatch: pytest.MonkeyPatch,
+    route_name: str,
+) -> None:
+    """Neither paid write route may pass ?promo=/?promo_wallet= into require_paid_request, even when present in the query string."""
+    monkeypatch.setattr(directory_routes, "listing_service", ListingService(store))
+    routes_by_name = {
+        "x402_list": (
+            "/api/v1/x402/list",
+            {"body": b'{"url":"https://a.example/x","price":"$0.01"}'},
+        ),
+        "x402_renew": (
+            "/api/v1/x402/list/renew",
+            {"body": b'{"url":"https://api.example.com/q"}'},
+        ),
+    }
+    path, extra_kwargs = routes_by_name[route_name]
+    if route_name == "x402_renew":
+        _listed(store, "https://api.example.com/q")
+
+    captured: dict = {}
+
+    def _spy_require_paid_request(*_args: object, **kwargs: object) -> object:
+        captured.update(kwargs)
+        return _settled_result()
+
+    monkeypatch.setattr(directory_routes, "require_paid_request", _spy_require_paid_request)
+    monkeypatch.setattr(directory_routes, "mark_fulfilled", lambda *_a, **_kw: None)
+
+    route = getattr(directory_routes, route_name)
+    route(
+        _request(
+            query={"promo": "LAUNCH1000-TEST", "promo_wallet": "P" * 58},
+            path=path,
+            **extra_kwargs,
+        )
+    )
+
+    assert "promo_code" not in captured
+    assert "promo_wallet" not in captured
