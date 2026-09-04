@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
-import ipaddress
-import socket
 from functools import lru_cache
 from typing import TYPE_CHECKING
 from urllib.parse import unquote, urljoin, urlparse, urlunparse
@@ -17,6 +15,7 @@ from app.core.http import Request, Response, Router
 from app.core.http_errors import json_error_response
 from app.core.rate_limit import incr_with_expiry
 from app.core.request_headers import client_ip
+from app.core.ssrf_guard import resolve_public_ip
 
 if TYPE_CHECKING:
     import redis
@@ -112,43 +111,13 @@ def _cache_set(url: str, ctype: str, data: bytes) -> None:
         _redis().set(_cache_key(url), ctype.encode("latin-1") + b"\0" + data, ex=_CACHE_TTL)
 
 
-def _resolve_public_ip(host: str) -> str | None:
-    """Resolve `host` and return one public IP literal to connect to.
-
-    Returns None if `host` is empty, unresolvable, or ANY resolved address
-    is private/internal.
-
-    Rejecting on any non-public address in the result set (not just the first)
-    closes a DNS trick where a host round-robins between a public IP and an
-    internal one. The caller connects to the IP this function returns instead
-    of letting httpx re-resolve the hostname at connect time — otherwise a
-    DNS answer that changes between this check and the actual TCP connect
-    (DNS rebinding) would bypass the SSRF guard entirely.
-    """
-    if not host:
-        return None
-    try:
-        infos = socket.getaddrinfo(host, None)
-    except OSError:
-        return None
-    ips: list[str] = []
-    for info in infos:
-        try:
-            addr = ipaddress.ip_address(info[4][0])
-        except ValueError:
-            return None
-        if (
-            addr.is_private
-            or addr.is_loopback
-            or addr.is_link_local
-            or addr.is_reserved
-            or addr.is_multicast
-            or addr.is_unspecified
-            or not addr.is_global
-        ):
-            return None
-        ips.append(f"[{addr}]" if addr.version == 6 else str(addr))
-    return ips[0] if ips else None
+# Backward-compat alias: `resolve_public_ip` used to live here as
+# `_resolve_public_ip` before it was promoted to `app.core.ssrf_guard`
+# (see that module's own docstring). `app.modules.x402_grading.services.
+# usage_proof` still imports this private name directly from this module;
+# leave the alias in place until that caller is migrated too, rather than
+# breaking it as a side effect of this move.
+_resolve_public_ip = resolve_public_ip
 
 
 def _stream_fetch(
@@ -157,10 +126,11 @@ def _stream_fetch(
     """(status, content_type, body) — fetch upstream with a stream+abort byte cap.
 
     Re-validates the host on each redirect hop (SSRF safe) and connects to
-    the IP `_resolve_public_ip` already validated for that hop — never a
-    second, unvalidated DNS lookup at connect time (see _resolve_public_ip).
-    The original hostname still goes out as the Host header and TLS SNI so
-    virtual-hosted / cert-checked upstreams keep working.
+    the IP `resolve_public_ip` (app.core.ssrf_guard) already validated for
+    that hop — never a second, unvalidated DNS lookup at connect time (see
+    resolve_public_ip). The original hostname still goes out as the Host
+    header and TLS SNI so virtual-hosted / cert-checked upstreams keep
+    working.
 
     Reads at most _MAX_BYTES off the wire before aborting the connection —
     an oversized or slow-drip upstream body can no longer be pulled fully
@@ -176,7 +146,7 @@ def _stream_fetch(
             host = parsed.hostname or ""
             if parsed.scheme not in _ALLOWED_SCHEMES:
                 return 502, "", b""
-            ip = _resolve_public_ip(host)
+            ip = resolve_public_ip(host)
             if ip is None:
                 return 502, "", b""
             port_suffix = f":{parsed.port}" if parsed.port else ""

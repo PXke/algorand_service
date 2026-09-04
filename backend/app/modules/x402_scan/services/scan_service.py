@@ -1,15 +1,15 @@
 """Fetch-bound, isolate-on-disk, sandbox-scan, always-cleanup orchestration for one file.
 
-Reuses `media.api.routes._resolve_public_ip` for the SSRF-safe DNS
+Uses `app.core.ssrf_guard.resolve_public_ip` for the SSRF-safe DNS
 resolution (rebinding-proof: connects to the IP already validated, never a
 second unvalidated lookup at connect time) rather than re-deriving that
 logic — CLAUDE.md forbids a new copy of existing logic. It does NOT reuse
-`_stream_fetch` itself: that helper is media-proxy-specific (hard-gates on
-`content-type: image/*`, which is the wrong gate for an arbitrary
-file/tarball scan target). Reaching into another module's private helper is
-a shortcut taken for this prototype; promoting `_resolve_public_ip` to a
-shared SSRF-fetch module is the flagged follow-up once a second real
-consumer (this one) exists.
+`media.api.routes._stream_fetch` itself: that helper is media-proxy-specific
+(hard-gates on `content-type: image/*`, which is the wrong gate for an
+arbitrary file/tarball scan target). `resolve_public_ip` originated in
+`media.api.routes` as a private helper; it has since been promoted to the
+shared `app.core.ssrf_guard` module now that a third real consumer
+(x402_uptime, after this one) exists.
 
 The file never touches the shared prod filesystem outside its own
 tempdir-per-request, and that tempdir is always removed (`finally`), pass or
@@ -27,7 +27,7 @@ from urllib.parse import urlparse, urlunparse
 import httpx
 
 from app.core.config import settings
-from app.modules.media.api.routes import _resolve_public_ip
+from app.core.ssrf_guard import resolve_public_ip
 from app.modules.x402_scan.services.sandbox_runner import SandboxError, run_scan
 
 logger = logging.getLogger(__name__)
@@ -57,7 +57,7 @@ def _fetch_bounded_to_disk(url: str, dest: Path, *, max_bytes: int, timeout_s: f
             host = parsed.hostname or ""
             if parsed.scheme not in _ALLOWED_SCHEMES:
                 raise FetchError(f"unsupported scheme: {parsed.scheme!r}")
-            ip = _resolve_public_ip(host)
+            ip = resolve_public_ip(host)
             if ip is None:
                 raise FetchError("target host does not resolve to a public address")
             port_suffix = f":{parsed.port}" if parsed.port else ""

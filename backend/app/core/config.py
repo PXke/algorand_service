@@ -561,8 +561,8 @@ class Settings(msgspec.Struct, kw_only=True):
     # ── x402 uptime/reachability check. See app/modules/x402_uptime/ and
     # docs/x402-uptime-check-design.md. Prototype/v0: a single GET, no
     # response body ever downloaded (status line + headers + timing only),
-    # SSRF-guarded on every hop (reuses media's _resolve_public_ip, same
-    # shortcut x402_scan already takes), cached per target with an
+    # SSRF-guarded on every hop (reuses app.core.ssrf_guard.resolve_public_ip,
+    # same shared primitive x402_scan already uses), cached per target with an
     # asymmetric TTL, rate-limited on two independent dimensions (caller IP
     # and target host). Disabled by default — this is a design prototype,
     # not a live product; the price is directly anchored against

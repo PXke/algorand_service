@@ -1,8 +1,12 @@
 """media.api.routes._stream_fetch: streaming byte-cap abort and SSRF IP pinning.
 
-No real DNS or network: `_resolve_public_ip` is monkeypatched (it's the seam
+No real DNS or network: `resolve_public_ip` is monkeypatched (it's the seam
 that would otherwise hit socket.getaddrinfo), and the actual HTTP transport
 is httpx.MockTransport, which never opens a socket.
+
+Dedicated `resolve_public_ip` resolution-policy tests (private/public/mixed/
+CGNAT addresses) live in tests/test_ssrf_guard.py, next to the function's new
+home in app.core.ssrf_guard -- not duplicated here.
 """
 
 from __future__ import annotations
@@ -40,7 +44,7 @@ def _chunks(data: bytes, size: int = 4096) -> Iterator[bytes]:
 
 def test_stream_fetch_aborts_past_max_bytes(monkeypatch: pytest.MonkeyPatch) -> None:
     """An upstream body larger than _MAX_BYTES is truncated, not fully buffered."""
-    monkeypatch.setattr(media_routes, "_resolve_public_ip", lambda _host: "203.0.113.5")
+    monkeypatch.setattr(media_routes, "resolve_public_ip", lambda _host: "203.0.113.5")
     oversized = b"a" * (media_routes._MAX_BYTES + 10_000)
 
     def handler(_request: httpx.Request) -> httpx.Response:
@@ -61,12 +65,12 @@ def test_stream_fetch_pins_connection_to_resolved_ip_and_preserves_host(
 ) -> None:
     """Connects to the pre-validated IP, not a fresh DNS lookup, but keeps the real Host/SNI.
 
-    Connects to the IP `_resolve_public_ip` validated (never a second,
+    Connects to the IP `resolve_public_ip` validated (never a second,
     unvalidated DNS lookup at connect time), while still sending the
     original Host header and TLS SNI so virtual-hosted upstreams keep
     working.
     """
-    monkeypatch.setattr(media_routes, "_resolve_public_ip", lambda _host: "203.0.113.9")
+    monkeypatch.setattr(media_routes, "resolve_public_ip", lambda _host: "203.0.113.9")
     seen: dict[str, object] = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -90,7 +94,7 @@ def test_stream_fetch_rejects_when_host_does_not_resolve_public(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A private/unresolvable host (SSRF guard) never reaches the transport at all."""
-    monkeypatch.setattr(media_routes, "_resolve_public_ip", lambda _host: None)
+    monkeypatch.setattr(media_routes, "resolve_public_ip", lambda _host: None)
 
     def handler(_request: httpx.Request) -> httpx.Response:  # pragma: no cover - must not run
         raise AssertionError("transport should never be reached for a blocked host")
@@ -101,51 +105,6 @@ def test_stream_fetch_rejects_when_host_does_not_resolve_public(
     assert status == 502
     assert ctype == ""
     assert data == b""
-
-
-def test_resolve_public_ip_rejects_private_address(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A host that resolves to a private/loopback address is rejected."""
-
-    def fake_getaddrinfo(_host: str, _port: int | None) -> list[tuple]:
-        return [(None, None, None, None, ("127.0.0.1", 0))]
-
-    monkeypatch.setattr(media_routes.socket, "getaddrinfo", fake_getaddrinfo)
-    assert media_routes._resolve_public_ip("localhost.attacker.example") is None
-
-
-def test_resolve_public_ip_accepts_public_address(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A host that resolves to a single public address returns that IP."""
-
-    def fake_getaddrinfo(_host: str, _port: int | None) -> list[tuple]:
-        return [(None, None, None, None, ("93.184.216.34", 0))]
-
-    monkeypatch.setattr(media_routes.socket, "getaddrinfo", fake_getaddrinfo)
-    assert media_routes._resolve_public_ip("example.com") == "93.184.216.34"
-
-
-def test_resolve_public_ip_rejects_when_any_resolved_address_is_private(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A host round-robining between a public and an internal IP must not pass."""
-
-    def fake_getaddrinfo(_host: str, _port: int | None) -> list[tuple]:
-        return [
-            (None, None, None, None, ("93.184.216.34", 0)),
-            (None, None, None, None, ("10.0.0.5", 0)),
-        ]
-
-    monkeypatch.setattr(media_routes.socket, "getaddrinfo", fake_getaddrinfo)
-    assert media_routes._resolve_public_ip("mixed.example") is None
-
-
-def test_resolve_public_ip_rejects_cgnat(monkeypatch: pytest.MonkeyPatch) -> None:
-    """100.64.0.0/10 is not is_private; is_global must still reject it."""
-
-    def fake_getaddrinfo(_host: str, _port: int | None) -> list[tuple]:
-        return [(None, None, None, None, ("100.64.0.1", 0))]
-
-    monkeypatch.setattr(media_routes.socket, "getaddrinfo", fake_getaddrinfo)
-    assert media_routes._resolve_public_ip("cgnat.attacker.example") is None
 
 
 class _FakeRedis:

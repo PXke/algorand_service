@@ -1,14 +1,13 @@
 """One on-demand, SSRF-guarded reachability check of one caller-supplied URL.
 
-Reuses `media.api.routes._resolve_public_ip` for SSRF-safe DNS resolution
+Uses `app.core.ssrf_guard.resolve_public_ip` for SSRF-safe DNS resolution
 (resolve every address, reject on any private/loopback/link-local/reserved/
 multicast/non-global hit, connect to the IP already validated -- never a
-second, unvalidated lookup at connect time) -- the same shortcut
-`x402_scan/services/scan_service.py` already takes for the identical reason
-(see that module's own docstring: "promoting `_resolve_public_ip` to a
-shared SSRF-fetch module is the flagged follow-up once a second real
-consumer exists" -- this is that second consumer; the promotion itself is
-out of scope for this task, see docs/x402-uptime-check-design.md).
+second, unvalidated lookup at connect time) -- the same primitive
+`x402_scan/services/scan_service.py` uses for the identical reason. That
+helper started life as a private `media.api.routes` function reached into
+directly by both modules; with this module as the third real consumer it
+was promoted to this shared location (see docs/x402-uptime-check-design.md).
 
 Unlike x402_scan/media, this never reads the response body -- an uptime
 check needs only the status line and headers, not the content, so
@@ -38,7 +37,7 @@ from urllib.parse import urlparse, urlunparse
 
 import httpx
 
-from app.modules.media.api.routes import _resolve_public_ip
+from app.core.ssrf_guard import resolve_public_ip
 
 logger = logging.getLogger(__name__)
 
@@ -68,7 +67,7 @@ def _classify_resolution_failure(host: str) -> str:
     """Distinguish "DNS never resolved" from "resolved, but only to a private/reserved address.".
 
     Pure diagnostic re-check for the response's `error` field -- makes no
-    accept/reject decision of its own; `_resolve_public_ip`'s verdict (already
+    accept/reject decision of its own; `resolve_public_ip`'s verdict (already
     acted on by the caller) is the only thing that actually gated the
     connection. A second `getaddrinfo` call here is wasted DNS work, not a
     second copy of the SSRF policy.
@@ -114,11 +113,11 @@ def check_target(
                 if parsed.scheme not in _ALLOWED_SCHEMES:
                     return _fail(started, "unsupported_scheme", current, redirect_chain, last_ip)
                 host = parsed.hostname or ""
-                ip = _resolve_public_ip(host)
+                ip = resolve_public_ip(host)
                 if ip is None:
                     error = _classify_resolution_failure(host)
                     return _fail(started, error, current, redirect_chain, last_ip)
-                last_ip = ip.strip("[]")  # _resolve_public_ip brackets IPv6 literals
+                last_ip = ip.strip("[]")  # resolve_public_ip brackets IPv6 literals
                 port_suffix = f":{parsed.port}" if parsed.port else ""
                 connect_url = urlunparse(parsed._replace(netloc=f"{ip}{port_suffix}"))
 
