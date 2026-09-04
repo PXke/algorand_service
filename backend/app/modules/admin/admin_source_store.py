@@ -35,7 +35,18 @@ _ACTIVE_LIMIT = 50
 
 
 def _epoch(dt: datetime | None) -> int:
-    return int(dt.timestamp()) if dt else 0
+    """UTC epoch seconds from a stored timestamp.
+
+    The Cassandra driver returns timezone-NAIVE datetimes that are already UTC wall-clock values;
+    calling .timestamp() directly makes Python assume the server's LOCAL zone and silently shift
+    the result. Same bug class fixed in news/stores/cassandra.py and (2026-09-03)
+    x402_social/stores/cassandra.py -- propagated here.
+    """
+    if dt is None:
+        return 0
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=UTC)
+    return int(dt.timestamp())
 
 
 def create_source(

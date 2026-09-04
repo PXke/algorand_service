@@ -69,6 +69,7 @@ from app.modules.x402_grading.services.credibility import (
 )
 from app.modules.x402_grading.services.grading_service import GradingService
 from app.modules.x402_grading.services.url_key import url_hash
+from app.modules.x402_grading.stores import cassandra as grading_cassandra_store
 from app.modules.x402_grading.stores.memory import InMemoryGradeStore
 
 _PAY_TO = "A" * 58
@@ -1870,3 +1871,22 @@ def test_grade_top_rank_failure_after_payment_triggers_a_refund(
 
     assert response.status_code == 503
     assert "refunded" in response.description.lower()
+
+
+def test_cassandra_epoch_treats_a_naive_driver_datetime_as_utc() -> None:
+    """_epoch must treat a timezone-naive datetime as UTC, not the interpreter's local zone.
+
+    That's what the real Cassandra driver actually returns for a `timestamp` column
+    (x402_grades.created_at). Same bug class root-caused 2026-09-03 in
+    x402_social/stores/cassandra.py: `value.timestamp()` on a naive datetime assumes the
+    *local* system zone -- on a UTC+2 host, "13:18:17 wall-clock, no tzinfo" is silently
+    read as 11:18:17 UTC, 2 hours off from the real UTC value that was actually stored.
+
+    Constructs the naive datetime explicitly rather than relying on this test's own
+    execution environment happening to run in a non-UTC zone (which would make the bug
+    invisible in CI).
+    """
+    naive = datetime(2026, 9, 4, 13, 18, 17)  # noqa: DTZ001 -- naive on purpose, see docstring
+    assert naive.tzinfo is None
+    assert grading_cassandra_store._epoch(naive) == 1788527897  # the correct UTC epoch
+    assert grading_cassandra_store._epoch(None) == 0

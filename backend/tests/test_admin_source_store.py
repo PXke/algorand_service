@@ -108,3 +108,22 @@ def test_soft_delete_source_is_idempotent_on_an_unknown_id(
     fake.execute.return_value = None
     patch_cassandra(monkeypatch, fake)
     assert store.soft_delete_source(_ARTICLE_ID, str(uuid4())) is True
+
+
+def test_epoch_treats_a_naive_driver_datetime_as_utc() -> None:
+    """_epoch must treat a timezone-naive datetime as UTC, not the interpreter's local zone.
+
+    That's what the real Cassandra driver actually returns for a `timestamp` column
+    (article_admin_sources.added_at). Same bug class root-caused 2026-09-03 in
+    x402_social/stores/cassandra.py: `value.timestamp()` on a naive datetime assumes the
+    *local* system zone -- on a UTC+2 host, "13:18:17 wall-clock, no tzinfo" is silently
+    read as 11:18:17 UTC, 2 hours off from the real UTC value that was actually stored.
+
+    Constructs the naive datetime explicitly rather than relying on this test's own
+    execution environment happening to run in a non-UTC zone (which would make the bug
+    invisible in CI).
+    """
+    naive = datetime(2026, 9, 4, 13, 18, 17)  # noqa: DTZ001 -- naive on purpose, see docstring
+    assert naive.tzinfo is None
+    assert store._epoch(naive) == 1788527897  # the correct UTC epoch
+    assert store._epoch(None) == 0

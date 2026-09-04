@@ -21,7 +21,18 @@ def _dt(epoch: int) -> datetime:
 
 
 def _epoch(value: datetime | None) -> int:
-    return int(value.timestamp()) if value else 0
+    """UTC epoch seconds from a stored timestamp.
+
+    The Cassandra driver returns timezone-NAIVE datetimes that are already UTC wall-clock values;
+    calling .timestamp() directly makes Python assume the server's LOCAL zone and silently shift
+    the result. Same bug class fixed in news/stores/cassandra.py and (2026-09-03)
+    x402_social/stores/cassandra.py -- propagated here.
+    """
+    if value is None:
+        return 0
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=UTC)
+    return int(value.timestamp())
 
 
 def _row_to_request(row: object) -> StoredFeatureRequest:

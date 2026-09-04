@@ -43,6 +43,7 @@ from app.modules.x402 import paid_request as paid_request_module
 from app.modules.x402 import replay as replay_module
 from app.modules.x402_features.api import routes as feature_routes
 from app.modules.x402_features.services.feature_service import FeatureService, request_id_for
+from app.modules.x402_features.stores import cassandra as feature_cassandra_store
 from app.modules.x402_features.stores.memory import InMemoryFeatureStore
 
 _PAY_TO = "A" * 58
@@ -1141,3 +1142,22 @@ def test_admin_feature_delete_removes_the_request_and_its_claims_but_keeps_vote_
         == 404
     )
     assert feature_routes.x402_admin_delete_feature_request(_delete_request("")).status_code == 400
+
+
+def test_cassandra_epoch_treats_a_naive_driver_datetime_as_utc() -> None:
+    """_epoch must treat a timezone-naive datetime as UTC, not the interpreter's local zone.
+
+    That's what the real Cassandra driver actually returns for a `timestamp` column
+    (x402_feature_requests.created_at). Same bug class root-caused 2026-09-03 in
+    x402_social/stores/cassandra.py: `value.timestamp()` on a naive datetime assumes the
+    *local* system zone -- on a UTC+2 host, "13:18:17 wall-clock, no tzinfo" is silently
+    read as 11:18:17 UTC, 2 hours off from the real UTC value that was actually stored.
+
+    Constructs the naive datetime explicitly rather than relying on this test's own
+    execution environment happening to run in a non-UTC zone (which would make the bug
+    invisible in CI).
+    """
+    naive = datetime(2026, 9, 4, 13, 18, 17)  # noqa: DTZ001 -- naive on purpose, see docstring
+    assert naive.tzinfo is None
+    assert feature_cassandra_store._epoch(naive) == 1788527897  # the correct UTC epoch
+    assert feature_cassandra_store._epoch(None) == 0

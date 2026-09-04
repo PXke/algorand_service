@@ -24,7 +24,18 @@ _TOKEN_BYTES = 32
 
 
 def _epoch(dt: datetime | None) -> int | None:
-    return int(dt.timestamp()) if dt else None
+    """UTC epoch seconds from a stored timestamp, or None if there is no value.
+
+    The Cassandra driver returns timezone-NAIVE datetimes that are already UTC wall-clock values;
+    calling .timestamp() directly makes Python assume the server's LOCAL zone and silently shift
+    the result. Same bug class fixed in news/stores/cassandra.py and (2026-09-03)
+    x402_social/stores/cassandra.py -- propagated here.
+    """
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=UTC)
+    return int(dt.timestamp())
 
 
 def _row_to_link(row: object) -> ShareLinkItem:
