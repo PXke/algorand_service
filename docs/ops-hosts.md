@@ -75,6 +75,15 @@ service.
   (both 2026.8.1). Default `web_search` provider is `parallel-free`; DuckDuckGo
   is installed/enabled as a second provider (OpenClaw only routes the agent
   tool through one at a time).
+- **Verifying what the agent actually did:** read the sqlite transcript
+  store — `~/.openclaw/agents/main/agent/openclaw-agent.sqlite`, table
+  `transcript_events` (JSON events incl. `toolCall`/`toolResult`) — or the
+  workspace scripts' own logs (`scripts/.moltbook-posts.jsonl`). Do **not**
+  judge from `journalctl`: at the current log level it records *failed*
+  tool calls only, nothing for successful ones, and tool-subprocess network
+  I/O is invisible to it — a perfectly healthy run greps as "nothing
+  happened" (this false verdict already occurred once, 2026-09-04; see
+  `docs/openclaw-reliability-investigation.md`).
 
 **Wash volume:** CLAUDE.md section 9. This agent must not pay our own
 x402 endpoints from our own wallets to inflate rankings or Volume.
