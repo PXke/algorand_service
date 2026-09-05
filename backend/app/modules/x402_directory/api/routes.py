@@ -38,10 +38,13 @@ from app.modules.x402 import circuit_breaker
 from app.modules.x402.discovery import describe_json_endpoint
 from app.modules.x402.guard import PaymentResult
 from app.modules.x402.paid_request import mark_fulfilled, require_paid_request, run_with_refund
+from app.modules.x402.preview import preview_requested
+from app.modules.x402.promo import promo_request_params
 from app.modules.x402_directory.models.domain import (
     CATEGORY_TAG_PREFIX,
     LISTING_CATEGORIES,
     DirectoryError,
+    ProbeLeaderboardEntry,
     StoredListing,
     StoredProbe,
 )
@@ -49,6 +52,7 @@ from app.modules.x402_directory.services.listing_service import (
     MAX_CONTACT_LENGTH,
     MAX_SCHEMA_JSON_BYTES,
     MAX_TAG_LENGTH,
+    PROBE_LEADERBOARD_MIN_SAMPLES,
     ListingService,
     encode_schema,
     normalize_url,
@@ -64,6 +68,20 @@ listing_service = ListingService()
 
 _LIST_RESOURCE = "x402-directory-list"
 _RENEW_RESOURCE = "x402-directory-renew"
+_PROBE_LEADERBOARD_RESOURCE = "x402-directory-probe-leaderboard"
+
+# Repeated verbatim in every leaderboard response (paid, preview and the 402
+# offer's own description) so the framing travels with the data everywhere
+# it is read, not just in documentation a caller might not see: this ranks
+# what our probe fleet MEASURED, never a paid opinion, and "most reliable
+# measured so far" is not the same claim as "the best."
+_PROBE_LEADERBOARD_NOTE = (
+    "Ranked purely by what our probe fleet has MEASURED (reachability, valid-402 rate, "
+    "latency) -- never by paid grade or spend, and nobody can pay to appear higher. "
+    "'Most reliable measured so far,' not an endorsement or 'the best.' See "
+    "GET /api/v1/x402/grades/top for the separate, spend-weighted agent-opinion "
+    "leaderboard."
+)
 
 _LISTING_EXAMPLE = {
     "url": "https://api.example.com/v1/quote",
@@ -125,6 +143,21 @@ def _probe_json(probe: StoredProbe) -> dict:
         "served_valid_402": probe.served_valid_402,
         "payto_seen": probe.payto_seen,
         "error": probe.error,
+    }
+
+
+def _leaderboard_entry_json(rank: int, entry: ProbeLeaderboardEntry) -> dict:
+    """Serialize one probe-leaderboard row for the wire. Rounding is display-only -- the ranking itself already ran on the unrounded values."""
+    return {
+        "rank": rank,
+        "url": entry.url,
+        "verified_wallet": entry.verified_wallet,
+        "sample_count": entry.sample_count,
+        "uptime_pct": round(entry.uptime_pct, 2),
+        "avg_latency_ms": (
+            round(entry.avg_latency_ms, 1) if entry.avg_latency_ms is not None else None
+        ),
+        "last_probed_at_epoch": entry.last_probed_at_epoch,
     }
 
 
@@ -580,6 +613,181 @@ def x402_probe_history(request: Request) -> Response | dict:
     return {"url": normalized_url, "history": [_probe_json(probe) for probe in history]}
 
 
+def _parse_leaderboard_limit(request: Request) -> int | Response:
+    """The caller's `limit`, clamped to x402_directory_probe_leaderboard_max_results; a 400 Response when non-integer."""
+    raw_limit = query_param(request.query_params.get("limit", ""))
+    try:
+        requested = (
+            int(raw_limit) if raw_limit else settings.x402_directory_probe_leaderboard_max_results
+        )
+    except ValueError:
+        return json_error_response(400, "invalid_request", "limit must be an integer")
+    return max(1, min(requested, settings.x402_directory_probe_leaderboard_max_results))
+
+
+def _leaderboard_wire_shape(*, candidates_scanned: int, items: list[dict]) -> dict:
+    """The response envelope shared by the real, preview and (via **outcome) final responses."""
+    return {
+        "basis": "measured",
+        "note": _PROBE_LEADERBOARD_NOTE,
+        "min_samples_required": PROBE_LEADERBOARD_MIN_SAMPLES,
+        "sample_window": settings.x402_probe_history_max_results,
+        "candidates_scanned": candidates_scanned,
+        "items": items,
+    }
+
+
+def x402_probe_leaderboard(request: Request) -> Response:
+    """Paid: the most reliable listed x402 endpoints, ranked by probe-MEASURED data (roadmap item 7's trust-layer step 3).
+
+    Complementary to, and deliberately distinct from, x402_grading's paid
+    leaderboards: grading sells a spend-weighted AGENT OPINION (sybil-
+    vulnerable -- enough wallets grading small amounts can buy a rank), this
+    sells pure MACHINE MEASUREMENT from the probe fleet that already runs
+    against every listing every 30 minutes. Nobody can pay their way onto
+    this one, and the response says so (see _PROBE_LEADERBOARD_NOTE) rather
+    than ever claiming an endpoint is "the best."
+
+    An empty or all-too-new directory is a valid, chargeable, honestly-empty
+    answer (`items: []`, `candidates_scanned` says how many live listings
+    were actually measured) -- NOT a 404 the way x402_grading's per-tag
+    leaderboard pre-gate-refuses an empty one. That route can cheaply check
+    "does this ONE tag have a rankable candidate" for free before the gate;
+    this one ranks the WHOLE directory, so the only free pre-check available
+    would be "is the directory nonempty at all," which does not predict
+    whether anything clears the reliability threshold -- see
+    ListingService.probe_leaderboard()'s own docstring for the ranking rule
+    and its minimum-sample-count anti-gaming threshold.
+
+    `limit` is parsed and clamped BEFORE the gate (a non-integer is a free
+    400). Supports `?preview=true` (redacted shape, unpaid, rate-limited)
+    and an admin promo bypass -- this is a read-only aggregate with no
+    ownership check to game, unlike x402_list/x402_renew's promo-unwired
+    write paths (see this module's own docstring).
+    """
+    if circuit_breaker.is_tripped(_PROBE_LEADERBOARD_RESOURCE):
+        return json_error_response(
+            503,
+            "temporarily_disabled",
+            "This endpoint is temporarily disabled after an elevated failure rate. "
+            "Try again later.",
+        )
+
+    limit = _parse_leaderboard_limit(request)
+    if isinstance(limit, Response):
+        return limit
+
+    promo_code, promo_wallet = promo_request_params(request)
+    result = require_paid_request(
+        request,
+        price=settings.x402_directory_probe_leaderboard_price,
+        resource=_PROBE_LEADERBOARD_RESOURCE,
+        promo_code=promo_code,
+        promo_wallet=promo_wallet,
+        description=(
+            "The most reliable listed x402 endpoints, ranked purely by what our probe "
+            f"fleet has MEASURED -- reachability, valid-402 rate and latency -- over each "
+            f"listing's most recent up to {settings.x402_probe_history_max_results} stored "
+            f"probes (30-minute cadence). Never by paid grade or spend: nobody can pay to "
+            f"appear higher. A listing needs at least {PROBE_LEADERBOARD_MIN_SAMPLES} "
+            f"probes in that window to be ranked at all, so a brand-new listing cannot "
+            f"buy a top spot with one lucky probe. This is a measurement, not an "
+            f"endorsement -- 'most reliable measured so far,' never 'the best.' See "
+            f"GET /api/v1/x402/grades/top for the separate, spend-weighted opinion "
+            f"leaderboard. Optional `limit` (clamped to "
+            f"{settings.x402_directory_probe_leaderboard_max_results}). Supports "
+            f"?preview=true (redacted, unpaid, rate-limited)."
+        ),
+        extensions=describe_json_endpoint(
+            input={"limit": 10},
+            input_schema={
+                "type": "object",
+                "properties": {"limit": {"type": "integer", "minimum": 1}},
+            },
+            output_example=_leaderboard_wire_shape(
+                candidates_scanned=2,
+                items=[
+                    {
+                        "rank": 1,
+                        "url": _LISTING_EXAMPLE["url"],
+                        "verified_wallet": "",
+                        "sample_count": 60,
+                        "uptime_pct": 98.33,
+                        "avg_latency_ms": 145.2,
+                        "last_probed_at_epoch": 0,
+                    }
+                ],
+            )
+            | {"settlement_tx_id": "..."},
+        ),
+        preview=preview_requested(request),
+    )
+    if result.error:
+        return result.error
+
+    if result.is_preview:
+        # Shape, not values: probe_leaderboard() (the real ranking) is never
+        # called for a preview caller -- the order itself is part of what
+        # this route sells, not just the numbers. candidates_scanned=-1 is
+        # an unambiguous sentinel: a real response can never legitimately
+        # carry a negative scan count.
+        return Response(
+            status_code=200,
+            headers={"Content-Type": "application/json"},
+            description=serialization.dumps(
+                {
+                    **_leaderboard_wire_shape(
+                        candidates_scanned=-1,
+                        items=[
+                            {
+                                "rank": 1,
+                                "url": "<preview>",
+                                "verified_wallet": "<preview>",
+                                "sample_count": -1,
+                                "uptime_pct": 0.0,
+                                "avg_latency_ms": None,
+                                "last_probed_at_epoch": 0,
+                            }
+                        ],
+                    ),
+                    "settlement_tx_id": "<preview>",
+                }
+            ),
+        )
+
+    def _build_leaderboard() -> dict:
+        entries, candidates_scanned = listing_service.probe_leaderboard(limit=limit)
+        return _leaderboard_wire_shape(
+            candidates_scanned=candidates_scanned,
+            items=[
+                _leaderboard_entry_json(rank, entry) for rank, entry in enumerate(entries, start=1)
+            ],
+        )
+
+    outcome = run_with_refund(
+        result,
+        resource=_PROBE_LEADERBOARD_RESOURCE,
+        product_write=_build_leaderboard,
+        request=request,
+    )
+    if isinstance(outcome, Response):
+        return outcome
+
+    if not result.is_promo:
+        mark_fulfilled(result.payment_txid, resource=_PROBE_LEADERBOARD_RESOURCE)
+    return Response(
+        status_code=200,
+        headers={"Content-Type": "application/json", **result.settlement_headers},
+        description=serialization.dumps(
+            {
+                **outcome,
+                "settlement_tx_id": result.payment_txid or "",
+                **({"via": "promo"} if result.is_promo else {}),
+            }
+        ),
+    )
+
+
 def x402_admin_delete_listing(request: Request) -> Response | dict:
     """Admin: delist a url outright, without waiting out its paid term.
 
@@ -609,11 +817,12 @@ def x402_admin_delete_listing(request: Request) -> Response | dict:
 
 
 def register_x402_directory_routes(app: Router) -> None:
-    """Register the paid list and renew routes, the free search/detail/probe-status/probe-history routes, and the admin delist route."""
+    """Register the paid list/renew/probe-leaderboard routes, the free search/detail/probe-status/probe-history routes, and the admin delist route."""
     app.post("/api/v1/x402/list")(x402_list)
     app.post("/api/v1/x402/list/renew")(x402_renew)
     app.get("/api/v1/x402/search")(x402_search)
     app.get("/api/v1/x402/listings")(x402_listing_detail)
     app.get("/api/v1/x402/directory/probe")(x402_probe_status)
     app.get("/api/v1/x402/directory/probe/history")(x402_probe_history)
+    app.get("/api/v1/x402/directory/probe/leaderboard")(x402_probe_leaderboard)
     app.delete("/api/v1/admin/x402/listings")(x402_admin_delete_listing)

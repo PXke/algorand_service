@@ -44,6 +44,7 @@ from app.modules.x402_directory.models.domain import (
 )
 from app.modules.x402_directory.services.listing_service import (
     MAX_SCHEMA_JSON_BYTES,
+    PROBE_LEADERBOARD_MIN_SAMPLES,
     ListingService,
     normalize_url,
     url_hash,
@@ -1692,6 +1693,469 @@ def test_probe_history_is_rate_limited_per_ip(
     assert "history" in _history("203.0.113.7")
     assert _history("203.0.113.7").status_code == 429
     assert "history" in _history("203.0.113.9")
+
+
+# --------------------------------------------------------------------------- #
+# Probe-MEASURED reliability leaderboard (roadmap item 7's trust-layer step 3)
+# --------------------------------------------------------------------------- #
+def _seed_probes(
+    store: InMemoryListingStore,
+    url_hash_value: str,
+    *,
+    count: int,
+    healthy_count: int,
+    latency_ms: int = 100,
+    start_epoch: int = 1_700_000_000,
+) -> None:
+    """Record `count` probes, oldest call first, the first `healthy_count` of them healthy.
+
+    record_probe() prepends, so calling with increasing probed_at_epoch (the
+    loop below) leaves the store's own newest-first order matching real
+    probe-beat cadence: the LAST call made here is the newest and therefore
+    history[0].
+    """
+    for i in range(count):
+        healthy = i < healthy_count
+        store.record_probe(
+            _probe(
+                url_hash_value,
+                probed_at_epoch=start_epoch + i,
+                reachable=healthy,
+                served_valid_402=healthy,
+                latency_ms=latency_ms,
+            )
+        )
+
+
+def test_probe_leaderboard_ranks_by_uptime_then_latency_then_recency(
+    store: InMemoryListingStore,
+) -> None:
+    """Primary sort is uptime_pct desc, tiebreak avg_latency_ms asc, final tiebreak last_probed_at_epoch desc."""
+    service = ListingService(store)
+    lower_uptime = service.create(
+        normalized_url="https://lower-uptime.example.com/x",
+        price="$0.01",
+        description="lower uptime",
+        assets=[],
+        tags=[],
+        schema_json="",
+        settlement_tx_id="TX1",
+        payer="AGENT1",
+    )
+    slower = service.create(
+        normalized_url="https://slower.example.com/x",
+        price="$0.01",
+        description="full uptime, slower",
+        assets=[],
+        tags=[],
+        schema_json="",
+        settlement_tx_id="TX2",
+        payer="AGENT2",
+    )
+    faster = service.create(
+        normalized_url="https://faster.example.com/x",
+        price="$0.01",
+        description="full uptime, faster",
+        assets=[],
+        tags=[],
+        schema_json="",
+        settlement_tx_id="TX3",
+        payer="AGENT3",
+    )
+    _seed_probes(store, lower_uptime.url_hash, count=48, healthy_count=40, latency_ms=1)
+    _seed_probes(store, slower.url_hash, count=48, healthy_count=48, latency_ms=200)
+    _seed_probes(store, faster.url_hash, count=48, healthy_count=48, latency_ms=50)
+
+    entries, scanned = service.probe_leaderboard(limit=10)
+
+    assert scanned == 3
+    assert [e.url for e in entries] == [
+        "https://faster.example.com/x",
+        "https://slower.example.com/x",
+        "https://lower-uptime.example.com/x",
+    ]
+    assert entries[0].avg_latency_ms == 50
+    assert entries[1].avg_latency_ms == 200
+    assert round(entries[2].uptime_pct, 2) == round(40 / 48 * 100, 2)
+
+
+def test_probe_leaderboard_final_tiebreak_is_most_recently_probed(
+    store: InMemoryListingStore,
+) -> None:
+    """Two candidates tied on uptime and latency are ordered by the more recently reprobed one first."""
+    service = ListingService(store)
+    stale = service.create(
+        normalized_url="https://stale.example.com/x",
+        price="$0.01",
+        description="stale",
+        assets=[],
+        tags=[],
+        schema_json="",
+        settlement_tx_id="TX1",
+        payer="AGENT1",
+    )
+    fresh = service.create(
+        normalized_url="https://fresh.example.com/x",
+        price="$0.01",
+        description="fresh",
+        assets=[],
+        tags=[],
+        schema_json="",
+        settlement_tx_id="TX2",
+        payer="AGENT2",
+    )
+    _seed_probes(store, stale.url_hash, count=48, healthy_count=48, start_epoch=1_700_000_000)
+    _seed_probes(store, fresh.url_hash, count=48, healthy_count=48, start_epoch=1_800_000_000)
+
+    entries, _ = service.probe_leaderboard(limit=10)
+
+    assert [e.url for e in entries] == [
+        "https://fresh.example.com/x",
+        "https://stale.example.com/x",
+    ]
+
+
+def test_probe_leaderboard_excludes_candidates_below_the_minimum_sample_threshold(
+    store: InMemoryListingStore,
+) -> None:
+    """A listing with fewer than PROBE_LEADERBOARD_MIN_SAMPLES probes is skipped entirely, not scored as 0% or 100%.
+
+    Regression-shaped: a listing probed once, luckily healthy, must not
+    outrank one with real history -- the concrete abuse this threshold
+    exists to close.
+    """
+    service = ListingService(store)
+    too_new = service.create(
+        normalized_url="https://too-new.example.com/x",
+        price="$0.01",
+        description="one lucky probe",
+        assets=[],
+        tags=[],
+        schema_json="",
+        settlement_tx_id="TX1",
+        payer="AGENT1",
+    )
+    established = service.create(
+        normalized_url="https://established.example.com/x",
+        price="$0.01",
+        description="real history",
+        assets=[],
+        tags=[],
+        schema_json="",
+        settlement_tx_id="TX2",
+        payer="AGENT2",
+    )
+    _seed_probes(
+        store,
+        too_new.url_hash,
+        count=PROBE_LEADERBOARD_MIN_SAMPLES - 1,
+        healthy_count=PROBE_LEADERBOARD_MIN_SAMPLES - 1,
+    )
+    _seed_probes(store, established.url_hash, count=PROBE_LEADERBOARD_MIN_SAMPLES, healthy_count=40)
+
+    entries, scanned = service.probe_leaderboard(limit=10)
+
+    assert scanned == 2
+    assert [e.url for e in entries] == ["https://established.example.com/x"]
+
+
+def test_probe_leaderboard_excludes_expired_listings(
+    store: InMemoryListingStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An expired listing is not a ranking candidate at all, mirroring search()'s own filter."""
+    monkeypatch.setattr(settings, "x402_listing_term_days", 30)
+    service = ListingService(store)
+    now = datetime.now(tz=UTC)
+    expired = service.create(
+        normalized_url="https://expired.example.com/x",
+        price="$0.01",
+        description="term ended",
+        assets=[],
+        tags=[],
+        schema_json="",
+        settlement_tx_id="TX1",
+        payer="AGENT1",
+        now=now - timedelta(days=31),
+    )
+    _seed_probes(
+        store,
+        expired.url_hash,
+        count=PROBE_LEADERBOARD_MIN_SAMPLES,
+        healthy_count=PROBE_LEADERBOARD_MIN_SAMPLES,
+    )
+
+    entries, scanned = service.probe_leaderboard(limit=10, now=now)
+
+    assert scanned == 0
+    assert entries == []
+
+
+def test_probe_leaderboard_healthy_requires_both_reachable_and_valid_402(
+    store: InMemoryListingStore,
+) -> None:
+    """A probe that is reachable but never serves a valid 402 does not count toward uptime or latency."""
+    service = ListingService(store)
+    listing = service.create(
+        normalized_url="https://reachable-but-invalid.example.com/x",
+        price="$0.01",
+        description="responds, but never a valid 402",
+        assets=[],
+        tags=[],
+        schema_json="",
+        settlement_tx_id="TX1",
+        payer="AGENT1",
+    )
+    for i in range(PROBE_LEADERBOARD_MIN_SAMPLES):
+        store.record_probe(
+            _probe(
+                listing.url_hash,
+                probed_at_epoch=1_700_000_000 + i,
+                reachable=True,
+                served_valid_402=False,
+                latency_ms=10,
+            )
+        )
+
+    entries, _ = service.probe_leaderboard(limit=10)
+
+    assert entries[0].uptime_pct == 0.0
+    assert entries[0].avg_latency_ms is None
+
+
+def test_probe_leaderboard_is_empty_for_an_empty_directory(store: InMemoryListingStore) -> None:
+    """Zero listings is a valid, honestly-reported empty leaderboard, not an error."""
+    entries, scanned = ListingService(store).probe_leaderboard(limit=10)
+
+    assert entries == []
+    assert scanned == 0
+
+
+def test_probe_leaderboard_caps_to_the_requested_limit(store: InMemoryListingStore) -> None:
+    """More qualifying candidates than `limit` still only returns `limit` rows -- CLAUDE.md section 4."""
+    service = ListingService(store)
+    for i in range(5):
+        listing = service.create(
+            normalized_url=f"https://api{i}.example.com/x",
+            price="$0.01",
+            description=f"endpoint {i}",
+            assets=[],
+            tags=[],
+            schema_json="",
+            settlement_tx_id=f"TX{i}",
+            payer=f"AGENT{i}",
+        )
+        _seed_probes(
+            store,
+            listing.url_hash,
+            count=PROBE_LEADERBOARD_MIN_SAMPLES,
+            healthy_count=PROBE_LEADERBOARD_MIN_SAMPLES,
+        )
+
+    entries, scanned = service.probe_leaderboard(limit=2)
+
+    assert scanned == 5
+    assert len(entries) == 2
+
+
+# --------------------------------------------------------------------------- #
+# Probe leaderboard route: payment gate, preview, refund, discovery
+# --------------------------------------------------------------------------- #
+@pytest.mark.usefixtures("fake_redis")
+def test_probe_leaderboard_limit_must_be_an_integer_before_the_gate(
+    store: InMemoryListingStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A non-integer `limit` is a 400 before the payment gate -- nobody is charged for a malformed request."""
+    monkeypatch.setattr(directory_routes, "listing_service", ListingService(store))
+    monkeypatch.setattr(directory_routes, "require_paid_request", _never_gate_factory([]))
+
+    response = directory_routes.x402_probe_leaderboard(
+        _request(
+            method="GET",
+            path="/api/v1/x402/directory/probe/leaderboard",
+            query={"limit": "not-a-number"},
+        )
+    )
+
+    assert response.status_code == 400
+    assert "invalid_request" in response.description
+
+
+@pytest.mark.usefixtures("fake_redis")
+def test_probe_leaderboard_is_refused_before_the_gate_once_its_circuit_breaker_is_tripped(
+    monkeypatch: pytest.MonkeyPatch, fake_redis: _FakeRedis
+) -> None:
+    """Once the resource's breaker is tripped, the route refuses BEFORE require_paid_request."""
+    fake_redis.store[
+        f"algorand:x402:refund_breaker:{directory_routes._PROBE_LEADERBOARD_RESOURCE}"
+    ] = str(settings.x402_refund_breaker_max_failures)
+    monkeypatch.setattr(directory_routes, "require_paid_request", _never_gate_factory([]))
+
+    response = directory_routes.x402_probe_leaderboard(
+        _request(method="GET", path="/api/v1/x402/directory/probe/leaderboard")
+    )
+
+    assert response.status_code == 503
+    assert json.loads(response.description)["error"]["code"] == "temporarily_disabled"
+
+
+@pytest.mark.usefixtures("testnet_settings", "fake_redis")
+def test_probe_leaderboard_preview_is_redacted_unpaid_and_never_ranks_real_candidates(
+    store: InMemoryListingStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """?preview=true serves a redacted exemplar row with no facilitator call and never calls probe_leaderboard()."""
+    service = ListingService(store)
+    monkeypatch.setattr(directory_routes, "listing_service", service)
+    called = False
+
+    def _must_not_rank(**_kw: object) -> Never:
+        nonlocal called
+        called = True
+        raise AssertionError("probe_leaderboard must not run on a preview request")
+
+    monkeypatch.setattr(service, "probe_leaderboard", _must_not_rank)
+
+    response = directory_routes.x402_probe_leaderboard(
+        _request(
+            method="GET", path="/api/v1/x402/directory/probe/leaderboard", query={"preview": "true"}
+        )
+    )
+
+    assert response.status_code == 200
+    payload = json.loads(response.description)
+    assert payload["candidates_scanned"] == -1
+    assert payload["items"][0]["url"] == "<preview>"
+    assert payload["settlement_tx_id"] == "<preview>"
+    assert called is False
+
+
+@pytest.mark.usefixtures("fake_redis")
+def test_probe_leaderboard_paid_response_serves_the_measured_ranking_and_marks_fulfilled(
+    store: InMemoryListingStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A settled payment returns the real ranking, the measurement-only framing, and is marked fulfilled."""
+    service = ListingService(store)
+    listing = service.create(
+        normalized_url="https://api.example.com/v1/quote",
+        price="$0.01",
+        description="probe me",
+        assets=[],
+        tags=[],
+        schema_json="",
+        settlement_tx_id="TX1",
+        payer="AGENT1",
+    )
+    _seed_probes(
+        store,
+        listing.url_hash,
+        count=PROBE_LEADERBOARD_MIN_SAMPLES,
+        healthy_count=PROBE_LEADERBOARD_MIN_SAMPLES,
+    )
+    monkeypatch.setattr(directory_routes, "listing_service", service)
+    monkeypatch.setattr(
+        directory_routes, "require_paid_request", lambda *_a, **_kw: _settled_result()
+    )
+    fulfilled: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        directory_routes,
+        "mark_fulfilled",
+        lambda txid, *, resource: fulfilled.append((txid, resource)),
+    )
+
+    response = directory_routes.x402_probe_leaderboard(
+        _request(method="GET", path="/api/v1/x402/directory/probe/leaderboard")
+    )
+
+    assert response.status_code == 200
+    body = json.loads(response.description)
+    assert body["basis"] == "measured"
+    assert body["candidates_scanned"] == 1
+    assert body["items"][0]["url"] == "https://api.example.com/v1/quote"
+    assert body["items"][0]["rank"] == 1
+    assert body["settlement_tx_id"] == "TX123"
+    assert fulfilled == [("TX123", directory_routes._PROBE_LEADERBOARD_RESOURCE)]
+
+
+@pytest.mark.usefixtures("fake_redis")
+def test_probe_leaderboard_paid_response_is_a_valid_200_for_an_empty_directory(
+    store: InMemoryListingStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Zero listings (or none with enough probe history) is an honest, chargeable empty leaderboard -- never a 404 or an error envelope."""
+    monkeypatch.setattr(directory_routes, "listing_service", ListingService(store))
+    monkeypatch.setattr(
+        directory_routes, "require_paid_request", lambda *_a, **_kw: _settled_result()
+    )
+
+    response = directory_routes.x402_probe_leaderboard(
+        _request(method="GET", path="/api/v1/x402/directory/probe/leaderboard")
+    )
+
+    assert response.status_code == 200
+    body = json.loads(response.description)
+    assert body["items"] == []
+    assert body["candidates_scanned"] == 0
+    assert "error" not in body
+
+
+@pytest.mark.usefixtures("fake_redis")
+def test_probe_leaderboard_write_failure_after_payment_triggers_a_refund_not_a_500(
+    store: InMemoryListingStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A genuine unexpected failure building the leaderboard after payment settled is refunded, never a bare 500."""
+    service = ListingService(store)
+    monkeypatch.setattr(directory_routes, "listing_service", service)
+    monkeypatch.setattr(
+        directory_routes, "require_paid_request", lambda *_a, **_kw: _settled_result()
+    )
+    monkeypatch.setattr(
+        service,
+        "probe_leaderboard",
+        lambda **_kw: (_ for _ in ()).throw(RuntimeError("ranking blew up")),
+    )
+    fulfilled: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        directory_routes,
+        "mark_fulfilled",
+        lambda txid, *, resource: fulfilled.append((txid, resource)),
+    )
+
+    response = directory_routes.x402_probe_leaderboard(
+        _request(method="GET", path="/api/v1/x402/directory/probe/leaderboard")
+    )
+
+    assert response.status_code == 503
+    assert json.loads(response.description)["error"]["code"] == "product_failed_refund_pending"
+    assert fulfilled == []
+
+
+@pytest.mark.usefixtures("testnet_settings", "fake_redis")
+def test_probe_leaderboard_402_declares_bazaar_discovery_and_the_measurement_framing(
+    store: InMemoryListingStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The 402 offer's own description states the measurement-not-opinion framing and declares query-params discovery."""
+    from x402.http.utils import decode_payment_required_header
+
+    monkeypatch.setattr(settings, "x402_directory_probe_leaderboard_price", "$0.02")
+    monkeypatch.setattr(directory_routes, "listing_service", ListingService(store))
+
+    response = directory_routes.x402_probe_leaderboard(
+        _request(method="GET", path="/api/v1/x402/directory/probe/leaderboard")
+    )
+
+    assert response.status_code == 402
+    payment_required = decode_payment_required_header(response.headers["PAYMENT-REQUIRED"])
+    assert payment_required.accepts[0].amount == "20000"
+    assert "MEASURED" in (payment_required.resource.description or "")
+    assert "never" in (payment_required.resource.description or "").lower()
+    bazaar = (payment_required.extensions or {}).get("bazaar")
+    assert bazaar is not None
+    # GET takes its input in the query string, not a JSON body -- the
+    # package's own query-params shape carries "queryParams", not "body"
+    # (checked structurally, not by scanning the whole JSON for the
+    # substring "body": the leaderboard's own framing text legitimately
+    # says "nobody", which would give a plain substring check a false
+    # positive).
+    assert "queryParams" in bazaar["info"]["input"]
+    assert "body" not in bazaar["info"]["input"]
 
 
 def test_cassandra_store_reads_badge_and_latest_probe_columns(

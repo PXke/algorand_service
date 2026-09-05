@@ -271,6 +271,21 @@ PRODUCTS: tuple[Product, ...] = (
                 ),
                 input_example={"url": _EXAMPLE_URL},
             ),
+            CatalogRoute(
+                method="GET",
+                path="/api/v1/x402/directory/probe/leaderboard",
+                description=(
+                    "The most reliable listed endpoints, ranked purely by MEASURED probe "
+                    "data (uptime, latency) -- never by paid grade or spend, unlike "
+                    "/x402/grades/top. Optional ?limit=."
+                ),
+                price_setting="x402_directory_probe_leaderboard_price",
+                resource="x402-directory-probe-leaderboard",
+                input_example={"limit": 10},
+                supports_promo=True,
+                supports_preview=True,
+                supports_receipts=True,
+            ),
         ),
     ),
     Product(

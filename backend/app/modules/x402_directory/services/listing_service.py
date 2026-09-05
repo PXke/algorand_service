@@ -14,6 +14,7 @@ from app.modules.x402_directory.models.domain import (
     DEFAULT_CATEGORY,
     LISTING_CATEGORIES,
     DirectoryError,
+    ProbeLeaderboardEntry,
     StoredListing,
     StoredProbe,
     category_tag,
@@ -47,6 +48,25 @@ MAX_CONTACT_LENGTH = 256
 # full 100-listing search response stays around 1 MB. It is also generous for
 # what the field is for: a JSON Schema describing one endpoint's input.
 MAX_SCHEMA_JSON_BYTES = 4096
+
+# Minimum stored probes a listing needs, within its own sample window, before
+# probe_leaderboard() ranks it at all (roadmap item 7, the probe-MEASURED
+# trust leaderboard). At the probe beat's 30-minute cadence this is roughly
+# a day of consistent probing -- enough that a listing minutes old cannot
+# buy a top rank with one lucky probe, while a genuinely-new-but-reliable
+# listing still qualifies within its first day rather than having to wait
+# weeks. Tunable; not derived from anything else. Same shape as grading's
+# own MIN_LEADERBOARD_GRADES threshold, for the equivalent anti-gaming reason.
+PROBE_LEADERBOARD_MIN_SAMPLES = 48
+
+# How many live listings probe_leaderboard() scans as ranking candidates,
+# newest-created first (the same recency feed search() reads). Bounded
+# (CLAUDE.md section 4) and deliberately smaller than x402_search_max_results:
+# each candidate here costs one more bounded probe_history read on top of the
+# listing read itself, so the whole route's Cassandra cost scales with this
+# number, not with the directory's real size. Same role as grading's own
+# TOP_CANDIDATE_LIMIT.
+PROBE_LEADERBOARD_CANDIDATE_LIMIT = 50
 
 
 def normalize_url(raw: str) -> str:
@@ -500,3 +520,107 @@ class ListingService:
             return None
         clamped = max(1, min(limit, settings.x402_probe_history_max_results))
         return self.store.probe_history(key, limit=clamped)
+
+    def probe_leaderboard(
+        self, *, limit: int, now: datetime | None = None
+    ) -> tuple[list[ProbeLeaderboardEntry], int]:
+        """Rank live listings by MEASURED probe reliability -- never by paid opinion or spend.
+
+        Distinct from x402_grading's leaderboards (a credibility-weighted
+        AGGREGATE OF AGENT OPINION -- sybil-vulnerable: enough wallets
+        grading small amounts can buy a rank) and from x402_board (pure paid
+        presence, no ranking claim at all): this ranks purely on what the
+        probe fleet has actually observed (roadmap item 7). Nobody can pay to
+        appear higher here -- the same reasoning CLAUDE.md section 9 item 20
+        already settled for keeping the measurement layer itself free and
+        unbuyable, applied to a leaderboard built on top of it.
+
+        Scans up to PROBE_LEADERBOARD_CANDIDATE_LIMIT live (unexpired)
+        listings, newest-created first (list_recent, the same recency feed
+        search() reads) -- like search(), the expiry filter runs AFTER the
+        LIMITed read rather than as a CQL predicate (CLAUDE.md section 4: no
+        ALLOW FILTERING on a non-key column), so a call can scan fewer than
+        PROBE_LEADERBOARD_CANDIDATE_LIMIT live candidates when the front of
+        the feed holds expired listings. For each live candidate, reads up
+        to settings.x402_probe_history_max_results of its most recent probes
+        -- the SAME bound the free probe/history route already exposes, so
+        this leaderboard never draws on data a caller could not already
+        reconstruct by hand from free reads; it only aggregates and ranks it.
+
+        A candidate with fewer than PROBE_LEADERBOARD_MIN_SAMPLES probes in
+        that window is skipped entirely -- not scored as 0% or excused as
+        100%, just left unranked -- so a listing minutes old with one lucky
+        probe cannot outrank one with real history. That is the concrete
+        abuse this threshold exists to close.
+
+        "Healthy" for one probe means reachable AND served_valid_402: a probe
+        that gets a response but not a valid x402 challenge is not something
+        a payer could actually transact against, so it should not count
+        toward uptime any more than an unreachable one does. uptime_pct is
+        the healthy fraction of the sampled probes (0-100); avg_latency_ms
+        averages latency_ms over the healthy ones only, and is None when
+        there are none -- an honest missing value, never a fabricated 0 that
+        would misread as a great latency (the same "empty is not none found"
+        spirit CLAUDE.md section 2 invariant 8 states for a tool's own
+        result, applied here to a derived average).
+
+        Ranked by uptime_pct descending, ties broken by avg_latency_ms
+        ascending (a candidate with no healthy sample -- uptime 0% -- sorts
+        last on latency too, via None ranking after every real value), final
+        tie broken by last_probed_at_epoch descending (most recently
+        reprobed first), so the order is fully deterministic. The ranked
+        list is capped to `limit` (the route clamps this against
+        settings.x402_directory_probe_leaderboard_max_results before calling
+        in).
+
+        Returns (ranked_entries, candidates_scanned): the second number
+        counts every LIVE listing scanned, ranked or not, so a caller can
+        tell "we measured N listings and none qualified yet" apart from
+        "there is nothing listed at all." Never raises -- a listing with too
+        few probes is simply excluded, and an empty or all-too-new directory
+        returns ([], candidates_scanned) rather than an error. Unlike
+        x402_grading's per-tag leaderboard, this ranks the WHOLE directory
+        rather than one tag's listings, so there is no narrower free
+        existence check to gate the call on the way a specific tag's grade
+        count can be pre-checked -- an honestly-reported empty leaderboard is
+        a valid, chargeable answer here (the route's own docstring covers
+        why this is priced rather than pre-gate-refused).
+        """
+        moment = now or datetime.now(tz=UTC)
+        cutoff = int(moment.timestamp())
+        candidates = [
+            item
+            for item in self.store.list_recent(limit=PROBE_LEADERBOARD_CANDIDATE_LIMIT)
+            if item.term_end_epoch > cutoff
+        ]
+        entries: list[ProbeLeaderboardEntry] = []
+        for item in candidates:
+            history = self.store.probe_history(
+                item.url_hash, limit=settings.x402_probe_history_max_results
+            )
+            if len(history) < PROBE_LEADERBOARD_MIN_SAMPLES:
+                continue
+            healthy = [probe for probe in history if probe.reachable and probe.served_valid_402]
+            avg_latency_ms = (
+                sum(probe.latency_ms for probe in healthy) / len(healthy) if healthy else None
+            )
+            entries.append(
+                ProbeLeaderboardEntry(
+                    url=item.url,
+                    verified_wallet=item.verified_wallet if item.is_verified else "",
+                    sample_count=len(history),
+                    uptime_pct=(len(healthy) / len(history)) * 100.0,
+                    avg_latency_ms=avg_latency_ms,
+                    # Newest-first (store.probe_history's own contract), so
+                    # index 0 is the most recent probe in this sample.
+                    last_probed_at_epoch=history[0].probed_at_epoch,
+                )
+            )
+        entries.sort(
+            key=lambda entry: (
+                -entry.uptime_pct,
+                entry.avg_latency_ms if entry.avg_latency_ms is not None else float("inf"),
+                -entry.last_probed_at_epoch,
+            )
+        )
+        return entries[: max(0, limit)], len(candidates)

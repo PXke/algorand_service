@@ -128,3 +128,22 @@ class StoredProbe:
     served_valid_402: bool
     payto_seen: str
     error: str
+
+
+@dataclass
+class ProbeLeaderboardEntry:
+    """One ranked row of the probe-MEASURED reliability leaderboard (roadmap item 7).
+
+    Built by ListingService.probe_leaderboard() from a listing's own recent
+    probe_history sample -- never from paid opinion (x402_grading) or spend.
+    `avg_latency_ms` is None when the listing has zero "healthy" (reachable
+    AND served_valid_402) samples in its window: an honest missing value,
+    never a fabricated 0 that would misread as a great latency.
+    """
+
+    url: str
+    verified_wallet: str
+    sample_count: int
+    uptime_pct: float
+    avg_latency_ms: float | None
+    last_probed_at_epoch: int

@@ -351,6 +351,23 @@ class Settings(msgspec.Struct, kw_only=True):
     # "don't charge for what's already effectively public" reasoning as the
     # News Engine's free article read.
     x402_probe_history_max_results: int = 200
+    # Paid: the most reliable listed endpoints, ranked purely by measured
+    # probe data (roadmap item 7's "trust layer" step 3) -- distinct from
+    # x402_grading's spend-weighted OPINION leaderboards, which a sybil of
+    # small-paying wallets can influence; nobody can pay their way onto this
+    # one. See ListingService.probe_leaderboard() for the ranking rule and
+    # its minimum-sample threshold. Priced between x402_scan_price ($0.01,
+    # a single stateless check) and x402_grading_score_price ($0.03, a
+    # credibility-weighted aggregate over per-grader rows): this route does
+    # more work than a single check -- it scans multiple listings and each
+    # one's own bounded probe history -- but resells only measured numbers,
+    # no per-grader opinions to unbundle the way grading/score does.
+    x402_directory_probe_leaderboard_price: str = "$0.02"
+    # Hard cap on the `?limit=` a caller can request (CLAUDE.md section 4:
+    # no unbounded listings) -- deliberately smaller than x402_search_max_results:
+    # this is a curated top-N ranking, not a paged feed, and every row already
+    # cost a bounded probe-history read to compute (see probe_leaderboard()).
+    x402_directory_probe_leaderboard_max_results: int = 25
 
     # x402 visibility board (POST /x402/board paid, GET /x402/board free).
     # See app/modules/x402_board/. Separate settings from the directory's on
