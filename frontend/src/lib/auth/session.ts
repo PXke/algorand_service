@@ -72,11 +72,49 @@ function clearTokenIfUnchanged(expected: string): void {
   }
 }
 
+/**
+ * No local token on this origin: try the shared cross-subdomain cookie
+ * instead (2026-09-07 -- the admin panel disappearing when moving between
+ * algorand.pxke.me/x402.pxke.me/algorand-registry.pxke.me was root-caused
+ * to the session token living ONLY in localStorage, which is per-origin
+ * and does not follow the user across these three distinct subdomains). A
+ * prod-only Domain=.pxke.me HttpOnly cookie now rides along automatically
+ * (credentials: 'include', see api/client.ts); if the backend recognizes
+ * it, mirror the result into session state for this page load.
+ *
+ * `token: ''` here is a deliberate sentinel, not a bug: sessionHeaders('')
+ * and every `token ? {...} : {}`-shaped caller already treat it the same
+ * as no token (skip the x-session-token header) -- correct for a
+ * cookie-backed session, where the browser attaches the cookie on its own
+ * regardless of what headers JS sets. It is NOT written to localStorage:
+ * a reload re-derives it from the cookie again rather than caching it, so
+ * there is nothing to go stale if the cookie is later revoked/expired.
+ */
+async function restoreFromCookie(): Promise<void> {
+  try {
+    const info = await authApi.sessionViaCookie()
+    const addr = String(info.wallet_address ?? '')
+    session.set(
+      addr
+        ? {
+            token: '',
+            walletAddress: addr,
+            expiresInEpoch:
+              typeof info.expires_in_epoch === 'number' ? info.expires_in_epoch : undefined,
+          }
+        : null,
+    )
+  } catch {
+    session.set(null)
+  } finally {
+    sessionReady.set(true)
+  }
+}
+
 export async function restoreSession(): Promise<void> {
   const token = readStoredToken()
   if (!token) {
-    session.set(null)
-    sessionReady.set(true)
+    await restoreFromCookie()
     return
   }
   try {
@@ -291,7 +329,13 @@ export function wakeWalletTransport(): void {
 
 export async function logout(): Promise<void> {
   const s = get(session)
-  if (s?.token) {
+  if (s) {
+    // Call even for a cookie-only session (s.token === ''): the backend
+    // falls back to reading the wallet_session cookie itself (see
+    // request_headers.session_token), and this is what actually clears
+    // that cross-subdomain cookie server-side -- skipping the call for an
+    // empty token would leave it valid, so the user would appear logged
+    // back in on reload or on another product domain.
     try {
       await authApi.logout(s.token)
     } catch {

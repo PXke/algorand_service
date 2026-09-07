@@ -1,8 +1,33 @@
-"""client_ip() prefers X-Real-IP and the last X-Forwarded-For hop."""
+"""client_ip() prefers X-Real-IP and the last X-Forwarded-For hop; session_token() falls back to the wallet_session cookie."""
 
 from __future__ import annotations
 
-from app.core.request_headers import client_ip
+from app.core.request_headers import client_ip, session_token
+
+
+def test_session_token_prefers_the_header() -> None:
+    """A real x-session-token header wins even when a (possibly stale) cookie is also present."""
+    assert session_token({"x-session-token": "HDR", "Cookie": "wallet_session=COOKIE"}) == "HDR"
+
+
+def test_session_token_falls_back_to_the_wallet_session_cookie() -> None:
+    """No header at all -- 2026-09-07: this is what makes a cross-subdomain session work."""
+    assert session_token({"Cookie": "wallet_session=COOKIE1"}) == "COOKIE1"
+
+
+def test_session_token_reads_the_right_cookie_among_several() -> None:
+    """wallet_session need not be the only or first cookie in the header."""
+    assert session_token({"Cookie": "other=1; wallet_session=COOKIE2; another=3"}) == "COOKIE2"
+
+
+def test_session_token_empty_without_header_or_cookie() -> None:
+    """No auth signal at all -- empty string, same contract as before this fix."""
+    assert session_token({}) == ""
+
+
+def test_session_token_empty_header_falls_through_to_cookie() -> None:
+    """An empty x-session-token value (e.g. a caller-side sentinel for 'no local token') must not shadow a real cookie."""
+    assert session_token({"x-session-token": "", "Cookie": "wallet_session=COOKIE3"}) == "COOKIE3"
 
 
 def test_client_ip_prefers_x_real_ip() -> None:

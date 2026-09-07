@@ -89,6 +89,14 @@ async function requestJson(
       method,
       headers: hasBody ? { 'Content-Type': 'application/json', ...opts?.headers } : opts?.headers,
       signal: opts?.signal,
+      // Carries the cross-subdomain wallet_session cookie (2026-09-07: the
+      // admin panel disappeared when moving between algorand.pxke.me/
+      // x402.pxke.me/algorand-registry.pxke.me because the session token
+      // lived only in localStorage, which is per-origin). CORS already
+      // reflects the specific Origin and sets Access-Control-Allow-
+      // Credentials for all three configured origins (falcon_main.py's
+      // CorsMiddleware), so this is safe everywhere this app is served.
+      credentials: 'include',
       ...(hasBody ? { body: JSON.stringify(body ?? {}) } : {}),
     })
     return await decode(res)

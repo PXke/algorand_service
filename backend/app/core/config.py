@@ -118,6 +118,15 @@ class Settings(msgspec.Struct, kw_only=True):
     typesense_protocol: str = "http"
     typesense_api_key: str = "changeme"
 
+    # Cross-subdomain admin/wallet session cookie (2026-09-07: the admin
+    # panel disappeared moving between algorand.pxke.me/x402.pxke.me/
+    # algorand-registry.pxke.me -- the session token lived only in
+    # localStorage, which is per-origin, not per-registrable-domain). Empty
+    # by default (feature off): a Domain-scoped cookie only makes sense
+    # where all three sites share one parent domain, which isn't true for
+    # local/dev origins (localhost:PORT). Set to ".pxke.me" in prod.
+    session_cookie_domain: str = ""
+
     cors_allowed_origins: str = (
         "http://localhost:8080,http://127.0.0.1:8080,"
         "http://localhost:3000,http://127.0.0.1:3000,"

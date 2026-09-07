@@ -27,6 +27,17 @@ export const authApi = {
     return api.getJson('/api/v1/auth/session', { 'x-session-token': token })
   },
 
+  /**
+   * Same lookup, but with no x-session-token header at all -- relies purely
+   * on the cross-subdomain `wallet_session` cookie (see client.ts's
+   * `credentials: 'include'`) to authenticate. Used by restoreSession() on
+   * an origin with no local token, so a login on one product domain is
+   * recognized on the others without a fresh wallet-signature prompt.
+   */
+  async sessionViaCookie() {
+    return api.getJson('/api/v1/auth/session')
+  },
+
   async logout(token: string) {
     return api.postJson('/api/v1/auth/logout', {}, { 'x-session-token': token })
   },

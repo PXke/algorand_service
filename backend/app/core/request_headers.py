@@ -17,9 +17,33 @@ def header_value(headers: Mapping[str, str], *names: str) -> str:
     return ""
 
 
+# Cross-subdomain session cookie name (2026-09-07: the admin panel
+# disappeared when moving between algorand.pxke.me/x402.pxke.me/
+# algorand-registry.pxke.me because the session token lived only in
+# localStorage, which is per-origin -- see auth/api/routes.py's
+# _session_cookie_header for where this is set, config.py's
+# session_cookie_domain for the Domain= it's scoped to).
+SESSION_COOKIE_NAME = "wallet_session"
+
+
+def _cookie_value(headers: Mapping[str, str], name: str) -> str:
+    """One cookie's value from the raw Cookie header, or "" if absent/malformed."""
+    raw = header_value(headers, "cookie")
+    if not raw:
+        return ""
+    for part in raw.split(";"):
+        key, _, value = part.strip().partition("=")
+        if key == name:
+            return value.strip()
+    return ""
+
+
 def session_token(headers: Mapping[str, str]) -> str:
-    """Session token from x-session-token (any casing)."""
-    return header_value(headers, "x-session-token")
+    """Session token from x-session-token (any casing), falling back to the wallet_session cookie for a cross-subdomain session (2026-09-07)."""
+    header = header_value(headers, "x-session-token")
+    if header:
+        return header
+    return _cookie_value(headers, SESSION_COOKIE_NAME)
 
 
 def client_ip(headers: Mapping[str, str]) -> str:
