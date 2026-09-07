@@ -49,18 +49,42 @@ def issue_consent_challenge(wallet_address: str) -> ConsentChallenge:
     return ConsentChallenge(nonce=nonce, expires_at=expires_at)
 
 
-def consume_consent_challenge(wallet_address: str) -> ConsentChallenge | None:
-    """Atomically pop the pending challenge for `wallet_address`, or None if absent.
+def peek_consent_challenge(wallet_address: str) -> ConsentChallenge | None:
+    """Non-destructively read the pending challenge for `wallet_address`, or None if absent.
 
-    GETDEL so two parallel enrolls cannot both redeem the same nonce. Raises
-    ConsentStoreError when Redis itself fails (fail closed: enrollment must
-    not proceed without a consumed challenge).
+    Deliberately NOT a pop (2026-09-07 security review, finding 2 -- same bug
+    class as x402_social's session_service.py: this route's client never
+    sends the nonce back, only wallet_address + a signature, so the
+    wallet+nonce Redis-key fix used for /auth login and x402 social sessions
+    doesn't transfer directly here without a wire-format change. Instead,
+    the caller must verify the signature against the peeked challenge FIRST
+    and only call discard_consent_challenge on success -- a garbage
+    signature can then never pop, and so never invalidate, the real pending
+    challenge, closing the same griefing hole without touching the request
+    schema. Raises ConsentStoreError when Redis itself fails (fail closed:
+    enrollment must not proceed on an unconfirmed store).
     """
     try:
-        raw = get_redis().getdel(_key(wallet_address))
+        raw = get_redis().get(_key(wallet_address))
     except Exception as exc:
         raise ConsentStoreError("consent challenge store unavailable") from exc
     if not raw:
         return None
     data = serialization.loads(raw)
     return ConsentChallenge(nonce=str(data["nonce"]), expires_at=int(data["expires_at"]))
+
+
+def discard_consent_challenge(wallet_address: str) -> None:
+    """Delete the pending challenge for `wallet_address` -- call only after its signature has verified.
+
+    Safe to call more than once (plain DEL): two concurrent valid
+    submissions may both pass verification and both enroll (enrollment
+    itself overwrites idempotently, see kyc_enroll's own docstring) and both
+    reach this call -- that is a narrower, already-accepted race (the same
+    "two parallel valid redeemers" case the old GETDEL used to trade off),
+    not a new one. Raises ConsentStoreError when Redis itself fails.
+    """
+    try:
+        get_redis().delete(_key(wallet_address))
+    except Exception as exc:
+        raise ConsentStoreError("consent challenge store unavailable") from exc

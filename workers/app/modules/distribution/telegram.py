@@ -92,5 +92,10 @@ class TelegramDistributor(SocialDistributor):
                 )
             return DistributionResult(channel=self.name, ok=True)
         except Exception as exc:
-            log.warning("telegram post failed for %s: %s", share.url, exc, exc_info=True)
-            return DistributionResult(channel=self.name, ok=False, detail=str(exc)[:300])
+            # httpx's own exception string (raise_for_status, connection
+            # errors) includes the full request URL, which embeds the bot
+            # token in its path (`base` above) -- redact before it reaches
+            # the log or the stored DistributionResult.detail.
+            detail = str(exc).replace(self._bot_token, "***")[:300]
+            log.warning("telegram post failed for %s: %s", share.url, detail)
+            return DistributionResult(channel=self.name, ok=False, detail=detail)

@@ -275,6 +275,26 @@ def test_telegram_reports_api_level_failure() -> None:
     assert "not a member" in result.detail
 
 
+def test_telegram_never_leaks_bot_token_on_a_raised_exception(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Regression test (2026-09-07 security review, finding 4): the request URL embeds the bot token in its path (api.telegram.org/bot<TOKEN>/...), and httpx's own exception string (raise_for_status, connection errors) includes that full URL. Any non-2xx or transport failure used to log the raw exception straight to the warning log and store it verbatim in DistributionResult.detail -- both must have the token redacted."""
+    token = "123456:AAsupersecretbottoken"
+    with patch("httpx.Client") as client_cls:
+        client = client_cls.return_value
+        client.post.side_effect = RuntimeError(
+            f"boom for url https://api.telegram.org/bot{token}/sendPhoto"
+        )
+
+        with caplog.at_level("WARNING"):
+            result = TelegramDistributor(bot_token=token, chat_id="@chan").post_article(_SHARE)
+
+    assert not result.ok
+    assert token not in result.detail
+    assert token not in caplog.text
+    assert "***" in result.detail
+
+
 # ── Dispatcher ───────────────────────────────────────────────────────────
 
 

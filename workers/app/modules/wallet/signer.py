@@ -65,10 +65,17 @@ def _private_key() -> str | None:
     phrase = AGENT_WALLET_MNEMONIC.strip()
     if not phrase:
         return None
+    # The installed algosdk's mnemonic.to_private_key raises ValueError(mnemonic)
+    # -- the exception MESSAGE IS THE ENTIRE 25-WORD SECRET PHRASE -- when any
+    # word is not in the wordlist. Never pass exc/exc_info from this specific
+    # call to the logger (same bug, same fix, as kya's payout_service.py).
     try:
         return mnemonic.to_private_key(phrase)
     except Exception:
-        logger.warning("AGENT_WALLET_MNEMONIC is set but invalid", exc_info=True)
+        logger.warning(
+            "AGENT_WALLET_MNEMONIC is set but invalid (value never logged) -- "
+            "the agent wallet cannot sign until this is fixed"
+        )
         return None
 
 
@@ -106,7 +113,8 @@ def _handle_sign_data(params: Any) -> RequestDecision:  # noqa: ANN401
     item = params[0]
     if str(item.get("signer") or "") != address:
         return RequestDecision(
-            approved=False, decline_reason="algo_signData: signer does not match agent wallet address"
+            approved=False,
+            decline_reason="algo_signData: signer does not match agent wallet address",
         )
     data_b64 = item.get("data")
     if not isinstance(data_b64, str) or not data_b64:
@@ -114,7 +122,9 @@ def _handle_sign_data(params: Any) -> RequestDecision:  # noqa: ANN401
     try:
         raw = base64.b64decode(data_b64, validate=True)
     except Exception:
-        return RequestDecision(approved=False, decline_reason="algo_signData: data is not valid base64")
+        return RequestDecision(
+            approved=False, decline_reason="algo_signData: data is not valid base64"
+        )
     private_key = _private_key()
     if private_key is None:
         return RequestDecision(approved=False, decline_reason="agent wallet not configured")
@@ -158,7 +168,10 @@ def _decode_self_payment_txn(entry: dict[str, Any], address: str) -> tuple[Any, 
     if txn.genesis_id != _MAINNET_GENESIS_ID or txn.genesis_hash != _MAINNET_GENESIS_HASH:
         return None, "algo_signTxn: only a MainNet transaction is allowed"
     if txn.sender != address or txn.receiver != address:
-        return None, "algo_signTxn: only a self-payment (sender == receiver == agent wallet) is allowed"
+        return (
+            None,
+            "algo_signTxn: only a self-payment (sender == receiver == agent wallet) is allowed",
+        )
     if int(txn.amt or 0) != 0:
         return None, "algo_signTxn: only a 0-ALGO transaction is allowed in this phase"
     if txn.close_remainder_to or txn.rekey_to:

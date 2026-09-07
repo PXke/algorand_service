@@ -95,6 +95,9 @@ class _FakeRedis:
     def getdel(self, key: str) -> str | None:
         return self.store.pop(key, None)
 
+    def get(self, key: str) -> str | None:
+        return self.store.get(key)
+
     def delete(self, key: str) -> int:
         return 1 if self.store.pop(key, None) is not None else 0
 
@@ -558,7 +561,7 @@ def test_enroll_without_a_consent_challenge_is_rejected() -> None:
 
 @pytest.mark.usefixtures("fake_redis", "free_enroll")
 def test_a_consent_challenge_cannot_be_replayed() -> None:
-    """GETDEL: a second enroll with the same signed payload has no challenge left."""
+    """A successful enroll discards its consent challenge: a second enroll with the same signed payload has no challenge left."""
     _issue_consent()
     first = kyc_routes.kyc_enroll(
         _request(method="POST", body=_enroll_body(), path="/api/v1/kyc/enroll")
@@ -569,6 +572,46 @@ def test_a_consent_challenge_cannot_be_replayed() -> None:
     )
     assert second.status_code == 401
     assert "invalid_or_expired_consent" in second.description
+
+
+@pytest.mark.usefixtures("fake_redis")
+def test_a_bad_signature_does_not_grief_the_real_pending_challenge(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression test (2026-09-07 security review, finding 2): before this fix, enroll popped the pending challenge via GETDEL BEFORE checking the signature, so anyone who knew a wallet's public address could invalidate its owner's real in-flight consent challenge with one bogus signature -- a free login-lockout griefing vector, same bug class already fixed once in x402_social's session_service.py. A failed-signature attempt must leave the real challenge in place so the legitimate owner can still retry."""
+    monkeypatch.setattr(
+        kyc_routes,
+        "enrollment_service",
+        EnrollmentService(
+            store=InMemoryEnrollmentStore(),
+            signature_verifier=lambda *_a: False,
+            signals_fetcher=lambda _w: WalletSignals(wallet_age_round=1000, recent_tx_count=5),
+            current_round_fetcher=lambda: 2_000_000,
+        ),
+    )
+    _issue_consent()
+
+    attack = kyc_routes.kyc_enroll(
+        _request(method="POST", body=_enroll_body(), path="/api/v1/kyc/enroll")
+    )
+    assert attack.status_code != 200
+
+    # The real challenge must still be there -- swap in a verifier that
+    # accepts, and confirm the legitimate retry still succeeds.
+    monkeypatch.setattr(
+        kyc_routes,
+        "enrollment_service",
+        EnrollmentService(
+            store=InMemoryEnrollmentStore(),
+            signature_verifier=lambda *_a: True,
+            signals_fetcher=lambda _w: WalletSignals(wallet_age_round=1000, recent_tx_count=5),
+            current_round_fetcher=lambda: 2_000_000,
+        ),
+    )
+    retry = kyc_routes.kyc_enroll(
+        _request(method="POST", body=_enroll_body(), path="/api/v1/kyc/enroll")
+    )
+    assert retry["wallet_address"] == _WALLET
 
 
 @pytest.mark.usefixtures("fake_redis", "free_enroll")

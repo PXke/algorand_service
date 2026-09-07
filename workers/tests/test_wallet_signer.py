@@ -25,7 +25,9 @@ def wallet(monkeypatch: pytest.MonkeyPatch) -> str:
     return addr
 
 
-def _suggested_params(*, gen: str = signer._MAINNET_GENESIS_ID, gh: str = signer._MAINNET_GENESIS_HASH) -> SuggestedParams:
+def _suggested_params(
+    *, gen: str = signer._MAINNET_GENESIS_ID, gh: str = signer._MAINNET_GENESIS_HASH
+) -> SuggestedParams:
     return SuggestedParams(
         fee=0,
         first=1000,
@@ -43,9 +45,25 @@ def test_agent_wallet_address_none_when_unconfigured(monkeypatch: pytest.MonkeyP
     assert signer.agent_wallet_address() is None
 
 
+def test_invalid_mnemonic_never_logs_the_secret_phrase(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Regression test (2026-09-07 security review, finding 8): the installed algosdk's mnemonic.to_private_key raises ValueError(mnemonic) -- the exception MESSAGE IS THE ENTIRE 25-WORD SECRET PHRASE -- when any word isn't in the wordlist (e.g. a stray typo/paste artifact in AGENT_WALLET_MNEMONIC). The old code passed exc_info=True straight to the logger, which would have written the phrase into the logs on any such misconfiguration. Same bug/fix as kya's payout_service.py."""
+    bad_phrase = " ".join(["notarealword"] * 25)
+    monkeypatch.setattr("app.core.config.AGENT_WALLET_MNEMONIC", bad_phrase)
+    with caplog.at_level("WARNING"):
+        assert signer.agent_wallet_address() is None
+    # caplog.text renders exc_info too (not just the message), so this would
+    # also catch a regression that reintroduces exc_info=True.
+    assert "notarealword" not in caplog.text
+    assert bad_phrase not in caplog.text
+
+
 def test_handle_request_declines_unknown_method(wallet: str) -> None:
     """Any JSON-RPC method other than algo_signData/algo_signTxn is declined outright."""
-    assert wallet  # wallet must be configured to reach the method dispatch, not the "unconfigured" branch
+    assert (
+        wallet
+    )  # wallet must be configured to reach the method dispatch, not the "unconfigured" branch
     decision = signer.handle_request("algo_signAnythingElse", [{}])
     assert not decision.approved
     assert "not allowed" in decision.decline_reason
@@ -140,7 +158,9 @@ def test_sign_txn_approves_zero_algo_self_payment(wallet: str) -> None:
 
 def test_sign_txn_declines_wrong_network_genesis_id(wallet: str) -> None:
     """A transaction built for any network other than MainNet is declined -- this wallet holds real MainNet ALGO, so the network is asserted, not just left unchecked."""
-    txn = PaymentTxn(sender=wallet, sp=_suggested_params(gen="testnet-v1.0"), receiver=wallet, amt=0)
+    txn = PaymentTxn(
+        sender=wallet, sp=_suggested_params(gen="testnet-v1.0"), receiver=wallet, amt=0
+    )
     decision = signer.handle_request("algo_signTxn", [[_txn_entry(txn, [wallet])], {}])
     assert not decision.approved
     assert "MainNet" in decision.decline_reason
@@ -198,7 +218,9 @@ def test_sign_txn_declines_close_remainder_to(wallet: str) -> None:
 def test_sign_txn_declines_rekey_to(wallet: str) -> None:
     """A 0-ALGO self-payment that also rekeys the account to another key is declined -- rekeying is never allowed."""
     _other_sk, other_addr = account.generate_account()
-    txn = PaymentTxn(sender=wallet, sp=_suggested_params(), receiver=wallet, amt=0, rekey_to=other_addr)
+    txn = PaymentTxn(
+        sender=wallet, sp=_suggested_params(), receiver=wallet, amt=0, rekey_to=other_addr
+    )
     decision = signer.handle_request("algo_signTxn", [[_txn_entry(txn, [wallet])], {}])
     assert not decision.approved
     assert "rekey_to" in decision.decline_reason

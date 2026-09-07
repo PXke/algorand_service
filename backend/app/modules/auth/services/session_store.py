@@ -35,20 +35,35 @@ class SessionStore:
             self._redis.expire(key, 60)
         return count <= max_per_minute
 
-    def set_nonce_challenge(self, wallet_address: str, challenge_json: str) -> None:
-        """Store the pending nonce challenge JSON for a wallet, until it's popped or expires."""
+    def set_nonce_challenge(self, wallet_address: str, nonce: str, challenge_json: str) -> None:
+        """Store the pending nonce challenge JSON for a (wallet, nonce) pair, until it's popped or expires."""
         self._redis.setex(
-            f"auth:nonce:{wallet_address}",
+            self._nonce_key(wallet_address, nonce),
             settings.nonce_ttl_seconds,
             challenge_json,
         )
 
-    def pop_nonce_challenge(self, wallet_address: str) -> str | None:
-        """Atomically pop the pending nonce challenge JSON, or None if absent.
+    def pop_nonce_challenge(self, wallet_address: str, nonce: str) -> str | None:
+        """Atomically pop the pending nonce challenge JSON for a (wallet, nonce) pair, or None if absent.
 
-        GETDEL so two parallel verify requests cannot both read the same nonce.
+        Keyed by (wallet, nonce), not wallet alone (2026-09-07 security
+        review, finding 2 -- the same bug already found and fixed in
+        x402_social's session_service.py: a wallet-only key means ANY
+        verify request naming that wallet, garbage nonce/signature
+        included, would GETDEL whatever real challenge the wallet owner
+        had just minted -- an attacker who knows only the public admin
+        address (on-chain, not secret) could grief every login attempt by
+        hammering verify with no rate limit on this route. Keying by the
+        unguessable nonce too means a wrong-nonce attempt simply misses,
+        leaving the legitimate pending challenge untouched. GETDEL so two
+        parallel verify requests for the same (wallet, nonce) still cannot
+        both read it.
         """
-        return self._redis.getdel(f"auth:nonce:{wallet_address}")
+        return self._redis.getdel(self._nonce_key(wallet_address, nonce))
+
+    @staticmethod
+    def _nonce_key(wallet_address: str, nonce: str) -> str:
+        return f"auth:nonce:{wallet_address}:{nonce}"
 
     def set_session(self, token: str, wallet_address: str) -> SessionRecord:
         """Create and store a new session for a wallet, returning the session record."""

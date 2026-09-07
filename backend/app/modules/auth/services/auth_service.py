@@ -37,6 +37,7 @@ class AuthService:
         challenge = build_auth_challenge(nonce, wallet_address)
         self._store.set_nonce_challenge(
             wallet_address,
+            nonce,
             serialization.dumps(
                 {
                     "nonce": challenge.nonce,
@@ -58,7 +59,7 @@ class AuthService:
         arc0060: Arc0060Proof | None = None,
     ) -> tuple[str, SessionInfo, str] | None:
         """Verify a signed nonce and, on success, mint a new session token."""
-        raw = self._store.pop_nonce_challenge(wallet_address)
+        raw = self._store.pop_nonce_challenge(wallet_address, nonce)
         if not raw:
             return None
 

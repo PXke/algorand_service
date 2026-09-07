@@ -4,7 +4,12 @@ Generalizes the KYA single-use consent-challenge pattern
 (app/modules/kya/services/consent_challenge.py) -- same Redis single-use
 GETDEL consumption (two concurrent logins cannot both redeem one nonce),
 same fail-closed-on-a-Redis-error contract for issuing/consuming a
-challenge. Signature verification reuses app/modules/auth/utils/ exactly as
+challenge. (KYA's own consume step became peek-verify-then-discard on
+2026-09-07, not a GETDEL, since its route never gets the nonce back from
+the client to key on the way this module and /auth login do -- see that
+module's peek_consent_challenge docstring; this module's own GETDEL is
+still keyed by wallet+nonce so it did not need that change.) Signature
+verification reuses app/modules/auth/utils/ exactly as
 AuthService.verify_nonce_signature does (app/modules/auth/services/
 auth_service.py) -- same four proof_method verifiers, no new cryptography.
 

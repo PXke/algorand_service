@@ -15,8 +15,9 @@ from app.core.query_params import query_param
 from app.modules.kya.models.domain import KycError
 from app.modules.kya.services.consent_challenge import (
     ConsentStoreError,
-    consume_consent_challenge,
+    discard_consent_challenge,
     issue_consent_challenge,
+    peek_consent_challenge,
 )
 from app.modules.kya.services.consent_message import build_kyc_consent_message
 from app.modules.kya.services.enrollment_service import EnrollmentService
@@ -122,7 +123,7 @@ def kyc_enroll(request: Request) -> Response:
         )
 
     try:
-        challenge = consume_consent_challenge(payload.wallet_address)
+        challenge = peek_consent_challenge(payload.wallet_address)
     except ConsentStoreError:
         return json_error_response(
             503,
@@ -144,7 +145,20 @@ def kyc_enroll(request: Request) -> Response:
             consent_expires_at=challenge.expires_at,
         )
     except KycError as exc:
+        # Deliberately NOT discarding the challenge here (2026-09-07 security
+        # review, finding 2): a bad signature must leave the real pending
+        # challenge in place so the legitimate wallet owner can still retry
+        # with a correct one before it expires, rather than an attacker
+        # griefing them out of it for free with a garbage submission.
         return json_error_from_platform(exc)
+
+    try:
+        discard_consent_challenge(payload.wallet_address)
+    except ConsentStoreError:
+        # The enrollment itself already committed -- a failure to clean up
+        # the now-redundant challenge key just means it lingers until its
+        # own TTL expires, not a correctness problem.
+        logger.warning("kya enroll: failed to discard consent challenge after a successful enroll")
 
     return {
         "wallet_address": record.wallet_address,
