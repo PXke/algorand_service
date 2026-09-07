@@ -53,6 +53,33 @@ import { bytesToBase64 } from '../auth/pera'
 // and is not what gets passed around here).
 type AlgosdkModule = (typeof import('algosdk'))['default']
 
+/**
+ * PXke's own receive-only x402 payTo address (verified live 2026-09-07
+ * against prod's configured X402_PAY_TO_ADDRESS). The default recipient
+ * allowlist `payWithWallet` checks every 402 offer against BEFORE building
+ * or asking the wallet to sign anything (2026-09-07 security review,
+ * finding 3 -- the same fix applied to the Python reference client,
+ * x402-client/pxke_x402/client.py's DEFAULT_EXPECTED_PAY_TO): a malicious
+ * or compromised offer naming a different recipient must never even reach
+ * the wallet's signing prompt, since not every wallet UI surfaces a
+ * multi-leg atomic group's real recipient as clearly as a single simple
+ * payment would. Pass `expectedPayTo: null` to `payWithWallet` to disable
+ * (not recommended), or a different value if this address is ever rotated.
+ */
+export const DEFAULT_EXPECTED_PAY_TO = 'KSAVOYTVNB7A6NKCM4W2WBOOGFHWH2SEGR5T6OGB7THCAT5E36LDFEBTII'
+
+/**
+ * Conservative ceiling (atomic units, assuming a 6-decimal/USDC-class
+ * asset) on any single payment `payWithWallet` will build -- every route on
+ * this marketplace prices well under $0.25 as of this writing, so
+ * $1.00-equivalent comfortably covers normal calls while still bounding a
+ * single malicious/compromised offer's worst case. Mirrors the Python
+ * client's identical DEFAULT_MAX_PAYMENT_ATOMIC. Pass `maxPaymentAtomic:
+ * null` to disable (not recommended), or a higher value for a route you
+ * know legitimately costs more.
+ */
+export const DEFAULT_MAX_PAYMENT_ATOMIC = 1_000_000n
+
 export type X402PaymentRequirement = {
   scheme: string
   network: string
@@ -136,6 +163,10 @@ export type PayWithWalletParams = {
   signGroup: WalletSigner
   signal?: AbortSignal
   onStep?: (step: PayStep) => void
+  /** Recipient allowlist checked against the 402 offer before signing (see DEFAULT_EXPECTED_PAY_TO's own doc). Defaults to PXke's own payTo; pass `null` to disable (not recommended). */
+  expectedPayTo?: string | string[] | null
+  /** Ceiling (atomic units) checked against the offer's amount before signing (see DEFAULT_MAX_PAYMENT_ATOMIC's own doc). Defaults to DEFAULT_MAX_PAYMENT_ATOMIC; pass `null` to disable (not recommended). */
+  maxPaymentAtomic?: bigint | null
 }
 
 export type PayWithWalletResult = {
@@ -193,6 +224,52 @@ export function selectRequirement(accepts: X402PaymentRequirement[]): X402Paymen
   const first = accepts[0]
   if (!first) throw new X402PaymentError('The server offered no way to pay for this request.')
   return first
+}
+
+/**
+ * Refuse a 402 offer before anything is built or signed if it fails the
+ * recipient allowlist or amount cap (see DEFAULT_EXPECTED_PAY_TO/
+ * DEFAULT_MAX_PAYMENT_ATOMIC's own docs for why). `undefined` for either
+ * param means "use the default"; `null` means "explicitly disabled."
+ */
+export function validateOffer(
+  requirement: X402PaymentRequirement,
+  expectedPayTo: string | string[] | null | undefined,
+  maxPaymentAtomic: bigint | null | undefined,
+): void {
+  const allowed =
+    expectedPayTo === undefined
+      ? [DEFAULT_EXPECTED_PAY_TO]
+      : expectedPayTo === null
+        ? null
+        : Array.isArray(expectedPayTo)
+          ? expectedPayTo
+          : [expectedPayTo]
+  if (allowed && !allowed.includes(requirement.payTo)) {
+    throw new X402PaymentError(
+      `Refusing to pay: the offer's recipient (${requirement.payTo}) is not the expected one. ` +
+        'This could be a malicious or compromised response attempting to redirect your payment.',
+      { code: 'unexpected_pay_to' },
+    )
+  }
+
+  const cap = maxPaymentAtomic === undefined ? DEFAULT_MAX_PAYMENT_ATOMIC : maxPaymentAtomic
+  if (cap === null) return
+  let amount: bigint
+  try {
+    amount = BigInt(requirement.amount)
+  } catch (cause) {
+    throw new X402PaymentError(
+      `Refusing to pay: the offer's amount (${requirement.amount}) is not a valid integer.`,
+      { code: 'invalid_amount', cause },
+    )
+  }
+  if (amount > cap) {
+    throw new X402PaymentError(
+      `Refusing to pay: the offer's amount (${amount}) exceeds the expected cap (${cap}).`,
+      { code: 'amount_exceeds_cap' },
+    )
+  }
 }
 
 // ── balance / opt-in pre-flight ─────────────────────────────────────────
@@ -364,7 +441,7 @@ async function errorFromResponse(
  * `x402_directory/api/routes.py`'s own docstring).
  */
 export async function payWithWallet(params: PayWithWalletParams): Promise<PayWithWalletResult> {
-  const { url, body, payerAddress, algod, signGroup, signal, onStep } = params
+  const { url, body, payerAddress, algod, signGroup, signal, onStep, expectedPayTo, maxPaymentAtomic } = params
 
   onStep?.('challenging')
   const challengeRes = await fetch(url, {
@@ -384,6 +461,7 @@ export async function payWithWallet(params: PayWithWalletParams): Promise<PayWit
   }
   const paymentRequired = decodePaymentRequiredHeader(headerValue)
   const requirement = selectRequirement(paymentRequired.accepts)
+  validateOffer(requirement, expectedPayTo, maxPaymentAtomic)
 
   onStep?.('checking_balance')
   const assetId = Number(requirement.asset)

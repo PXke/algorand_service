@@ -61,3 +61,18 @@ class PxkePaymentError(PxkeError):
         self.body = body
         self.settlement_tx_id = settlement_tx_id
         self.settled = settled
+
+
+class PxkeOfferValidationError(PxkePaymentError):
+    """A 402 offer was refused before any payment was built or signed.
+
+    Raised when a 402 response's payment requirements fail the client's own
+    pre-sign checks (recipient allowlist, amount cap) -- see `PxkeClient`'s
+    `expected_pay_to`/`max_payment_atomic` constructor params. `settled` is
+    always False and `settlement_tx_id` always None here: this fires before
+    any transaction is even built, let alone signed or broadcast. Distinct
+    from the base `PxkePaymentError` so a caller can specifically alert on
+    "the marketplace tried to make me pay something suspicious" separately
+    from an ordinary payment/settlement failure.
+    """
+

@@ -3,10 +3,13 @@ import algosdk from 'algosdk'
 import {
   buildPaymentGroup,
   decodePaymentRequiredHeader,
+  DEFAULT_EXPECTED_PAY_TO,
+  DEFAULT_MAX_PAYMENT_ATOMIC,
   encodePaymentPayload,
   fetchAssetHolding,
   payWithWallet,
   selectRequirement,
+  validateOffer,
   X402PaymentError,
   type AlgodLike,
   type X402PaymentRequired,
@@ -83,6 +86,92 @@ describe('selectRequirement', () => {
 
   it('throws when accepts[] is empty', () => {
     expect(() => selectRequirement([])).toThrow(X402PaymentError)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// validateOffer (2026-09-07 security review, finding 3): before this, a
+// decoded 402 offer went straight to buildPaymentGroup/signGroup with no
+// check at all -- a malicious or compromised response could redirect a
+// payment to an attacker's address, or inflate the amount, and get built
+// and handed to the wallet for signing regardless.
+// ---------------------------------------------------------------------------
+describe('validateOffer', () => {
+  it('accepts an offer paying the default expected recipient', () => {
+    const requirement: X402PaymentRequirement = { ...REQUIREMENT, payTo: DEFAULT_EXPECTED_PAY_TO }
+    expect(() => validateOffer(requirement, undefined, undefined)).not.toThrow()
+  })
+
+  it('throws when the offer pays an unexpected recipient', () => {
+    const requirement: X402PaymentRequirement = { ...REQUIREMENT, payTo: 'A'.repeat(58) }
+    expect(() => validateOffer(requirement, DEFAULT_EXPECTED_PAY_TO, undefined)).toThrow(
+      X402PaymentError,
+    )
+    try {
+      validateOffer(requirement, DEFAULT_EXPECTED_PAY_TO, undefined)
+    } catch (e) {
+      expect((e as X402PaymentError).code).toBe('unexpected_pay_to')
+    }
+  })
+
+  it('accepts any recipient in a caller-supplied array', () => {
+    const requirement: X402PaymentRequirement = { ...REQUIREMENT, payTo: 'B'.repeat(58) }
+    expect(() => validateOffer(requirement, ['A'.repeat(58), 'B'.repeat(58)], undefined)).not.toThrow()
+  })
+
+  it('never checks the recipient when expectedPayTo is explicitly null', () => {
+    const requirement: X402PaymentRequirement = { ...REQUIREMENT, payTo: 'A'.repeat(58) }
+    expect(() => validateOffer(requirement, null, undefined)).not.toThrow()
+  })
+
+  it('accepts an amount at exactly the default cap', () => {
+    const requirement: X402PaymentRequirement = {
+      ...REQUIREMENT,
+      payTo: DEFAULT_EXPECTED_PAY_TO,
+      amount: DEFAULT_MAX_PAYMENT_ATOMIC.toString(),
+    }
+    expect(() => validateOffer(requirement, undefined, undefined)).not.toThrow()
+  })
+
+  it('throws when the amount exceeds the cap', () => {
+    const requirement: X402PaymentRequirement = {
+      ...REQUIREMENT,
+      payTo: DEFAULT_EXPECTED_PAY_TO,
+      amount: (DEFAULT_MAX_PAYMENT_ATOMIC + 1n).toString(),
+    }
+    expect(() => validateOffer(requirement, undefined, undefined)).toThrow(X402PaymentError)
+    try {
+      validateOffer(requirement, undefined, undefined)
+    } catch (e) {
+      expect((e as X402PaymentError).code).toBe('amount_exceeds_cap')
+    }
+  })
+
+  it('never checks the amount when maxPaymentAtomic is explicitly null', () => {
+    const requirement: X402PaymentRequirement = {
+      ...REQUIREMENT,
+      payTo: DEFAULT_EXPECTED_PAY_TO,
+      amount: '999999999999',
+    }
+    expect(() => validateOffer(requirement, undefined, null)).not.toThrow()
+  })
+
+  it('honors a caller-supplied higher cap', () => {
+    const requirement: X402PaymentRequirement = {
+      ...REQUIREMENT,
+      payTo: DEFAULT_EXPECTED_PAY_TO,
+      amount: '5000000',
+    }
+    expect(() => validateOffer(requirement, undefined, 5_000_000n)).not.toThrow()
+  })
+
+  it('throws on a non-numeric amount rather than building a payment from it', () => {
+    const requirement: X402PaymentRequirement = {
+      ...REQUIREMENT,
+      payTo: DEFAULT_EXPECTED_PAY_TO,
+      amount: 'not-a-number',
+    }
+    expect(() => validateOffer(requirement, undefined, undefined)).toThrow(X402PaymentError)
   })
 })
 
@@ -226,6 +315,7 @@ describe('payWithWallet', () => {
       algod,
       signGroup,
       onStep: (s) => steps.push(s),
+      expectedPayTo: PAY_TO,
     })
 
     expect(result.settlementTxId).toBe('TX123')
@@ -264,12 +354,39 @@ describe('payWithWallet', () => {
     ).rejects.toThrow(/PAYMENT-REQUIRED/)
   })
 
+  it('blocks before signing when the offer pays an unexpected recipient', async () => {
+    fetchMock.mockResolvedValueOnce(challengeResponse())
+    const algod = fakeAlgod([{ assetId: 31566704n, amount: 1_000_000n }])
+    const signGroup = vi.fn()
+    await expect(
+      payWithWallet({
+        url: 'https://x/list',
+        body: {},
+        payerAddress: PAYER,
+        algod,
+        signGroup,
+        // default expectedPayTo (PXke's own address) doesn't match PAY_TO
+        // (a random test address) -- must be refused before ever checking
+        // balance or asking the wallet to sign.
+      }),
+    ).rejects.toMatchObject({ code: 'unexpected_pay_to' })
+    expect(signGroup).not.toHaveBeenCalled()
+    expect(fetchMock).toHaveBeenCalledTimes(1) // never reached the resettle POST
+  })
+
   it('blocks before signing when the wallet is not opted into the offered asset', async () => {
     fetchMock.mockResolvedValueOnce(challengeResponse())
     const algod = fakeAlgod([]) // no holdings at all -> not opted in
     const signGroup = vi.fn()
     await expect(
-      payWithWallet({ url: 'https://x/list', body: {}, payerAddress: PAYER, algod, signGroup }),
+      payWithWallet({
+        url: 'https://x/list',
+        body: {},
+        payerAddress: PAYER,
+        algod,
+        signGroup,
+        expectedPayTo: PAY_TO,
+      }),
     ).rejects.toMatchObject({ code: 'not_opted_in' })
     expect(signGroup).not.toHaveBeenCalled()
     expect(fetchMock).toHaveBeenCalledTimes(1) // never reached the resettle POST
@@ -280,7 +397,14 @@ describe('payWithWallet', () => {
     const algod = fakeAlgod([{ assetId: 31566704n, amount: 1n }]) // far below the 20000 required
     const signGroup = vi.fn()
     await expect(
-      payWithWallet({ url: 'https://x/list', body: {}, payerAddress: PAYER, algod, signGroup }),
+      payWithWallet({
+        url: 'https://x/list',
+        body: {},
+        payerAddress: PAYER,
+        algod,
+        signGroup,
+        expectedPayTo: PAY_TO,
+      }),
     ).rejects.toMatchObject({ code: 'insufficient_balance' })
     expect(signGroup).not.toHaveBeenCalled()
   })
@@ -306,6 +430,7 @@ describe('payWithWallet', () => {
       payerAddress: PAYER,
       algod,
       signGroup,
+      expectedPayTo: PAY_TO,
     })
     expect(result.settlementTxId).toBe('TX9')
   })
@@ -317,7 +442,14 @@ describe('payWithWallet', () => {
       throw new Error('user rejected')
     })
     await expect(
-      payWithWallet({ url: 'https://x/list', body: {}, payerAddress: PAYER, algod, signGroup }),
+      payWithWallet({
+        url: 'https://x/list',
+        body: {},
+        payerAddress: PAYER,
+        algod,
+        signGroup,
+        expectedPayTo: PAY_TO,
+      }),
     ).rejects.toMatchObject({ code: 'wallet_signing_failed' })
     expect(fetchMock).toHaveBeenCalledTimes(1)
   })
@@ -344,6 +476,7 @@ describe('payWithWallet', () => {
       payerAddress: PAYER,
       algod,
       signGroup,
+      expectedPayTo: PAY_TO,
     }).catch((e: unknown) => e)
     expect(error).toBeInstanceOf(X402PaymentError)
     const err = error as X402PaymentError

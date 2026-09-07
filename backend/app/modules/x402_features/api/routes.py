@@ -177,6 +177,16 @@ def x402_features_vote(request: Request) -> Response:
 
     Paying again votes again. See FeatureService.vote for why this is not
     capped at one vote per wallet.
+
+    Does NOT accept modules/x402/promo.py's promo-code bypass (2026-09-07
+    security review, finding 10 -- the same pattern already found and fixed
+    for x402_directory and x402_board): `voter` is stored as the identity
+    behind this vote, but a promo redemption's wallet is only checked for
+    SYNTACTIC validity, never proof of control (see promo.py's own
+    docstring) -- a promo bypass would let anyone cast a vote "as" any
+    wallet via `?promo_wallet=`, sybil-inflating demand under real wallets'
+    names for free. Real payment only; see x402_features_claim/_complete for
+    the identical reasoning on claiming/completing.
     """
     request_id = query_param(request.path_params.get("request_id", ""))
     if not request_id or not feature_service.exists(request_id):
@@ -190,14 +200,11 @@ def x402_features_vote(request: Request) -> Response:
             "Try again later.",
         )
 
-    promo_code, promo_wallet = promo_request_params(request)
     result = require_paid_request(
         request,
         price=settings.x402_features_vote_price,
         resource=_VOTE_RESOURCE,
         resource_path="/api/v1/x402/features/{request_id}/vote",
-        promo_code=promo_code,
-        promo_wallet=promo_wallet,
         # The payer needs to know before committing that this is additive and
         # repeatable, not a toggle they might be paying to flip twice.
         description=(
@@ -220,26 +227,6 @@ def x402_features_vote(request: Request) -> Response:
     )
     if result.error:
         return result.error
-
-    if result.is_promo:
-        # A promo redemption settles nothing, so there is no payer/txid to
-        # refund on failure -- run_with_refund is for a real settlement only.
-        # Same let-it-propagate-to-500 behaviour this path has always had.
-        vote_total = feature_service.vote(
-            request_id=request_id, voter=promo_wallet, settlement_tx_id=""
-        )
-        return Response(
-            status_code=200,
-            headers={"Content-Type": "application/json", **result.settlement_headers},
-            description=serialization.dumps(
-                {
-                    "request_id": request_id,
-                    "vote_total": vote_total,
-                    "settlement_tx_id": "",
-                    "via": "promo",
-                }
-            ),
-        )
 
     outcome = run_with_refund(
         result,
@@ -310,6 +297,11 @@ def x402_features_claim(request: Request) -> Response:
     claim is one costly public statement, the same weight as one unit of
     demand. Multiple claims are allowed (see FeatureService.claim); the
     claimer is always the settled payer, never anything in a body.
+
+    Does NOT accept the promo-code bypass, same reason as x402_features_vote
+    (2026-09-07 security review, finding 10): `claimer` is a public identity
+    statement ("I'm building this"), and a promo bypass would let anyone
+    claim "as" any wallet via `?promo_wallet=` -- real payment only.
     """
     request_id = query_param(request.path_params.get("request_id", ""))
     if not request_id or not feature_service.exists(request_id):
@@ -323,14 +315,11 @@ def x402_features_claim(request: Request) -> Response:
             "Try again later.",
         )
 
-    promo_code, promo_wallet = promo_request_params(request)
     result = require_paid_request(
         request,
         price=settings.x402_features_vote_price,
         resource=_CLAIM_RESOURCE,
         resource_path="/api/v1/x402/features/{request_id}/claim",
-        promo_code=promo_code,
-        promo_wallet=promo_wallet,
         description=(
             "Declare that your wallet is building a PXke x402 feature request. The "
             "claim is public: the request's claim count and your wallet as latest "
@@ -355,29 +344,6 @@ def x402_features_claim(request: Request) -> Response:
     )
     if result.error:
         return result.error
-
-    if result.is_promo:
-        # A promo redemption settles nothing, so there is no payer/txid to
-        # refund on failure -- run_with_refund is for a real settlement only.
-        summary = feature_service.claim(
-            request_id=request_id, claimer=promo_wallet, settlement_tx_id=""
-        )
-        return Response(
-            status_code=200,
-            headers={"Content-Type": "application/json", **result.settlement_headers},
-            description=serialization.dumps(
-                {
-                    "request_id": request_id,
-                    **_claims_json(summary),
-                    # claim() always moves a request to 'claimed', reopening
-                    # it if it was previously 'completed' -- see
-                    # FeatureService.claim.
-                    "status": FEATURE_STATUS_CLAIMED,
-                    "settlement_tx_id": "",
-                    "via": "promo",
-                }
-            ),
-        )
 
     outcome = run_with_refund(
         result,
@@ -425,6 +391,16 @@ def x402_features_complete(request: Request) -> Response:
     itself -- not verified delivery (see FeatureService.mark_completed and
     docs/x402-execution-trust-evaluation.md). A later claim on this request
     reopens it back to 'claimed' -- see FeatureService.claim.
+
+    Does NOT accept the promo-code bypass, same reason as x402_features_vote/
+    _claim (2026-09-07 security review, finding 10) -- and more sharply here:
+    `claimer` is compared against this request's real past claimers to
+    authorize the completion. A promo-supplied `?promo_wallet=` is checked
+    for syntactic validity only, never proof of control, so it would have let
+    anyone falsely mark ANY publicly-visible past claimer's work "complete"
+    (or vice versa) by citing that claimer's own address, for free. Real
+    payment only -- result.payer there comes from actual settlement, not a
+    caller-declared string.
     """
     request_id = query_param(request.path_params.get("request_id", ""))
     if not request_id or not feature_service.exists(request_id):
@@ -438,14 +414,11 @@ def x402_features_complete(request: Request) -> Response:
             "Try again later.",
         )
 
-    promo_code, promo_wallet = promo_request_params(request)
     result = require_paid_request(
         request,
         price=settings.x402_features_complete_price,
         resource=_COMPLETE_RESOURCE,
         resource_path="/api/v1/x402/features/{request_id}/complete",
-        promo_code=promo_code,
-        promo_wallet=promo_wallet,
         # The payer needs to know up front this is gated on having claimed,
         # and that it is a statement, not a verification, before committing.
         description=(
@@ -471,28 +444,6 @@ def x402_features_complete(request: Request) -> Response:
     )
     if result.error:
         return result.error
-
-    if result.is_promo:
-        # A promo redemption settles nothing, so there is no payer/txid to
-        # refund on failure -- run_with_refund is for a real settlement only.
-        # A FeatureError here (payer never claimed) is a normal 4xx, not a
-        # 500 -- same as x402_features_submit's own validation error path.
-        try:
-            feature_service.mark_completed(request_id=request_id, claimer=promo_wallet)
-        except FeatureError as exc:
-            return json_error_from_platform(exc)
-        return Response(
-            status_code=200,
-            headers={"Content-Type": "application/json", **result.settlement_headers},
-            description=serialization.dumps(
-                {
-                    "request_id": request_id,
-                    "status": FEATURE_STATUS_COMPLETED,
-                    "settlement_tx_id": "",
-                    "via": "promo",
-                }
-            ),
-        )
 
     outcome = run_with_refund(
         result,

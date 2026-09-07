@@ -11,6 +11,7 @@ proven.
 from __future__ import annotations
 
 import logging
+from typing import Any
 
 from app.core import serialization
 from app.core.config import settings
@@ -131,12 +132,26 @@ def x402_scan_url(request: Request) -> Response:
     sandbox_runner.py for the Docker-vs-Firecracker isolation decision.
 
     Auto-refund (migration 102, owner requirement 2026-09-02): a
-    ConcurrencyLimitError/SandboxError used to be charged but unfulfilled
-    with no way back for the payer -- this route now refunds either of
-    those (or anything else the sandbox raises) via run_with_refund, for a
-    REAL payment. A circuit-breaker check runs before the payment gate, so
-    a resource with too many recent refund-triggering failures is refused
-    before anyone is charged again.
+    SandboxError used to be charged but unfulfilled with no way back for
+    the payer -- this route now refunds it (or anything else the sandbox
+    raises, other than FetchError) via run_with_refund, for a REAL payment.
+    A circuit-breaker check runs before the payment gate, so a resource
+    with too many recent refund-triggering failures is refused before
+    anyone is charged again.
+
+    The concurrency slot is acquired BEFORE the payment gate, not inside
+    the product write (2026-09-07 security review, finding 9 -- a real
+    bug, found live): acquiring it after require_paid_request meant N
+    concurrent over-cap paid requests each settled, then each got refunded
+    for a ConcurrencyLimitError, and each refund counted against the
+    circuit breaker -- five ordinary concurrent requests past
+    MAX_CONCURRENT_SCANS could trip the no-TTL latch and take the whole
+    endpoint offline for every payer until an admin reset it, for free
+    (no payment ever needs to actually succeed to trigger this). Checking
+    capacity first means a caller who can't get a slot is turned away
+    with a plain 503 and is never charged at all -- so ConcurrencyLimitError
+    can no longer reach run_with_refund or the circuit breaker; only a
+    genuine in-sandbox SandboxError can.
 
     FetchError is deliberately NOT refunded (found-in-audit gap,
     2026-09-02): the caller supplies `url` themselves, so pointing it at a
@@ -206,13 +221,38 @@ def x402_scan_url(request: Request) -> Response:
     if not (url.startswith("http://") or url.startswith("https://")):
         return json_error_response(400, "invalid_request", "url must be http:// or https://")
 
+    # A preview never touches the sandbox, so it never needs a slot -- only
+    # promo and real-payment scans do, and both hold one across the whole
+    # paid section below (see the module docstring on this route).
+    is_preview = preview_requested(request)
+    if not is_preview:
+        try:
+            acquire_scan_slot()
+        except ConcurrencyLimitError:
+            return json_error_response(
+                503,
+                "scan_unavailable",
+                "Scan capacity is temporarily full — please retry shortly",
+            )
+
+    try:
+        return _gate_and_scan(request, url, offer=offer, is_preview=is_preview)
+    finally:
+        if not is_preview:
+            release_scan_slot()
+
+
+def _gate_and_scan(
+    request: Request, url: str, *, offer: dict[str, Any], is_preview: bool
+) -> Response:
+    """The payment gate and dispatch to preview/promo/real-payment scan -- split out of x402_scan_url purely to stay under the complexity budget, called with the concurrency slot already held (or not needed, for a preview)."""
     promo_code, promo_wallet = promo_request_params(request)
     result = require_paid_request(
         request,
         **offer,
         promo_code=promo_code,
         promo_wallet=promo_wallet,
-        preview=preview_requested(request),
+        preview=is_preview,
     )
     if result.error:
         return result.error
@@ -224,13 +264,17 @@ def x402_scan_url(request: Request) -> Response:
         return _handle_promo_scan(url, result)
 
     outcome = run_with_refund(
-        result, resource=_RESOURCE, product_write=lambda: _scan_product_write(url), request=request
+        result,
+        resource=_RESOURCE,
+        product_write=lambda: _scan_product_write(url),
+        request=request,
     )
     if isinstance(outcome, Response):
-        # run_with_refund's own failure-path response -- refunded (Concurrency
-        # LimitError/SandboxError/anything else _do_scan can raise) or the
-        # payment-kept direct 422 (FetchError, converted to a PlatformError by
-        # _scan_product_write). Return it directly, do NOT call mark_fulfilled.
+        # run_with_refund's own failure-path response -- refunded
+        # (SandboxError/anything else scan_url can raise) or the
+        # payment-kept direct 422 (FetchError, converted to a
+        # PlatformError by _scan_product_write). Return it directly,
+        # do NOT call mark_fulfilled.
         return outcome
 
     mark_fulfilled(result.payment_txid, resource=_RESOURCE)
@@ -250,18 +294,14 @@ def _handle_promo_scan(url: str, result: PaymentResult) -> Response:
     (422/503) rather than routing through run_with_refund, which would
     incorrectly claim a refund for a payment that never happened. Extracted
     from x402_scan_url purely to stay under the complexity budget.
+
+    The concurrency slot is already held by the caller (x402_scan_url
+    acquires it before the payment gate, released in that function's own
+    `finally`) -- scan_url itself never touches concurrency, so there is no
+    ConcurrencyLimitError to catch here any more.
     """
     try:
-        report = _do_scan(url)
-    except ConcurrencyLimitError as exc:
-        logger.warning(
-            "x402 scan: concurrency limit rejected a promo request (url=%r): %s", url, exc
-        )
-        response = json_error_response(
-            503, "scan_unavailable", "Scan capacity is temporarily full — please retry shortly"
-        )
-        response.headers.update(result.settlement_headers)
-        return response
+        report = scan_url(url)
     except FetchError as exc:
         logger.warning("x402 scan: fetch failed for a promo request (url=%r): %s", url, exc)
         response = json_error_response(422, "fetch_failed", str(exc))
@@ -281,35 +321,19 @@ def _handle_promo_scan(url: str, result: PaymentResult) -> Response:
     )
 
 
-def _do_scan(url: str) -> dict[str, object]:
-    """The product write: acquire a scan slot, run the sandboxed scan, release the slot.
-
-    acquire_scan_slot() raising ConcurrencyLimitError means no slot was ever
-    held, so there is nothing to release. Once a slot is acquired, it is
-    always released via `finally`, whether scan_url succeeds or raises
-    FetchError/SandboxError -- same nesting the route used before the
-    refund retrofit, just extracted so both the promo and real-payment
-    branches share one implementation.
-    """
-    acquire_scan_slot()
-    try:
-        return scan_url(url)
-    finally:
-        release_scan_slot()
-
-
 def _scan_product_write(url: str) -> dict[str, object]:
-    """The real-payment product write run_with_refund protects: `_do_scan`, with FetchError re-raised as a PlatformError so it is never refunded.
+    """The real-payment product write run_with_refund protects: scan_url, with FetchError re-raised as a PlatformError so it is never refunded.
 
     See x402_scan_url's own docstring ("FetchError is deliberately NOT
     refunded") for why: `url` is caller-supplied, so a fetch failure is
     100% caller-controlled and must get the same payment-kept, no-refund
     treatment every other module's own PlatformError gets from
-    run_with_refund -- ConcurrencyLimitError/SandboxError are OUR faults
-    and fall through unchanged to the refund path.
+    run_with_refund -- SandboxError is OUR fault and falls through
+    unchanged to the refund path. The concurrency slot is already held by
+    the caller (see _handle_promo_scan's docstring).
     """
     try:
-        return _do_scan(url)
+        return scan_url(url)
     except FetchError as exc:
         raise PlatformError("fetch_failed", str(exc), http_status=422) from exc
 

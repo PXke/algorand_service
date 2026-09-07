@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING
 from app.core import config
 
 if TYPE_CHECKING:
-    from playwright.sync_api import Locator, Page
+    from playwright.sync_api import Locator, Page, Route
 
 logger = logging.getLogger(__name__)
 
@@ -283,7 +283,9 @@ def _click_robust(locator: Locator, *, timeout: int = 10_000) -> None:
         locator.click(timeout=timeout)
         return
     except Exception:
-        logger.debug("normal click failed/timed out; trying to dismiss intercepting overlays", exc_info=True)
+        logger.debug(
+            "normal click failed/timed out; trying to dismiss intercepting overlays", exc_info=True
+        )
 
     page = locator.page
     try:
@@ -298,7 +300,10 @@ def _click_robust(locator: Locator, *, timeout: int = 10_000) -> None:
         locator.click(timeout=timeout)
         return
     except Exception:
-        logger.debug("click still blocked after dismissing overlays; falling back to force=True", exc_info=True)
+        logger.debug(
+            "click still blocked after dismissing overlays; falling back to force=True",
+            exc_info=True,
+        )
 
     try:
         locator.click(force=True, timeout=timeout)
@@ -484,6 +489,44 @@ def save_screenshot(png_bytes: bytes) -> str | None:
         return None
 
 
+def _deny_private_requests(route: Route) -> None:
+    """Playwright route handler: aborts any request (navigation or subresource) whose target is not a public host.
+
+    net_guard.assert_public_url's own pre-goto() check (see
+    _goto_and_settle) only covers the STARTING navigation URL -- Chromium
+    itself then follows any server-side redirect and loads every
+    subresource (scripts, images, XHR/fetch, iframes) with no further
+    validation at all (2026-09-07 security review, finding 5, a real gap: a
+    crawled page could redirect the headless browser into gunicorn,
+    Typesense, or the cloud metadata endpoint, and whatever that internal
+    service returned would be extracted and stored as scraped source
+    material). Registered context-wide (`context.route("**/*", ...)`) on
+    every context this module creates, so it covers every request
+    Playwright makes for the life of that context -- each redirect hop is
+    its own intercepted request, so a redirect can no longer bypass this
+    the way a route-free `goto()` did.
+
+    Reuses net_guard.assert_public_url itself rather than a second copy of
+    the public-IP logic (CLAUDE.md section 3).
+    """
+    from app.core.net_guard import UnsafeUrlError, assert_public_url
+
+    request_url = route.request.url
+    scheme = request_url.split(":", 1)[0].lower()
+    if scheme not in ("http", "https"):
+        # data:/blob:/about:/chrome-error: etc. never leave the browser
+        # process -- nothing here for assert_public_url to check.
+        route.continue_()
+        return
+    try:
+        assert_public_url(request_url)
+    except UnsafeUrlError:
+        logger.warning("playwright: blocked a request to a non-public target: %s", request_url)
+        route.abort()
+        return
+    route.continue_()
+
+
 class PlaywrightSession:
     """One Playwright browser+context, held open for the duration of a single compose and reused across every fetch/click/type call in it.
 
@@ -521,6 +564,7 @@ class PlaywrightSession:
             context_kwargs["storage_state"] = self._storage_state_path
             logger.info("playwright session using storage_state=%s", self._storage_state_path)
         self._context = self._browser.new_context(**context_kwargs)
+        self._context.route("**/*", _deny_private_requests)
         # A long-lived page for play_interactive (2026-08-11), distinct from
         # every other method above: fetch/click/type each open a FRESH page
         # and close it immediately, so state never carries between separate
@@ -556,7 +600,9 @@ class PlaywrightSession:
         except Exception:
             logger.debug("networkidle wait timed out for %s; continuing", url)
 
-    def _read_page(self, page: Page, *, engine: str, skip_login_wall_check: bool = False) -> BrowserPageResult:
+    def _read_page(
+        self, page: Page, *, engine: str, skip_login_wall_check: bool = False
+    ) -> BrowserPageResult:
         _expand_collapsed_content(page)
         title = page.title() or ""
         # _extract_visible_text (main/article landmark preference + dedup),
@@ -793,6 +839,7 @@ class PlaywrightSession:
         if state_path and Path(state_path).is_file():
             context_kwargs["storage_state"] = state_path
         context = self._browser.new_context(**context_kwargs)
+        context.route("**/*", _deny_private_requests)
         try:
             page = context.new_page()
             self._goto_and_settle(page, url, timeout)
@@ -812,7 +859,9 @@ class PlaywrightSession:
         self._interactive_page = page
         return self._read_page(page, engine="playwright-interactive")
 
-    def interactive_click(self, click_text: str, *, wait_after_click_ms: int = 1500) -> BrowserPageResult:
+    def interactive_click(
+        self, click_text: str, *, wait_after_click_ms: int = 1500
+    ) -> BrowserPageResult:
         """Click visible text (or, for icon-only controls, a title/aria-label match) on the currently-open interactive page (see interactive_open) and read the resulting state -- the same page, not a fresh one."""
         page = self._require_interactive_page()
         locator = _locate_clickable(page, click_text)

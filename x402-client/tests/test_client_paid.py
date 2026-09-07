@@ -15,12 +15,7 @@ from pxke_x402.client import BASE_URL
 from pxke_x402.exceptions import PxkeHTTPError, PxkePaymentError
 
 from .conftest import FakePaymentHTTPClient, FakeResponse, FakeSession
-
-
-def _offer_headers() -> dict[str, str]:
-    # The real value is a base64 blob; the client never decodes it itself
-    # (that's the fake payment client's job), so any placeholder is fine.
-    return {"payment-required": "ZmFrZS1vZmZlcg=="}
+from .conftest import valid_offer_headers as _offer_headers
 
 
 def test_ping_pays_and_returns_the_receipt() -> None:

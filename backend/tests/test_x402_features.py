@@ -1269,25 +1269,64 @@ def test_completing_by_a_wallet_that_never_claimed_is_rejected_and_kept_not_refu
     assert wired.get_statuses([request_id]) == {}
 
 
-def test_promo_completion_by_a_non_claimer_is_a_clean_4xx_not_a_500(
-    wired: InMemoryFeatureStore, monkeypatch: pytest.MonkeyPatch
+# --------------------------------------------------------------------------- #
+# Promo-bypass identity spoofing (2026-09-07 security review, finding 10 --
+# same pattern already found and fixed for x402_directory/x402_board, and for
+# x402_grading's grade-submit): vote/claim/complete all feed `payer` in as a
+# public identity statement (who voted, who's building it, who's declaring it
+# done), not merely payment attribution. modules/x402/promo.py's own
+# docstring says a promo redemption's wallet is checked for SYNTACTIC
+# validity only ("a successful redemption is not proof the caller controls
+# that wallet"), so a promo bypass would have let anyone vote/claim/complete
+# "as" any real wallet via `?promo_wallet=` -- worst on complete, where an
+# attacker could cite a real past claimer's own public address to falsely
+# mark their work done. Closed by never reading promo params on any of these
+# three routes. This test locks in the opposite invariant: promo params in
+# the query string are ignored, not honored.
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize(
+    ("route_name", "path", "extra_kwargs"),
+    [
+        ("x402_features_vote", "/api/v1/x402/features/{request_id}/vote", {}),
+        ("x402_features_claim", "/api/v1/x402/features/{request_id}/claim", {}),
+        ("x402_features_complete", "/api/v1/x402/features/{request_id}/complete", {}),
+    ],
+)
+def test_vote_claim_and_complete_never_forward_promo_params(
+    wired: InMemoryFeatureStore,
+    monkeypatch: pytest.MonkeyPatch,
+    route_name: str,
+    path: str,
+    extra_kwargs: dict[str, object],
 ) -> None:
-    """The promo bypass path does not skip the claimer check, and a rejection there is a 4xx."""
+    """None of the three paid write routes may pass ?promo=/?promo_wallet= into require_paid_request, even when present in the query string."""
     request_id = _file_request(FeatureService(wired))
-    monkeypatch.setattr(
-        feature_routes,
-        "require_paid_request",
-        lambda *_a, **_kw: SimpleNamespace(
-            error=None, is_promo=True, settlement_headers={}, payer=""
-        ),
+    if route_name == "x402_features_complete":
+        # complete requires a real prior claim to succeed past the gate --
+        # not the point of this test, but keeps the happy path reachable.
+        FeatureService(wired).claim(request_id=request_id, claimer=_PAYER, settlement_tx_id="TXC")
+
+    captured: dict = {}
+
+    def _spy_require_paid_request(*_args: object, **kwargs: object) -> object:
+        captured.update(kwargs)
+        return _settled_result()
+
+    monkeypatch.setattr(feature_routes, "require_paid_request", _spy_require_paid_request)
+    monkeypatch.setattr(feature_routes, "mark_fulfilled", lambda *_a, **_kw: None)
+
+    route = getattr(feature_routes, route_name)
+    route(
+        _request(
+            path_params={"request_id": request_id},
+            query={"promo": "LAUNCH1000-TEST", "promo_wallet": "P" * 58},
+            path=path,
+            **extra_kwargs,
+        )
     )
 
-    response = feature_routes.x402_features_complete(
-        _request(path_params={"request_id": request_id}, query={"promo": "CODE"})
-    )
-
-    assert response.status_code == 403
-    assert "request_not_claimed_by_payer" in response.description
+    assert "promo_code" not in captured
+    assert "promo_wallet" not in captured
 
 
 def test_completing_a_probe_payers_own_earlier_claim_is_not_special_cased(

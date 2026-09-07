@@ -72,6 +72,31 @@ def encode_payment_required_header(offer: dict[str, Any]) -> str:
     return base64.b64encode(json.dumps(offer).encode()).decode()
 
 
+def valid_offer_headers(
+    *, pay_to: str = "KSAVOYTVNB7A6NKCM4W2WBOOGFHWH2SEGR5T6OGB7THCAT5E36LDFEBTII", amount: str = "10000"
+) -> dict[str, str]:
+    """A real, decodable PAYMENT-REQUIRED header -- unlike a placeholder blob, this passes through PxkeClient._parse_payment_required (the real x402 package's decode_payment_required_header + PaymentRequired schema), so it satisfies the client's own pre-sign offer validation (recipient allowlist + amount cap, see client.py's DEFAULT_EXPECTED_PAY_TO/DEFAULT_MAX_PAYMENT_ATOMIC) by default. Pass a different pay_to/amount to specifically exercise a rejection.
+
+    `pay_to` defaults to the real DEFAULT_EXPECTED_PAY_TO value inline (not
+    imported from client.py) so a test that imports this fixture is not
+    accidentally shielded from a regression in that constant itself.
+    """
+    offer = {
+        "x402Version": 2,
+        "accepts": [
+            {
+                "scheme": "exact",
+                "network": "algorand:wGHE2Pwdvd7S12BL5FaOP20EGYesN73ktiC1qzkkit8=",
+                "asset": "31566704",
+                "amount": amount,
+                "pay_to": pay_to,
+                "max_timeout_seconds": 60,
+            }
+        ],
+    }
+    return {"payment-required": encode_payment_required_header(offer)}
+
+
 class FakePaymentHTTPClient:
     """Fakes `x402.http.x402_http_client.x402HTTPClientSync`'s one method the client calls.
 

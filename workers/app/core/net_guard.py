@@ -19,6 +19,8 @@ import socket
 from typing import TYPE_CHECKING
 from urllib.parse import urlparse
 
+from app.core.config import NET_GUARD_MAX_RESPONSE_BYTES
+
 if TYPE_CHECKING:
     import httpx
 
@@ -27,6 +29,17 @@ _ALLOWED_SCHEMES = {"http", "https"}
 
 class UnsafeUrlError(ValueError):
     """Raised when a URL is not a safe public target."""
+
+
+class ResponseTooLargeError(Exception):
+    """Raised when a fetched response exceeds the body-size cap.
+
+    Deliberately NOT a UnsafeUrlError subclass: the URL itself may be a
+    perfectly legitimate public host (see scrape_cooldown.py's own
+    isinstance(_, UnsafeUrlError) check, which decides whether a URL is
+    permanently unsafe to retry -- a too-large response is a different,
+    response-shaped failure, not a host-shaped one).
+    """
 
 
 def _ip_is_public(ip: str) -> bool:
@@ -81,6 +94,33 @@ def assert_public_url(url: str) -> str:
     return url
 
 
+def _read_bounded(response: httpx.Response, *, max_bytes: int) -> httpx.Response:
+    """Read `response`'s body via streaming, aborting past `max_bytes`, and return an equivalent fully-buffered Response.
+
+    Never trusts a declared Content-Length (spoofable, or simply absent on a
+    chunked response) -- the cap is enforced against bytes actually read.
+    Rebuilds a plain httpx.Response (status_code/headers/content, with
+    `request` still bound so `.url` keeps working) rather than returning the
+    streaming response itself, so every existing caller's `.text`/`.json()`/
+    `.content`/`.url` access keeps working unchanged.
+    """
+    import httpx
+
+    buf = bytearray()
+    for chunk in response.iter_bytes():
+        buf.extend(chunk)
+        if len(buf) > max_bytes:
+            raise ResponseTooLargeError(
+                f"response body exceeds {max_bytes} byte cap (url={response.url})"
+            )
+    return httpx.Response(
+        response.status_code,
+        headers=response.headers,
+        content=bytes(buf),
+        request=response.request,
+    )
+
+
 def guarded_request(
     method: str,
     url: str,
@@ -89,12 +129,21 @@ def guarded_request(
     params: dict | None = None,
     timeout: float = 12.0,
     max_redirects: int = 5,
+    max_bytes: int | None = None,
 ) -> httpx.Response:
-    """Httpx request that re-validates the target on every redirect hop.
+    """Httpx request that re-validates the target on every redirect hop and caps the response body.
 
     follow_redirects must stay off here: otherwise a public URL could 302 to an
     internal one and the client would follow it before any guard runs. We follow
     manually and call assert_public_url before each request.
+
+    The final (non-redirect) response's body is streamed and capped at
+    `max_bytes` (default settings.NET_GUARD_MAX_RESPONSE_BYTES) rather than
+    buffered whole -- see that setting's own docstring (2026-09-07 security
+    review, finding 6): a hostile or misconfigured target could otherwise be
+    read into memory in full, one OOM'd worker per request. A redirect hop's
+    body is never read at all, capped or not -- only its status/Location
+    header matter.
 
     Uses the process-cached shared client (app.core.http_client.get_http_client)
     rather than opening a fresh httpx.Client per call: this is the fetch helper
@@ -108,18 +157,19 @@ def guarded_request(
 
     from app.core.http_client import get_http_client
 
+    cap = NET_GUARD_MAX_RESPONSE_BYTES if max_bytes is None else max_bytes
     verb = method.upper()
     current = url
     client = get_http_client(timeout=timeout, follow_redirects=False)
     for _ in range(max_redirects + 1):
         assert_public_url(current)
-        response = client.request(verb, current, headers=headers, params=params)
-        location = response.headers.get("location")
-        if response.is_redirect and location:
-            current = str(httpx.URL(response.url).join(location))
-            params = None  # query travels in the redirect target after hop 1
-            continue
-        return response
+        with client.stream(verb, current, headers=headers, params=params) as streamed:
+            location = streamed.headers.get("location")
+            if streamed.is_redirect and location:
+                current = str(httpx.URL(streamed.url).join(location))
+                params = None  # query travels in the redirect target after hop 1
+                continue
+            return _read_bounded(streamed, max_bytes=cap)
     raise UnsafeUrlError("too many redirects")
 
 
@@ -130,8 +180,9 @@ def guarded_get(
     params: dict | None = None,
     timeout: float = 12.0,
     max_redirects: int = 5,
+    max_bytes: int | None = None,
 ) -> httpx.Response:
-    """SSRF-guarded GET; see guarded_request for hop re-validation."""
+    """SSRF-guarded, body-capped GET; see guarded_request for hop re-validation and the size cap."""
     return guarded_request(
         "GET",
         url,
@@ -139,4 +190,5 @@ def guarded_get(
         params=params,
         timeout=timeout,
         max_redirects=max_redirects,
+        max_bytes=max_bytes,
     )

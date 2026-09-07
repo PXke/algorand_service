@@ -5,7 +5,7 @@ from __future__ import annotations
 import httpx
 import pytest
 
-from app.core.net_guard import UnsafeUrlError, guarded_get, guarded_request
+from app.core.net_guard import ResponseTooLargeError, UnsafeUrlError, guarded_get, guarded_request
 
 
 def _patch_shared_client(monkeypatch: pytest.MonkeyPatch, transport: httpx.MockTransport) -> list:
@@ -92,9 +92,7 @@ def test_guarded_request_head_rejects_a_redirect_to_a_private_host(
     def handler(request: httpx.Request) -> httpx.Response:
         methods.append(request.method)
         if str(request.url) == "https://example.com/start":
-            return httpx.Response(
-                302, headers={"location": "http://127.0.0.1/"}
-            )
+            return httpx.Response(302, headers={"location": "http://127.0.0.1/"})
         raise AssertionError("must not actually request the internal redirect target")
 
     _patch_shared_client(monkeypatch, httpx.MockTransport(handler))
@@ -102,3 +100,78 @@ def test_guarded_request_head_rejects_a_redirect_to_a_private_host(
     with pytest.raises(UnsafeUrlError):
         guarded_request("HEAD", "https://example.com/start")
     assert methods == ["HEAD"]
+
+
+# --------------------------------------------------------------------------- #
+# Response-body cap (2026-09-07 security review, finding 6): guarded_get/
+# guarded_request back ~110 call sites across the crawler, scrapers, and
+# writer/investigative tools, including free unauthenticated fetches of a
+# caller-supplied URL -- with no cap, a hostile or misconfigured target could
+# be buffered into memory in full, one OOM'd worker per request. Enforced
+# against bytes actually streamed, never a declared (spoofable/absent)
+# Content-Length.
+# --------------------------------------------------------------------------- #
+def test_guarded_get_raises_when_the_body_exceeds_the_cap(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A response whose real body exceeds max_bytes is aborted mid-stream, not buffered in full."""
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=b"x" * 5000)
+
+    _patch_shared_client(monkeypatch, httpx.MockTransport(handler))
+
+    with pytest.raises(ResponseTooLargeError):
+        guarded_get("https://example.com/huge", max_bytes=1000)
+
+
+def test_guarded_get_returns_a_usable_response_under_the_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A response under the cap is returned as a normal, fully-usable Response -- .text/.json()/.url all still work."""
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"ok": True})
+
+    _patch_shared_client(monkeypatch, httpx.MockTransport(handler))
+
+    resp = guarded_get("https://example.com/small", max_bytes=1000)
+
+    assert resp.status_code == 200
+    assert resp.json() == {"ok": True}
+    assert str(resp.url) == "https://example.com/small"
+
+
+def test_guarded_get_defaults_the_cap_from_settings(monkeypatch: pytest.MonkeyPatch) -> None:
+    """With no explicit max_bytes, the module-level NET_GUARD_MAX_RESPONSE_BYTES setting is what gets enforced."""
+    import app.core.net_guard as net_guard_module
+
+    monkeypatch.setattr(net_guard_module, "NET_GUARD_MAX_RESPONSE_BYTES", 100)
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=b"x" * 500)
+
+    _patch_shared_client(monkeypatch, httpx.MockTransport(handler))
+
+    with pytest.raises(ResponseTooLargeError):
+        guarded_get("https://example.com/big")
+
+
+def test_a_redirect_hops_body_is_never_read_or_capped(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The redirect leg's own (potentially huge) body must never be read at all -- only its status/Location header matter -- so it cannot trip the cap regardless of size."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if str(request.url) == "https://example.com/start":
+            # A redirect response carrying a body far past the cap -- must
+            # never be read, so this alone must not raise.
+            return httpx.Response(
+                302,
+                headers={"location": "https://example.com/final"},
+                content=b"x" * 5000,
+            )
+        return httpx.Response(200, json={"ok": True})
+
+    _patch_shared_client(monkeypatch, httpx.MockTransport(handler))
+
+    resp = guarded_get("https://example.com/start", max_bytes=100)
+
+    assert resp.status_code == 200
+    assert resp.json() == {"ok": True}

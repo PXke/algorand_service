@@ -428,6 +428,19 @@ def x402_grade_submit(request: Request) -> Response:
     If the actual STORE write fails after the gate (see _write_grade), that
     IS auto-refunded -- money-back protection covers our own failures, not
     the grader's own bad-faith input.
+
+    Does NOT accept modules/x402/promo.py's promo-code bypass (2026-09-07
+    security review, finding 10 -- the same pattern already found and fixed
+    for x402_directory and x402_board): `payer` is stored as the grade's
+    attributed identity, and a promo redemption's wallet is checked for
+    SYNTACTIC validity only, never proof of control (see promo.py's own
+    docstring). Worse than a plain identity spoof here: the tx_id
+    sender-mismatch check above only compares `payer` against the usage
+    proof's real on-chain sender string -- a promo caller can read that
+    sender address straight off the public chain and pass it as
+    `?promo_wallet=`, sailing through the mismatch check while never having
+    controlled that wallet at all. Real payment only; result.payer there is
+    the cryptographically settled payer, not a caller-declared string.
     """
     if circuit_breaker.is_tripped("x402-grading-submit"):
         return json_error_response(
@@ -494,17 +507,13 @@ def x402_grade_submit(request: Request) -> Response:
         return prepared
     payload, normalized_url, hashed, tx_id, proof_verified, proof_sender = prepared
 
-    promo_code, promo_wallet = promo_request_params(request)
-    result = require_paid_request(
-        request, **offer, promo_code=promo_code, promo_wallet=promo_wallet
-    )
+    result = require_paid_request(request, **offer)
     if result.error:
         return result.error
 
-    # A promo redemption settles nothing, so result.payer is empty -- fall
-    # back to the caller's own claimed wallet instead (already validated in
-    # promo.attempt_promo_redemption, so this is never empty on a promo hit).
-    payer = result.payer or promo_wallet
+    # No promo path reaches here (see this function's own docstring), so
+    # payer is always the real, cryptographically settled payer.
+    payer = result.payer or ""
     if not payer.strip():
         return _unattributable_payer_response(result.payment_txid, result.settlement_headers)
 
@@ -542,18 +551,11 @@ def x402_grade_submit(request: Request) -> Response:
     if isinstance(outcome, Response):
         return outcome
 
-    if not result.is_promo:
-        mark_fulfilled(result.payment_txid, resource="x402-grading-submit")
+    mark_fulfilled(result.payment_txid, resource="x402-grading-submit")
     return Response(
         status_code=200,
         headers={"Content-Type": "application/json", **result.settlement_headers},
-        description=serialization.dumps(
-            {
-                **outcome,
-                "settlement_tx_id": result.payment_txid or "",
-                **({"via": "promo"} if result.is_promo else {}),
-            }
-        ),
+        description=serialization.dumps({**outcome, "settlement_tx_id": result.payment_txid or ""}),
     )
 
 

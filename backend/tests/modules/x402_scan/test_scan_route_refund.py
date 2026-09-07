@@ -85,17 +85,10 @@ def test_circuit_breaker_tripped_refuses_before_the_payment_gate(
     assert "temporarily_disabled" in response.description
 
 
-@pytest.mark.parametrize(
-    ("exc_cls", "exc_args"),
-    [
-        (ConcurrencyLimitError, ()),
-        (SandboxError, ("sandbox crashed",)),
-    ],
-)
 def test_real_payment_failure_triggers_a_refund_not_a_bare_error(
-    monkeypatch: pytest.MonkeyPatch, exc_cls: type[Exception], exc_args: tuple[object, ...]
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Any of the three known sandbox failures, for a REAL payment, goes through run_with_refund instead of a plain error response."""
+    """A SandboxError, for a REAL payment, goes through run_with_refund instead of a plain error response."""
     monkeypatch.setattr(circuit_breaker, "is_tripped", lambda _resource: False)
     monkeypatch.setattr(
         scan_routes, "require_paid_request", lambda *_a, **_kw: _settled_result(is_promo=False)
@@ -111,7 +104,7 @@ def test_real_payment_failure_triggers_a_refund_not_a_bare_error(
         # failure shape (a 503 mentioning refund) without needing a live
         # algod/Redis -- run_with_refund's own unit tests already cover its
         # internals (test_x402_refund.py).
-        with pytest.raises(exc_cls):
+        with pytest.raises(SandboxError):
             product_write()
         refund_calls.append({"resource": resource, "payer": result.payer})
         return Response(
@@ -121,26 +114,47 @@ def test_real_payment_failure_triggers_a_refund_not_a_bare_error(
         )
 
     monkeypatch.setattr(scan_routes, "run_with_refund", _fake_run_with_refund)
+    # acquire succeeds (a slot was available), scan_url is the one that
+    # fails inside the sandbox -- still must release the slot afterward.
+    monkeypatch.setattr(scan_routes, "acquire_scan_slot", lambda: None)
     monkeypatch.setattr(
-        scan_routes, "acquire_scan_slot", lambda: (_ for _ in ()).throw(exc_cls(*exc_args))
+        scan_routes, "scan_url", lambda _url: (_ for _ in ()).throw(SandboxError("sandbox crashed"))
     )
-    if exc_cls is not ConcurrencyLimitError:
-        # acquire succeeds, scan_url is the one that fails -- still must
-        # release the slot, and product_write must still raise exc_cls.
-        monkeypatch.setattr(scan_routes, "acquire_scan_slot", lambda: None)
-        monkeypatch.setattr(
-            scan_routes, "scan_url", lambda _url: (_ for _ in ()).throw(exc_cls(*exc_args))
-        )
-        released: list[bool] = []
-        monkeypatch.setattr(scan_routes, "release_scan_slot", lambda: released.append(True))
+    released: list[bool] = []
+    monkeypatch.setattr(scan_routes, "release_scan_slot", lambda: released.append(True))
 
     response = scan_routes.x402_scan_url(_request())
 
     assert response.status_code == 503
     assert "refund" in response.description.lower()
     assert refund_calls == [{"resource": _RESOURCE, "payer": "P" * 58}]
-    if exc_cls is not ConcurrencyLimitError:
-        assert released == [True]  # the slot was released even though scan_url raised
+    assert released == [True]  # the slot was released even though scan_url raised
+
+
+def test_concurrency_limit_at_capacity_never_reaches_payment_or_the_breaker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression test (2026-09-07 security review, finding 9): before this fix, the concurrency slot was acquired INSIDE the paid product write, so a caller who lost the race for a slot had already paid, then got refunded, and that refund counted against the circuit breaker -- five ordinary concurrent requests past MAX_CONCURRENT_SCANS could trip the no-TTL latch and take the endpoint offline for everyone until an admin reset it, for free. The slot is now acquired BEFORE the payment gate: a caller who can't get one is turned away with a plain 503 and is never charged, so require_paid_request/run_with_refund/the breaker must never be touched."""
+    monkeypatch.setattr(circuit_breaker, "is_tripped", lambda _resource: False)
+    monkeypatch.setattr(
+        scan_routes, "acquire_scan_slot", lambda: (_ for _ in ()).throw(ConcurrencyLimitError())
+    )
+    monkeypatch.setattr(scan_routes, "require_paid_request", _never_paid)
+
+    def _must_not_refund(*_a: object, **_kw: object) -> Never:
+        raise AssertionError("a capacity-only rejection must never reach run_with_refund")
+
+    monkeypatch.setattr(scan_routes, "run_with_refund", _must_not_refund)
+
+    def _breaker_must_not_be_touched(*_a: object, **_kw: object) -> Never:
+        raise AssertionError("a capacity-only rejection must never count against the breaker")
+
+    monkeypatch.setattr(circuit_breaker, "record_refund_failure", _breaker_must_not_be_touched)
+
+    response = scan_routes.x402_scan_url(_request())
+
+    assert response.status_code == 503
+    assert "scan_unavailable" in response.description
 
 
 def test_fetch_error_on_a_real_payment_is_never_refunded(monkeypatch: pytest.MonkeyPatch) -> None:

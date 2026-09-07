@@ -613,39 +613,28 @@ def test_an_unattributable_payment_cannot_be_stored_as_a_grade(
 
 
 @pytest.mark.usefixtures("ledger", "fake_redis")
-def test_a_promo_redemption_stores_the_grade_attributed_to_the_promo_wallet(
+def test_grade_submit_never_forwards_promo_params(
     store: InMemoryGradeStore, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A promo hit must not trip the "unattributable payment" guard above.
-
-    Its result.payer is empty (nothing settled) -- the route must fall back
-    to the caller's own claimed promo_wallet as the grader instead. That
-    guard exists for a real settled payment that genuinely carried no payer.
-    """
+    """Regression test (2026-09-07 security review, finding 10 -- same pattern already found and fixed for x402_directory/x402_board): `grader` is a public identity statement stored with the grade, not merely payment attribution, and a promo redemption's wallet is only checked for syntactic validity, never proof of control (modules/x402/promo.py's own docstring). Worse than a plain spoof here: the tx_id sender-mismatch check only compares the claimed payer against the usage proof's public on-chain sender, so a promo caller could read that address straight off the chain and pass it as `?promo_wallet=`, sailing through the mismatch check while never controlling that wallet. Closed by never reading promo params on this route at all -- this test locks in that invariant: promo params in the query string are ignored, not honored."""
     monkeypatch.setattr(grading_routes, "grading_service", _service(store))
-    monkeypatch.setattr(
-        grading_routes,
-        "require_paid_request",
-        lambda *_a, **_kw: x402_guard.PaymentResult(error=None, is_promo=True),
-    )
-    fulfilled: list[tuple[str, str]] = []
-    monkeypatch.setattr(
-        grading_routes,
-        "mark_fulfilled",
-        lambda txid, *, resource: fulfilled.append((txid, resource)),
-    )
+
+    captured: dict = {}
+
+    def _spy_require_paid_request(*_args: object, **kwargs: object) -> x402_guard.PaymentResult:
+        captured.update(kwargs)
+        return _settled_result()
+
+    monkeypatch.setattr(grading_routes, "require_paid_request", _spy_require_paid_request)
+    monkeypatch.setattr(grading_routes, "mark_fulfilled", lambda *_a, **_kw: None)
     _mock_verified_proof(monkeypatch)
 
-    response = grading_routes.x402_grade_submit(
+    grading_routes.x402_grade_submit(
         _request(query={"promo": "LAUNCH50", "promo_wallet": _PAYER}, body=_grade_body())
     )
 
-    assert response.status_code == 200
-    body = json.loads(response.description)
-    assert body["grade"]["grader"] == _PAYER
-    assert body["settlement_tx_id"] == ""
-    assert body["via"] == "promo"
-    assert fulfilled == []
+    assert "promo_code" not in captured
+    assert "promo_wallet" not in captured
 
 
 @pytest.mark.usefixtures("ledger")

@@ -14,15 +14,22 @@
 from __future__ import annotations
 
 from .client import BASE_URL, PxkeClient
-from .exceptions import PxkeConfigError, PxkeError, PxkeHTTPError, PxkePaymentError
+from .exceptions import (
+    PxkeConfigError,
+    PxkeError,
+    PxkeHTTPError,
+    PxkeOfferValidationError,
+    PxkePaymentError,
+)
 
 __all__ = [
     "BASE_URL",
     "PxkeClient",
-    "PxkeError",
     "PxkeConfigError",
+    "PxkeError",
     "PxkeHTTPError",
+    "PxkeOfferValidationError",
     "PxkePaymentError",
 ]
 
-__version__ = "0.5.0"
+__version__ = "0.6.0"

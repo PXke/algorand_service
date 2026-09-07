@@ -35,6 +35,18 @@ def env_float(name: str, default: float) -> float:
     return float(raw)
 
 
+# Hard cap on the response body net_guard.guarded_request/guarded_get will
+# buffer for any single fetch (2026-09-07 security review, finding 6): that
+# helper backs ~110 call sites across the crawler, scrapers, and the
+# investigative/writer tools, including fetches of a free, unauthenticated,
+# caller-supplied URL (ecosystem submission liveness checks, the writer's
+# own fetch_url tool) -- with no cap, a hostile or misconfigured target
+# (a gzip bomb, or just a very large page) would be buffered into memory in
+# full, one OOM'd worker process per request. Enforced by streaming and
+# aborting mid-read, not by trusting a declared Content-Length (spoofable or
+# absent on a chunked response).
+NET_GUARD_MAX_RESPONSE_BYTES = env_int("NET_GUARD_MAX_RESPONSE_BYTES", 20 * 1024 * 1024)
+
 CASSANDRA_HOSTS = env_str("CASSANDRA_HOSTS", "127.0.0.1")
 CASSANDRA_KEYSPACE = env_str("CASSANDRA_KEYSPACE", "algorand_platform")
 CASSANDRA_LOCAL_DC = env_str("CASSANDRA_LOCAL_DC", "datacenter1")
