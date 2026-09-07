@@ -1,0 +1,16 @@
+Archived 2026-09-07 before DROP TABLE x402_promo_redemptions (v1, superseded by
+x402_promo_redemptions_v2 in migration 101, 2026-09-01). All 5 rows are
+operator/test data (wallet_hash 3e5946af2c9756b6... is the known probe wallet,
+matching facilitator.goplausible.xyz merchant id 3e5946af2c9756b6), zero real
+customer redemptions. See docs re: promo_redemptions v1 vs v2 investigation,
+2026-09-07, for the full analysis.
+
+ code                | wallet_hash                                                      | redeemed_at                     | resource
+---------------------+------------------------------------------------------------------+---------------------------------+------------------
+    LIVETEST-PROMO-1 | 3e5946af2c9756b6cf13d42c32de10961eb83b45f772b7004f1495f0c807a922 | 2026-08-31 11:24:49.000000+0200 | x402-news-search
+         LIVETEST31B | 614834f3793f11f9a0424cb9bf8a8f6195959a0a73a82d1abec9816f4fe40912 | 2026-08-31 09:32:46.000000+0200 |        x402-ping
+         LIVETEST31B | b3fec3d5684a67931e5d46261005a66000a972f4366630d3f1ea5146cfd96eb7 | 2026-08-31 09:32:46.000000+0200 |        x402-ping
+ MARKETING-SCAN-TEST | 3e5946af2c9756b6cf13d42c32de10961eb83b45f772b7004f1495f0c807a922 | 2026-09-01 12:17:25.000000+0200 |    x402-scan-url
+ MARKETING-SCAN-TEST | 9864f32c7d5016429e8984fcd522b7bc21b54cc8b384f42ca5b9042361c62527 | 2026-09-01 12:23:58.000000+0200 |    x402-scan-url
+
+(5 rows)
