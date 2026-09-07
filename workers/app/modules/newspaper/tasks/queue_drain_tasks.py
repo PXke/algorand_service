@@ -280,6 +280,35 @@ def _release_due_backlog(slots: int) -> dict | None:
     return None
 
 
+def _resolve_after_compose(
+    resolve: Callable[[QueuedPublishRow, dict], str], row: QueuedPublishRow, outcome: dict
+) -> str:
+    """Call `resolve` right after a compose that already ran (paid for, possibly already published/held), retrying once if SoftTimeLimitExceeded fires before `resolve` itself gets entered.
+
+    `_resolve_artifact` already retries-then-reraises for an interrupt DURING
+    its own bookkeeping write; this closes the narrow, separate gap between
+    `publish_from_queued_row` returning and `resolve` being called at all --
+    without this, a soft-limit interrupt landing in that gap left the queue
+    row's bookkeeping never attempted, so the next drain run saw it as still
+    pending and composed (and, if the outcome was `published`, re-published)
+    the same row a second time (found 2026-09-07 review). A true zero-width
+    race between two adjacent statements can't be fully closed by
+    application code alone (CPython can deliver the interrupt at almost any
+    instruction boundary) -- this retry closes the practically-reachable
+    part of it, matching `_resolve_artifact`'s own established pattern
+    rather than leaving this call site with none of that protection.
+    """
+    try:
+        return resolve(row, outcome)
+    except SoftTimeLimitExceeded:
+        logger.warning(
+            "queue row %s: resolve() interrupted by soft time limit before/during running — retrying once",
+            row.queue_id,
+        )
+        resolve(row, outcome)
+        raise
+
+
 def _process_review_row(
     row: QueuedPublishRow,
     *,
@@ -306,7 +335,7 @@ def _process_review_row(
     from app.modules.crawler.classifier_review_store import review_queue_full
 
     outcome = publish_from_queued_row(row, publish_tier=PublishTier.STANDARD)
-    outcome_status = resolve(row, outcome)
+    outcome_status = _resolve_after_compose(resolve, row, outcome)
     published_delta = 0
     if outcome_status == "review":
         reviews_composed += 1
@@ -356,7 +385,7 @@ def _publish_standard_row(
         return None, 0, {"status": "skipped", "reason": decision.reason, "published": 0}
 
     outcome = publish_from_queued_row(row, publish_tier=PublishTier.STANDARD)
-    status = resolve(row, outcome)
+    status = _resolve_after_compose(resolve, row, outcome)
     if status == "published":
         record_standard_publish()
         return {"queue_id": row.queue_id, **outcome}, 1, None

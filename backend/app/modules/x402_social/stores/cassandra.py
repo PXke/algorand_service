@@ -24,6 +24,8 @@ from app.modules.x402_social.models.domain import (
     RemovalRecord,
     StoredCase,
     StoredComment,
+    StoredDmConversation,
+    StoredDmMessage,
     StoredGroup,
     StoredMembership,
     StoredPost,
@@ -89,11 +91,20 @@ def _try_uuid(value: str) -> uuid.UUID | None:
     2026-security-audit: the in-memory store backing the test suite is a
     plain dict lookup and never hit this, since a malformed string just
     misses the dict -- only the Cassandra-backed production path could 500).
+
+    A well-formed but non-version-1 UUID (the NIL uuid, a random v4) is the
+    same "not found": these columns are `timeuuid`, and Cassandra rejects a
+    non-v1 value bound to one with InvalidRequest, which the driver raises
+    straight through to a 500 -- `uuid.UUID()` alone accepts it happily.
     """
     try:
-        return uuid.UUID(value)
+        parsed = uuid.UUID(value)
     except (ValueError, AttributeError, TypeError):
         return None
+    # The raw version nibble, not `parsed.version`: Python reports None for
+    # a non-RFC-4122 variant, whereas Cassandra's timeuuid check reads the
+    # nibble alone -- so this accepts exactly what the server would.
+    return parsed if (parsed.time_hi_version >> 12) == 1 else None
 
 
 def _row_to_agent(row: object) -> AgentProfile:
@@ -186,6 +197,7 @@ def _row_to_group(row: object) -> StoredGroup:
         created_at_epoch=_epoch(row.created_at),
         settlement_tx_id=row.settlement_tx_id or "",
         hidden_platform=bool(row.hidden_platform),
+        tags=list(row.tags or []),
     )
 
 
@@ -756,6 +768,7 @@ class CassandraSocialStore:
                 created,
                 item.settlement_tx_id,
                 item.hidden_platform,
+                list(item.tags),
             ),
         )
         session.execute(
@@ -782,6 +795,23 @@ class CassandraSocialStore:
         session = get_cassandra_session()
         rows = session.execute(X402SocialStmts.LIST_GROUPS_RECENT, (GROUPS_PARTITION, limit))
         return [_row_to_group_from_recency(row) for row in rows]
+
+    # ----------------------------------------------------------------- #
+    # Group Discovery by tag (added 2026-09-06) -- x402_social_groups_by_tag,
+    # migration 115. Written once, at group creation time, by
+    # services/group_service.py; there is no PATCH /groups to keep this in
+    # sync with later.
+    # ----------------------------------------------------------------- #
+    def upsert_group_tag(self, *, tag: str, group_id: str, created_at_epoch: int) -> None:
+        """Add (or overwrite) one (tag, group_id) row to the tag lookup."""
+        session = get_cassandra_session()
+        session.execute(X402SocialStmts.UPSERT_GROUP_TAG, (tag, group_id, _dt(created_at_epoch)))
+
+    def list_groups_by_tag(self, tag: str, *, limit: int) -> list[tuple[str, int]]:
+        """Up to `limit` (group_id, created_at_epoch) pairs carrying one tag."""
+        session = get_cassandra_session()
+        rows = session.execute(X402SocialStmts.LIST_GROUPS_BY_TAG, (tag, limit))
+        return [(row.group_id, _epoch(row.created_at)) for row in rows]
 
     def mark_group_hidden_platform(self, item: StoredGroup) -> None:
         """Set hidden_platform=true on the canonical row and the recency projection row, both via UPDATE ... IF EXISTS (Phase S2, design doc section 5.3 step 4: hidden from discovery, still point-readable and still servable to existing members)."""
@@ -1229,3 +1259,70 @@ class CassandraSocialStore:
             uphold_votes=int(row.uphold_votes or 0),
             reject_votes=int(row.reject_votes or 0),
         )
+
+    # ----------------------------------------------------------------- #
+    # Private messages (DMs, migration 122). See services/dm_service.py's
+    # own module docstring for why this write is free/session-authenticated
+    # rather than paid -- there is no settlement_tx_id column anywhere here.
+    # ----------------------------------------------------------------- #
+    def insert_dm_message(self, item: StoredDmMessage) -> None:
+        """Append one message to its conversation's canonical log."""
+        session = get_cassandra_session()
+        session.execute(
+            X402SocialStmts.INSERT_DM_MESSAGE,
+            (
+                item.conversation_id,
+                _dt(item.created_at_epoch),
+                _uuid(item.message_id),
+                item.sender,
+                item.recipient,
+                item.body,
+            ),
+        )
+
+    def list_dm_messages(self, conversation_id: str, *, limit: int) -> list[StoredDmMessage]:
+        """Return one conversation's messages newest-first, at most `limit` of them."""
+        session = get_cassandra_session()
+        rows = session.execute(X402SocialStmts.LIST_DM_MESSAGES, (conversation_id, limit))
+        return [
+            StoredDmMessage(
+                conversation_id=row.conversation_id,
+                message_id=str(row.message_id),
+                sender=row.sender or "",
+                recipient=row.recipient or "",
+                body=row.body or "",
+                created_at_epoch=_epoch(row.created_at),
+            )
+            for row in rows
+        ]
+
+    def upsert_dm_conversation(self, item: StoredDmConversation) -> None:
+        """Create or overwrite-in-place one wallet's own conversation-list row for `item.peer_wallet` (idempotent -- no previous-row lookup needed, same as upsert_follow)."""
+        session = get_cassandra_session()
+        session.execute(
+            X402SocialStmts.UPSERT_DM_CONVERSATION,
+            (
+                item.wallet,
+                item.peer_wallet,
+                item.conversation_id,
+                _dt(item.last_message_at_epoch),
+                item.last_sender,
+                item.last_message_preview,
+            ),
+        )
+
+    def list_dm_conversations(self, wallet: str, *, limit: int) -> list[StoredDmConversation]:
+        """Return `wallet`'s own conversation rows, at most `limit` of them (bounded single-partition scan, unordered by recency -- the caller sorts by last_message_at)."""
+        session = get_cassandra_session()
+        rows = session.execute(X402SocialStmts.LIST_DM_CONVERSATIONS, (wallet, limit))
+        return [
+            StoredDmConversation(
+                wallet=row.wallet,
+                peer_wallet=row.peer_wallet,
+                conversation_id=row.conversation_id,
+                last_message_at_epoch=_epoch(row.last_message_at),
+                last_sender=row.last_sender or "",
+                last_message_preview=row.last_message_preview or "",
+            )
+            for row in rows
+        ]

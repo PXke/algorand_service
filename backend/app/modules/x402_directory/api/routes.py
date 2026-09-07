@@ -1,4 +1,15 @@
-"""HTTP routes for the x402 endpoint directory: paid listing and renewal, free search, detail and probe status, admin delist.
+"""HTTP routes for the x402 endpoint directory: paid listing and boost, free search, detail and probe status, admin delist.
+
+A listing now survives for as long as it keeps passing health probes
+(workers/app/modules/x402_probe extends term_end on every healthy probe;
+see settings.x402_listing_term_days) -- POST /list/renew no longer extends
+survival at all. Repurposed 2026-09-06 (owner decision, competitive pricing
+study) into a paid "boost": priority placement in search results for
+settings.x402_listing_boost_days, via boosted_until_epoch. The function and
+resource-constant names below stay `x402_renew` / `_RENEW_RESOURCE` even
+though the resource id and behaviour are now boost's -- the ownership-check
+logic renew() needs is identical to what boosting needs, so this is the
+same route extended in place, not a fork (CLAUDE.md section 3).
 
 Route paths are /api/v1/x402/*, not the bare /x402/* the build plan names.
 nginx only proxies `location ^~ /api/` to this backend on the API host and
@@ -37,7 +48,12 @@ from app.modules.admin.auth import require_admin_wallet
 from app.modules.x402 import circuit_breaker
 from app.modules.x402.discovery import describe_json_endpoint
 from app.modules.x402.guard import PaymentResult
-from app.modules.x402.paid_request import mark_fulfilled, require_paid_request, run_with_refund
+from app.modules.x402.paid_request import (
+    challenge_if_unpaid,
+    mark_fulfilled,
+    require_paid_request,
+    run_with_refund,
+)
 from app.modules.x402.preview import preview_requested
 from app.modules.x402.promo import promo_request_params
 from app.modules.x402_directory.models.domain import (
@@ -47,6 +63,10 @@ from app.modules.x402_directory.models.domain import (
     ProbeLeaderboardEntry,
     StoredListing,
     StoredProbe,
+)
+from app.modules.x402_directory.services.discovery_import import (
+    fetch_facilitator_resources,
+    import_discovered_resources,
 )
 from app.modules.x402_directory.services.listing_service import (
     MAX_CONTACT_LENGTH,
@@ -67,7 +87,10 @@ from app.schemas import X402ListingRenewRequest, X402ListingRequest
 listing_service = ListingService()
 
 _LIST_RESOURCE = "x402-directory-list"
-_RENEW_RESOURCE = "x402-directory-renew"
+# Repurposed 2026-09-06 from a paid-renewal-to-survive resource id into the
+# new boost resource id -- see x402_renew's own docstring for why the
+# Python constant/function names stay `_RENEW_RESOURCE`/`x402_renew`.
+_RENEW_RESOURCE = "x402-directory-boost"
 _PROBE_LEADERBOARD_RESOURCE = "x402-directory-probe-leaderboard"
 
 # Repeated verbatim in every leaderboard response (paid, preview and the 402
@@ -105,6 +128,13 @@ _LISTING_OUTPUT_EXAMPLE = {
     "payer": "...",
     "verified_wallet": "",
     "verified_at_epoch": 0,
+    "boosted_until_epoch": 0,
+    # "paid" here (this is what a real listing looks like); a free,
+    # auto-discovered stub imported from a public facilitator feed
+    # (2026-09-06) carries "auto_discovered" instead -- see
+    # services/discovery_import.py and _listing_json() below.
+    "source": "paid",
+    "discovered_from": "",
 }
 
 
@@ -130,6 +160,21 @@ def _listing_json(item: StoredListing) -> dict:
         # current payer, see StoredListing.is_verified.
         "verified_wallet": item.verified_wallet if item.is_verified else "",
         "verified_at_epoch": item.verified_at_epoch if item.is_verified else 0,
+        # Auto-discovery (migration 113, 2026-09-06): "paid" for a real
+        # listing someone actually paid to list, "auto_discovered" for a
+        # free, unclaimed stub imported from a public x402 facilitator
+        # discovery feed -- never ranked ahead of, or mixed indistinguishably
+        # with, a paid listing (see ListingService.search()'s paid-first
+        # merge). `discovered_from` names which public feed it came from;
+        # empty for a real paid listing. Always present, on every listing of
+        # either source, so a caller can never mistake one for the other from
+        # the response shape alone.
+        "source": item.source,
+        "discovered_from": item.discovered_from,
+        # Priority-placement window (migration 114): 0 when not boosted,
+        # else the epoch until which this listing sorts ahead of every
+        # non-boosted one in search() -- see ListingService.renew().
+        "boosted_until_epoch": item.boosted_until_epoch,
     }
 
 
@@ -162,7 +207,7 @@ def _leaderboard_entry_json(rank: int, entry: ProbeLeaderboardEntry) -> dict:
 
 
 def x402_list(request: Request) -> Response:
-    """Paid: list an x402 endpoint in the directory for a fixed term.
+    """Paid: list an x402 endpoint in the directory, surviving for as long as it stays healthy.
 
     Everything checkable without knowing who is paying is checked BEFORE the
     payment gate, so a caller is never charged for a request that was doomed:
@@ -195,34 +240,23 @@ def x402_list(request: Request) -> Response:
             "Try again later.",
         )
 
-    try:
-        payload = serialization.decode(request.body, X402ListingRequest)
-    except serialization.DecodeError as exc:
-        return json_error_response(400, "invalid_request", str(exc))
-
-    try:
-        normalized_url = normalize_url(payload.url)
-        schema_json = encode_schema(payload.schema)
-        category = validate_category(payload.category)
-        tags = validate_tags(payload.tags)
-    except DirectoryError as exc:
-        return json_error_from_platform(exc)
-
     term_days = settings.x402_listing_term_days
-    result = require_paid_request(
-        request,
-        price=settings.x402_listing_price,
-        resource=_LIST_RESOURCE,
+    offer = {
+        "price": settings.x402_listing_price,
+        "resource": _LIST_RESOURCE,
         # Reaches the payer as the 402's resource.description, before they
         # commit — the term length is not derivable from the price alone.
-        description=(
-            f"List one x402 endpoint in the public PXke x402 directory for {term_days} days. "
+        "description": (
+            f"List one x402 endpoint in the public PXke x402 directory. Stays listed for as "
+            f"long as it keeps passing health probes (roughly every 30 minutes) -- no "
+            f"renewal needed; only {term_days} days of total unresponsiveness delists it. "
             f"Discoverable immediately at GET /api/v1/x402/search (free; optional "
             f"`?tag=<tag>` filters to listings carrying that tag, `?category=<category>` "
             f"to listings in that category, `?limit=` caps results) and at "
             f"GET /api/v1/x402/listings?url=<url> (free; the full listing plus its latest "
-            f"probe), and removed from both when the {term_days} days are up "
-            f"(extend with POST /api/v1/x402/list/renew). `tags` are stored trimmed and "
+            f"probe). POST /api/v1/x402/list/renew no longer extends survival -- it now "
+            f"buys priority placement ('boost') in search results instead, see its own "
+            f"402 offer. `tags` are stored trimmed and "
             f"lowercased and are what `?tag=` matches on; tags starting with "
             f"`{CATEGORY_TAG_PREFIX}` are reserved. Optional `category` is one of "
             f"{', '.join(LISTING_CATEGORIES)} (default other). Optional `schema` must "
@@ -232,9 +266,10 @@ def x402_list(request: Request) -> Response:
             f"third-party listing, it is exactly as trustworthy as you are. Optional "
             f"`contact` (at most {MAX_CONTACT_LENGTH} characters) is a point of contact "
             f"for issues. Both are set only when you list or relist -- POST "
-            f"/api/v1/x402/list/renew changes nothing about the listing but its term."
+            f"/api/v1/x402/list/renew changes nothing about the listing's own content, "
+            f"only its search-ranking boost."
         ),
-        extensions=describe_json_endpoint(
+        "extensions": describe_json_endpoint(
             # POST carries its input as a JSON body, so this must declare a
             # BODY discovery extension. Without body_type the package builds a
             # query-params one, which would describe this route's input
@@ -294,7 +329,28 @@ def x402_list(request: Request) -> Response:
                 "term_days": term_days,
             },
         ),
-    )
+    }
+    # An unpaid request sees the offer before its body is ever parsed (see
+    # challenge_if_unpaid); with a payment attached, every check below still
+    # runs before the gate so a doomed request is never charged.
+    challenge = challenge_if_unpaid(request, **offer)
+    if challenge is not None:
+        return challenge
+
+    try:
+        payload = serialization.decode(request.body, X402ListingRequest)
+    except serialization.DecodeError as exc:
+        return json_error_response(400, "invalid_request", str(exc))
+
+    try:
+        normalized_url = normalize_url(payload.url)
+        schema_json = encode_schema(payload.schema)
+        category = validate_category(payload.category)
+        tags = validate_tags(payload.tags)
+    except DirectoryError as exc:
+        return json_error_from_platform(exc)
+
+    result = require_paid_request(request, **offer)
     if result.error:
         return result.error
 
@@ -361,19 +417,25 @@ def _list_product_write(
 
 
 def x402_renew(request: Request) -> Response:
-    """Paid: extend an existing listing's term by one more term, at the listing price.
+    """Paid: boost an existing listing to the top of search results, at the boost price.
+
+    Repurposed 2026-09-06 (owner decision, competitive pricing study): this
+    used to extend the listing's SURVIVAL; a listing now survives for as
+    long as it keeps passing health probes (see x402_list's own docstring
+    and settings.x402_listing_term_days), so this route no longer touches
+    term_end_epoch at all -- see listing_service.renew() for exactly what it
+    does change (boosted_until_epoch) and does not.
 
     Decoded, normalized and looked up BEFORE the payment gate: a malformed
     body, an invalid url and a url that is not listed are all free 400s/404s.
     Ownership cannot be checked before the gate -- the payer is only known
-    once the payment has settled -- so a renewal by a wallet other than the
+    once the payment has settled -- so a boost by a wallet other than the
     one that listed the url is refused with the payment already taken and
     the listing untouched (403 listing_owned_by_another_payer while the term
     runs, 409 renew_requires_relist once it has expired; receipt headers
     served either way). Same accepted tradeoff as x402_list's relist check
-    and the board's renew, and the 402 offer says so before the payer
-    commits. See listing_service.renew() for the term arithmetic and what a
-    renewal does and does not change.
+    and the board's own boost, and the 402 offer says so before the payer
+    commits.
 
     The ownership refusal goes through run_with_refund (2026-09-02
     retrofit) like x402_list's identical case -- but DirectoryError is a
@@ -383,8 +445,8 @@ def x402_renew(request: Request) -> Response:
     docstring, and x402_list's docstring for why refunding a fully
     caller-controlled rejection would have been a free way to pump the
     breaker). No promo branch here -- see this module's own docstring for
-    why: renewal's ownership check compares `payer` against the listing's
-    existing owner, so a promo-supplied wallet would let anyone free-renew
+    why: the ownership check compares `payer` against the listing's
+    existing owner, so a promo-supplied wallet would let anyone free-boost
     (or probe the ownership check of) a listing by its already-public payer
     address, without proving control of it.
     """
@@ -395,6 +457,39 @@ def x402_renew(request: Request) -> Response:
             "This endpoint is temporarily disabled after an elevated failure rate. "
             "Try again later.",
         )
+
+    boost_days = settings.x402_listing_boost_days
+    offer = {
+        "price": settings.x402_listing_boost_price,
+        "resource": _RENEW_RESOURCE,
+        "description": (
+            f"Boost an existing PXke x402 directory listing to the top of search results "
+            f"for {boost_days} days, from the later of now and its current boost end; "
+            f"nothing else about the listing changes -- not its term, price, description, "
+            f"tags, schema or category. Only the wallet that listed the url may boost it, "
+            f"before or after its term ends: a payment from any other wallet settles "
+            f"but is refused and changes nothing (403 while the term is running, 409 "
+            f"renew_requires_relist once it has expired). To take over an expired "
+            f"or unowned url, POST /api/v1/x402/list to relist it under your wallet."
+        ),
+        "extensions": describe_json_endpoint(
+            body_type="json",
+            input={"url": _LISTING_EXAMPLE["url"]},
+            input_schema={
+                "type": "object",
+                "properties": {"url": {"type": "string", "maxLength": 2048}},
+                "required": ["url"],
+            },
+            output_example={
+                "listing": _LISTING_OUTPUT_EXAMPLE,
+                "settlement_tx_id": "...",
+                "boost_days": boost_days,
+            },
+        ),
+    }
+    challenge = challenge_if_unpaid(request, **offer)
+    if challenge is not None:
+        return challenge
 
     try:
         payload = serialization.decode(request.body, X402ListingRenewRequest)
@@ -407,35 +502,7 @@ def x402_renew(request: Request) -> Response:
     if listing_service.probe_status(normalized_url) is None:
         return json_error_response(404, "not_found", "No listing for that url")
 
-    term_days = settings.x402_listing_term_days
-    result = require_paid_request(
-        request,
-        price=settings.x402_listing_price,
-        resource=_RENEW_RESOURCE,
-        description=(
-            f"Extend an existing PXke x402 directory listing by {term_days} more days, "
-            f"from the later of now and its current term end; nothing else about the "
-            f"listing changes. Only the wallet that listed the url may renew it, "
-            f"before or after its term ends: a payment from any other wallet settles "
-            f"but is refused and changes nothing (403 while the term is running, 409 "
-            f"renew_requires_relist once it has expired). To take over an expired "
-            f"or unowned url, POST /api/v1/x402/list to relist it under your wallet."
-        ),
-        extensions=describe_json_endpoint(
-            body_type="json",
-            input={"url": _LISTING_EXAMPLE["url"]},
-            input_schema={
-                "type": "object",
-                "properties": {"url": {"type": "string", "maxLength": 2048}},
-                "required": ["url"],
-            },
-            output_example={
-                "listing": _LISTING_OUTPUT_EXAMPLE,
-                "settlement_tx_id": "...",
-                "term_days": term_days,
-            },
-        ),
-    )
+    result = require_paid_request(request, **offer)
     if result.error:
         return result.error
 
@@ -456,14 +523,14 @@ def x402_renew(request: Request) -> Response:
             {
                 "listing": _listing_json(outcome),
                 "settlement_tx_id": result.payment_txid or "",
-                "term_days": term_days,
+                "boost_days": boost_days,
             }
         ),
     )
 
 
 def _renew_product_write(*, normalized_url: str, result: PaymentResult) -> StoredListing:
-    """The product write x402_renew protects via run_with_refund: extend the listing's term.
+    """The product write x402_renew protects via run_with_refund: boost the listing.
 
     Returns the renewed StoredListing directly, never a Response -- unlike
     _list_product_write, the caller wraps this return value into the final
@@ -491,6 +558,14 @@ def x402_search(request: Request) -> Response | dict:
     `category` (one of LISTING_CATEGORIES); `tag` and `category` together are
     a 400. Listings whose paid term has ended are excluded — see
     listing_service.search().
+
+    With no `tag`/`category` filter, results can include free, auto-discovered
+    ("unclaimed") listings imported from a public x402 facilitator feed
+    (2026-09-06, `source: "auto_discovered"` on the item — see
+    services/discovery_import.py) alongside real paid ones — but only to fill
+    space AFTER every live paid listing already found; an auto-discovered
+    entry never outranks or crowds out a paid one. A `tag`/`category` filter
+    is paid-listings-only: an auto-discovered stub carries no tags.
     """
     if search_rate_limited(request):
         return json_error_response(
@@ -659,11 +734,15 @@ def x402_probe_leaderboard(request: Request) -> Response:
     ListingService.probe_leaderboard()'s own docstring for the ranking rule
     and its minimum-sample-count anti-gaming threshold.
 
-    `limit` is parsed and clamped BEFORE the gate (a non-integer is a free
-    400). Supports `?preview=true` (redacted shape, unpaid, rate-limited)
-    and an admin promo bypass -- this is a read-only aggregate with no
-    ownership check to game, unlike x402_list/x402_renew's promo-unwired
-    write paths (see this module's own docstring).
+    An unpaid request sees the offer before `limit` is ever parsed (see
+    challenge_if_unpaid) -- found live 2026-09-06, the same bug class as
+    x402_list/x402_renew: a bare header-less probe with a malformed `limit`
+    got a 400 and never saw the price. With a payment attached, `limit` is
+    still parsed and clamped before the gate as before (a non-integer is a
+    free 400). Supports `?preview=true` (redacted shape, unpaid,
+    rate-limited) and an admin promo bypass -- this is a read-only aggregate
+    with no ownership check to game, unlike x402_list/x402_renew's
+    promo-unwired write paths (see this module's own docstring).
     """
     if circuit_breaker.is_tripped(_PROBE_LEADERBOARD_RESOURCE):
         return json_error_response(
@@ -673,18 +752,10 @@ def x402_probe_leaderboard(request: Request) -> Response:
             "Try again later.",
         )
 
-    limit = _parse_leaderboard_limit(request)
-    if isinstance(limit, Response):
-        return limit
-
-    promo_code, promo_wallet = promo_request_params(request)
-    result = require_paid_request(
-        request,
-        price=settings.x402_directory_probe_leaderboard_price,
-        resource=_PROBE_LEADERBOARD_RESOURCE,
-        promo_code=promo_code,
-        promo_wallet=promo_wallet,
-        description=(
+    offer = {
+        "price": settings.x402_directory_probe_leaderboard_price,
+        "resource": _PROBE_LEADERBOARD_RESOURCE,
+        "description": (
             "The most reliable listed x402 endpoints, ranked purely by what our probe "
             f"fleet has MEASURED -- reachability, valid-402 rate and latency -- over each "
             f"listing's most recent up to {settings.x402_probe_history_max_results} stored "
@@ -698,7 +769,7 @@ def x402_probe_leaderboard(request: Request) -> Response:
             f"{settings.x402_directory_probe_leaderboard_max_results}). Supports "
             f"?preview=true (redacted, unpaid, rate-limited)."
         ),
-        extensions=describe_json_endpoint(
+        "extensions": describe_json_endpoint(
             input={"limit": 10},
             input_schema={
                 "type": "object",
@@ -720,6 +791,21 @@ def x402_probe_leaderboard(request: Request) -> Response:
             )
             | {"settlement_tx_id": "..."},
         ),
+    }
+    challenge = challenge_if_unpaid(request, **offer)
+    if challenge is not None:
+        return challenge
+
+    limit = _parse_leaderboard_limit(request)
+    if isinstance(limit, Response):
+        return limit
+
+    promo_code, promo_wallet = promo_request_params(request)
+    result = require_paid_request(
+        request,
+        **offer,
+        promo_code=promo_code,
+        promo_wallet=promo_wallet,
         preview=preview_requested(request),
     )
     if result.error:
@@ -816,13 +902,79 @@ def x402_admin_delete_listing(request: Request) -> Response | dict:
     return {"deleted": True, "url": normalized_url}
 
 
+def x402_admin_import_discovered_listings(request: Request) -> Response | dict:
+    """Admin: fetch the facilitator's public discovery feed and import/refresh auto-discovered listings.
+
+    One-off/on-demand trigger, not a scheduled beat (this backend has no
+    Celery scheduler of its own -- see discovery_import.py's own docstring
+    for the deliberately smaller scope). Fetches
+    GET {settings.x402_facilitator_url}discovery/resources for the
+    configured network and writes one FREE, clearly-labelled auto-discovered
+    listing per resource (StoredListing.source == SOURCE_AUTO_DISCOVERED),
+    never touching a url a real payer already listed
+    (import_discovered_resources()'s own skipped_existing_paid count). Safe
+    to call repeatedly: each call only creates rows for urls that don't yet
+    have one, or refreshes (term_end, price, description) rows this same
+    import mechanism created earlier.
+
+    Never charges anything and never calls anything on the facilitator that
+    settles or mutates state -- one GET, paginated, bounded (see
+    fetch_facilitator_resources()). A facilitator-side failure is reported in
+    the response's `fetch.error`, never raised as a 500.
+    """
+    denied = require_admin_wallet(request)
+    if denied is not None:
+        return denied
+
+    fetch_result = fetch_facilitator_resources()
+    # Explicit store=, not the parameter's own get_listing_store() default:
+    # `listing_service.store` is the same module-level singleton (or,
+    # in a test, the same injected fake) every other route on this module
+    # reads and writes through -- see ListingService.store's own docstring.
+    import_result = import_discovered_resources(fetch_result.resources, store=listing_service.store)
+    return {
+        "fetch": {
+            "scanned": len(fetch_result.resources),
+            "total_reported_by_facilitator": fetch_result.total_reported,
+            "error": fetch_result.error,
+        },
+        "import": {
+            "scanned": import_result.scanned,
+            "created": import_result.created,
+            "refreshed": import_result.refreshed,
+            "skipped_existing_paid": import_result.skipped_existing_paid,
+            "skipped_invalid": import_result.skipped_invalid,
+        },
+    }
+
+
 def register_x402_directory_routes(app: Router) -> None:
-    """Register the paid list/renew/probe-leaderboard routes, the free search/detail/probe-status/probe-history routes, and the admin delist route."""
+    """Register the paid list/renew/probe-leaderboard routes, the free search/detail/probe-status/probe-history routes, and the admin delist/import-discovered routes.
+
+    x402-marketplace-ux-audit.md section 3.3 found five unrelated path
+    prefixes for one product (N1) and `renew` meaning "boost" here while
+    meaning something else in storage (N3). Each renamed path below is a
+    second, direct route registration against the SAME handler as its old
+    path -- never a duplicate body, never an HTTP-internal redirect. The old
+    paths stay registered exactly as they are: this marketplace is live on
+    mainnet and an existing caller's hardcoded path must keep working
+    (section 3.5 "Migration without breakage").
+    """
     app.post("/api/v1/x402/list")(x402_list)
+    app.post("/api/v1/x402/directory/listings")(x402_list)
     app.post("/api/v1/x402/list/renew")(x402_renew)
+    app.post("/api/v1/x402/directory/listings/boost")(x402_renew)
     app.get("/api/v1/x402/search")(x402_search)
+    app.get("/api/v1/x402/directory/listings")(x402_search)
     app.get("/api/v1/x402/listings")(x402_listing_detail)
+    app.get("/api/v1/x402/directory/listings/lookup")(x402_listing_detail)
     app.get("/api/v1/x402/directory/probe")(x402_probe_status)
+    app.get("/api/v1/x402/uptime/probes/latest")(x402_probe_status)
     app.get("/api/v1/x402/directory/probe/history")(x402_probe_history)
+    app.get("/api/v1/x402/uptime/probes")(x402_probe_history)
     app.get("/api/v1/x402/directory/probe/leaderboard")(x402_probe_leaderboard)
+    app.get("/api/v1/x402/trust/leaderboards/reliability")(x402_probe_leaderboard)
     app.delete("/api/v1/admin/x402/listings")(x402_admin_delete_listing)
+    app.post("/api/v1/admin/x402/directory/import-discovered")(
+        x402_admin_import_discovered_listings
+    )

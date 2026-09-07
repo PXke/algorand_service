@@ -89,7 +89,7 @@
       <span aria-hidden="true">›</span>
       <span>{entry.term}</span>
     </nav>
-    <header>
+    <header class="page-head">
       <span class="accent-slug"></span>
       <p class="kicker">Glossary</p>
       <h1>{entry.term}</h1>
@@ -143,10 +143,6 @@
   }
   .breadcrumb a:hover {
     text-decoration: underline;
-  }
-  header h1 {
-    margin: 8px 0 0;
-    font-size: clamp(26px, 4vw, 32px);
   }
   .definition {
     font-family: var(--font-serif);

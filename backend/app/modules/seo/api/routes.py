@@ -192,14 +192,24 @@ def _is_known_app_path(path: str) -> bool:
         # Cap length to keep junk out of the analytics store.
         slug = path[len("/topic/") :]
         return 0 < len(slug) <= 48 and "/" not in slug
+    if path in ("/registry", "/registry/submit"):
+        return True
+    if path.startswith("/registry/"):
+        # Algorand Open Registry (roadmap item 26): any non-empty entry
+        # slug, same "/topic/:tag" shape/cap above -- design doc section
+        # 10's own "Observed, not fixed" flag for this exact prefix.
+        slug = path[len("/registry/") :]
+        return 0 < len(slug) <= 80 and "/" not in slug
     if path == "/x402":
         return True
     if path.startswith("/x402/"):
         # The exact tab set the SPA router and the SSR route both recognize
-        # (render.X402_TABS) -- an unknown tab falls back to directory rather
-        # than a 400/404, so the beacon accepts only the real enum, not any
-        # trailing segment.
-        return path[len("/x402/") :] in render.X402_TABS
+        # (render.X402_TABS), plus "endpoints" -- a separate page, not a
+        # Marketplace sub-tab, but still a real SPA route (App.svelte) with
+        # its own dedicated SSR route (x402_endpoints). An unknown tab falls
+        # back to directory rather than a 400/404, so the beacon accepts
+        # only real routes, not any trailing segment.
+        return path[len("/x402/") :] in (*render.X402_TABS, "endpoints")
     return False
 
 
@@ -361,17 +371,26 @@ def _cached_article_render(article_id: str, lang: str | None) -> dict[str, objec
         if detail is None:
             return None
         translation_langs = news.translation_langs_for(article_id)
+        # A locale URL whose translation doesn't exist (not yet written, or
+        # never will be) gets the ENGLISH text back from get_article, so it
+        # is rendered as the English document: canonical, og:locale,
+        # content-language and <html lang> all say English, and the hreflang
+        # set (which never listed this locale) stays consistent with the
+        # canonical. Rendering it as `lang` instead produced an indexable,
+        # self-canonical duplicate of the English article under a
+        # wrong-language URL -- one per missing translation, per article.
+        rendered_lang = lang if lang and lang in translation_langs else None
         # Footer topic links + related stories reuse the cached topics-index feed.
         feed, topics = cached_feed_snapshot(news.list_feed)
         related = render.pick_related_articles(detail, feed, limit=5)
         head, body = render.render_article(
             detail,
-            lang=lang,
+            lang=rendered_lang,
             translation_langs=translation_langs,
             topic_links=topics,
             related=related,
         )
-        return {"slug": detail.slug, "head": head, "body": body}
+        return {"slug": detail.slug, "lang": rendered_lang, "head": head, "body": body}
 
     return cached_json(cache_key, _ARTICLE_DOC_CACHE_TTL, compute)
 
@@ -426,12 +445,17 @@ def _article_document(request: Request, lang: str | None) -> Response:
     # visit. Root-caused 2026-07-30 from an admin-analytics report the day
     # after locale path URLs shipped.
     browser_path = render.article_path(article_id, cached["slug"], lang)  # type: ignore[arg-type]
+    # <html lang> follows the language the document was actually RENDERED in
+    # (English when the requested locale has no translation -- see
+    # _cached_article_render), not the URL's locale segment. `.get(..., lang)`
+    # tolerates a cache entry written before the "lang" key existed.
+    rendered_lang = cached.get("lang", lang)
     return _doc_response(
         (cached["head"], cached["body"]),  # type: ignore[arg-type]
         "public, max-age=300, stale-while-revalidate=600",
         dedup_path=browser_path,
         tracked_path=path,
-        html_lang=html_lang_for(lang),
+        html_lang=html_lang_for(rendered_lang),  # type: ignore[arg-type]
     )
 
 
@@ -442,9 +466,13 @@ def og_article_card(request: Request) -> Response:
     from app.core.cache import cached_bytes
     from app.modules.seo.topics import display_tag_label, primary_tag
 
-    article_id = request.path_params.get("article_id", "")
-    if article_id.endswith(".png"):
-        article_id = article_id[: -len(".png")]
+    raw = request.path_params.get("article_id", "")
+    if raw.endswith(".png"):
+        raw = raw[: -len(".png")]
+    # Slug or uuid, same as _article_document: the SPA builds this URL from
+    # the route's path segment, which has been the slug since migration 056,
+    # so a uuid-only lookup 404'd every client-injected og:image.
+    article_id = (news.resolve_slug(raw) or raw) if raw else ""
     detail = news.get_article(article_id) if article_id else None
     if detail is None:
         return Response(
@@ -610,7 +638,7 @@ def _x402_document(request: Request, tab: str, path: str) -> Response:
     elif tab == "grades":
         grading_service = GradingService()
         kwargs["graded"] = grading_service.list_graded(limit=_X402_SSR_LIMIT)
-    elif tab == "news":
+    elif tab == "endpoints":
         news_engine = NewsEngineService()
         kwargs["news_items"] = news_engine.list_headlines(limit=_X402_SSR_LIMIT)
     else:
@@ -630,11 +658,22 @@ def x402_index(request: Request) -> Response:
 
 
 def x402_tab(request: Request) -> Response:
-    """SSR one x402 marketplace tab at /x402/:tab; an unrecognized tab renders the directory tab (same fallback X402.svelte's router applies) instead of 404ing."""
+    """SSR one x402 marketplace tab at /x402/:tab; an unrecognized tab renders the directory tab (same fallback X402.svelte's router applies) instead of 404ing.
+
+    "/x402/endpoints" never reaches this handler in practice -- it has its own
+    dedicated, more specific route (x402_endpoints, registered separately) that
+    Falcon's compiled router matches ahead of this templated ":tab" one. This
+    fallback exists only for a genuinely unrecognized tab value.
+    """
     raw = (request.path_params.get("tab", "") or "").strip().lower()
     tab = raw if raw in render.X402_TABS else "directory"
     path = f"/x402/{raw}" if raw else "/x402"
     return _x402_document(request, tab, path)
+
+
+def x402_endpoints(request: Request) -> Response:
+    """SSR PXke's own x402 products page (News Engine included) at /x402/endpoints, separate from the Marketplace (directory/board/requests/grades)."""
+    return _x402_document(request, "endpoints", "/x402/endpoints")
 
 
 def about(request: Request) -> Response:
@@ -887,6 +926,7 @@ def register_seo_routes(app: Router) -> None:
     app.get("/glossary")(glossary_index)
     app.get("/glossary/:slug")(glossary_term)
     app.get("/x402")(x402_index)
+    app.get("/x402/endpoints")(x402_endpoints)
     app.get("/x402/:tab")(x402_tab)
     app.get("/about")(about)
     app.get("/contact")(contact)
@@ -918,6 +958,7 @@ def register_seo_routes(app: Router) -> None:
         ("/glossary", glossary_index),
         ("/glossary/:slug", glossary_term),
         ("/x402", x402_index),
+        ("/x402/endpoints", x402_endpoints),
         ("/x402/:tab", x402_tab),
         ("/about", about),
         ("/contact", contact),

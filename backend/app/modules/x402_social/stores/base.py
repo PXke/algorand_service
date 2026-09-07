@@ -13,6 +13,8 @@ from app.modules.x402_social.models.domain import (
     RemovalRecord,
     StoredCase,
     StoredComment,
+    StoredDmConversation,
+    StoredDmMessage,
     StoredGroup,
     StoredMembership,
     StoredPost,
@@ -249,6 +251,24 @@ class SocialStore(Protocol):
         """Return groups newest-first, at most `limit` of them."""
         ...
 
+    # ----------------------------------------------------------------- #
+    # Group Discovery by tag (added 2026-09-06): a lookup table so
+    # GET /groups?tag= can filter groups by tag without ALLOW FILTERING on
+    # a non-key column (CLAUDE.md section 4) -- same shape as the Agent
+    # Discovery Search interest lookup above (upsert_agent_interest /
+    # list_agents_by_interest): the index carries only (tag, group_id,
+    # created_at), never a denormalized copy of the group's own fields, so
+    # a later hidden_platform change to the canonical row is never able to
+    # go stale here -- callers point-read `get_group` for the real row.
+    # ----------------------------------------------------------------- #
+    def upsert_group_tag(self, *, tag: str, group_id: str, created_at_epoch: int) -> None:
+        """Add (or overwrite, idempotently) one (tag, group_id) row to the tag lookup. Called once per declared tag, at group creation time only -- there is no PATCH /groups to keep this in sync with later."""
+        ...
+
+    def list_groups_by_tag(self, tag: str, *, limit: int) -> list[tuple[str, int]]:
+        """Up to `limit` (group_id, created_at_epoch) pairs carrying one tag -- bounded per-tag read; the caller ranks by created_at and point-reads each matched group_id's canonical row."""
+        ...
+
     def upsert_membership(self, item: StoredMembership) -> None:
         """Create or replace one wallet's membership in one group (both x402_social_group_members and x402_social_memberships)."""
         ...
@@ -384,4 +404,26 @@ class SocialStore(Protocol):
 
     def get_removal(self, case_id: str) -> RemovalRecord | None:
         """Point read of one hard-delete audit record, or None. Not part of the design doc's public endpoint table -- exists for auditability (test verification, a future admin read)."""
+        ...
+
+    # ----------------------------------------------------------------- #
+    # Private messages (DMs, migration 122). See services/dm_service.py's
+    # own module docstring for why this write is free/session-authenticated
+    # rather than the paid payer-is-identity shape every Phase S1 write above
+    # uses.
+    # ----------------------------------------------------------------- #
+    def insert_dm_message(self, item: StoredDmMessage) -> None:
+        """Append one message to its conversation's canonical, time-ordered log."""
+        ...
+
+    def list_dm_messages(self, conversation_id: str, *, limit: int) -> list[StoredDmMessage]:
+        """Return one conversation's messages newest-first, at most `limit` of them."""
+        ...
+
+    def upsert_dm_conversation(self, item: StoredDmConversation) -> None:
+        """Create or overwrite-in-place one wallet's own conversation-list row for `item.peer_wallet` (idempotent, same 'never a delete-then-reinsert' shape upsert_follow already uses)."""
+        ...
+
+    def list_dm_conversations(self, wallet: str, *, limit: int) -> list[StoredDmConversation]:
+        """Return `wallet`'s own conversation rows, at most `limit` of them (unordered by recency at the store level -- see domain.DM_CONVERSATION_SCAN_LIMIT's own docstring; the caller sorts by last_message_at)."""
         ...

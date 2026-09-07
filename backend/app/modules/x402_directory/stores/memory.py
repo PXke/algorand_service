@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from app.modules.x402_directory.models.domain import StoredListing, StoredProbe
+from app.modules.x402_directory.models.domain import SOURCE_PAID, StoredListing, StoredProbe
 
 
 class InMemoryListingStore:
@@ -11,6 +11,15 @@ class InMemoryListingStore:
     Keeps an explicit by-tag projection (`_by_tag`) rather than filtering
     `_items` on read, so it mirrors the Cassandra store's two-table shape and
     tests can observe that a delete really removes the projection rows.
+
+    `_items` is the canonical table (both paid and auto-discovered listings
+    live there, exactly like Cassandra's single x402_listings table), but
+    `_by_tag` and list_recent()'s own view are PAID-ONLY, mirroring
+    CassandraListingStore's split between x402_listings_by_recency/by_tag
+    (paid) and x402_listings_auto_discovered_by_recency (migration 113,
+    auto-discovered) -- see that class's docstring for why the split exists.
+    An auto-discovered item is never added to `_by_tag` and never returned by
+    list_recent(); list_auto_discovered() is its own view over `_items`.
     """
 
     def __init__(self) -> None:
@@ -32,12 +41,20 @@ class InMemoryListingStore:
         self._put(item, previous=self._items.get(item.url_hash))
 
     def _put(self, item: StoredListing, *, previous: StoredListing | None) -> None:
-        if previous is not None:
+        # Only a PAID previous/new row ever touches `_by_tag` -- an
+        # auto-discovered row was never in it (nothing to clean up when
+        # `previous` was one) and never goes into it (nothing to add when
+        # `item` is one). This is also what makes a claim (an auto-discovered
+        # stub relisted by a real payer) "just work": the new PAID item gets
+        # inserted into `_by_tag` fresh, with no stale auto-discovered rows
+        # to reconcile against.
+        if previous is not None and previous.source == SOURCE_PAID:
             for tag in previous.projection_tags():
                 self._by_tag.get(tag, {}).pop(item.url_hash, None)
         self._items[item.url_hash] = item
-        for tag in item.projection_tags():
-            self._by_tag.setdefault(tag, {})[item.url_hash] = item
+        if item.source == SOURCE_PAID:
+            for tag in item.projection_tags():
+                self._by_tag.setdefault(tag, {})[item.url_hash] = item
 
     def get(self, url_hash: str) -> StoredListing | None:
         """Return the current listing for a URL hash, or None if not listed."""
@@ -52,12 +69,18 @@ class InMemoryListingStore:
         return ordered[: max(0, limit)]
 
     def list_recent(self, *, limit: int) -> list[StoredListing]:
-        """Return listings newest-first, at most `limit` of them."""
-        return self._newest_first(list(self._items.values()), limit)
+        """Return PAID listings newest-first, at most `limit` of them. Never an auto-discovered stub."""
+        paid = [item for item in self._items.values() if item.source == SOURCE_PAID]
+        return self._newest_first(paid, limit)
 
     def list_by_tag(self, tag: str, *, limit: int) -> list[StoredListing]:
         """Return listings carrying the tag, newest-first, at most `limit` of them."""
         return self._newest_first(list(self._by_tag.get(tag, {}).values()), limit)
+
+    def list_auto_discovered(self, *, limit: int) -> list[StoredListing]:
+        """Return auto-discovered listings newest-imported-first, at most `limit`. Never a paid listing."""
+        discovered = [item for item in self._items.values() if item.source != SOURCE_PAID]
+        return self._newest_first(discovered, limit)
 
     def tag_rows(self, tag: str) -> list[str]:
         """Test hook: the url_hashes currently held in the tag projection for `tag`."""

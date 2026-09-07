@@ -125,7 +125,7 @@
 />
 
 <div class="page stack search-page">
-  <header class="hero">
+  <header class="hero page-head">
     <span class="accent-slug"></span>
     <h1>{t($messages, 'searchTitle')}</h1>
     <p class="lead muted">{t($messages, 'searchSubtitle')}</p>
@@ -209,14 +209,6 @@
 <style>
   .search-page {
     gap: 16px;
-  }
-  .hero h1 {
-    margin: 8px 0 0;
-    font-size: clamp(28px, 4vw, 34px);
-  }
-  .lead {
-    margin: 8px 0 0;
-    max-width: 40rem;
   }
   .search-card {
     display: flex;

@@ -1494,22 +1494,50 @@ def _finalize_publish(
     except Exception:
         release_publish_slot(tier=tier)
         raise
+    # From here on, article_id is live in the DB -- insert_article's own
+    # try/except above is the real point of no return (a failure there means
+    # nothing was published, safe to propagate/retry). Everything below is a
+    # secondary side effect (fanout distribution, cadence tracking) on an
+    # ALREADY-published article: CLAUDE.md invariant 9's "Cooldown/lock/
+    # budget checks... fail open with a log line" applies here too, for the
+    # same reason -- letting either of these raise uncaught would propagate
+    # out of _finalize_publish without ever reaching this function's own
+    # `return`, which means the caller's `resolve()` never runs at all (not
+    # just delayed -- never called), leaving the queue row looking pending
+    # and re-composable by the next drain even though the article is
+    # already live (found 2026-09-07 review: a Cassandra hiccup on either
+    # write below was a real, live double-publish path, wider than the
+    # narrower compose-then-resolve race already fixed the same night).
     page_text = str(payload.get("page_text", ""))
     page_title = str(payload.get("page_title", ""))
-    fanout_after_publish(
-        str(article_id), distribute=True, page_text=page_text, page_title=page_title
-    )
+    try:
+        fanout_after_publish(
+            str(article_id), distribute=True, page_text=page_text, page_title=page_title
+        )
+    except Exception:
+        logger.warning(
+            "article %s published but fanout_after_publish failed — continuing, resolve() must still run",
+            article_id,
+            exc_info=True,
+        )
     publish_mode = str(payload.get("publish_mode", "create"))
 
     # Published straight to the feed is a created article — count it toward the
     # per-website daily cap.
-    record_compose_cadence(
-        compose_domain=compose_domain,
-        service_id=row.service_id,
-        article_id=str(article_id),
-        is_editorial_assignment=payload.get("source_kind") == "editorial_assignment",
-        brief_id=str(payload.get("brief_id", "")),
-    )
+    try:
+        record_compose_cadence(
+            compose_domain=compose_domain,
+            service_id=row.service_id,
+            article_id=str(article_id),
+            is_editorial_assignment=payload.get("source_kind") == "editorial_assignment",
+            brief_id=str(payload.get("brief_id", "")),
+        )
+    except Exception:
+        logger.warning(
+            "article %s published but record_compose_cadence failed — continuing, resolve() must still run",
+            article_id,
+            exc_info=True,
+        )
 
     return {
         "status": "published",

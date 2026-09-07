@@ -156,7 +156,7 @@ def test_two_stage_compose_forwards_is_special_edition_to_review_and_revise(
 
 def test_compose_scrape_article_tags_special_edition(monkeypatch: pytest.MonkeyPatch) -> None:
     """compose_scrape_article injects the special-edition tag when the brief was flagged, on top of whatever tags the model itself returned."""
-    monkeypatch.setattr(ac, "mistral_configured", lambda: True)
+    monkeypatch.setattr(ac, "purpose_provider_configured", lambda _purpose: True)
     monkeypatch.setattr(
         ac,
         "compose_assignment_article",
@@ -477,7 +477,7 @@ def test_two_stage_compose_skips_deepening_for_standard_articles(
 
 def test_compose_scrape_article_no_tag_for_standard_brief(monkeypatch: pytest.MonkeyPatch) -> None:
     """A standard (non-special-edition) brief's article tags are passed through unchanged."""
-    monkeypatch.setattr(ac, "mistral_configured", lambda: True)
+    monkeypatch.setattr(ac, "purpose_provider_configured", lambda _purpose: True)
     monkeypatch.setattr(
         ac,
         "compose_assignment_article",

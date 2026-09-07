@@ -92,8 +92,8 @@ from app.core.http_errors import json_error_from_platform, json_error_response
 from app.core.request_headers import header_value
 from app.modules.x402 import circuit_breaker
 from app.modules.x402.guard import PaymentResult, require_payment
-from app.modules.x402.preview import preview_rate_limited
-from app.modules.x402.promo import attempt_promo_redemption
+from app.modules.x402.preview import preview_rate_limited, preview_requested
+from app.modules.x402.promo import attempt_promo_redemption, promo_request_params
 from app.modules.x402.receipts import attach_fulfillment_receipt
 from app.modules.x402.refund import send_refund
 from app.modules.x402.replay import claim_payment, release_claim
@@ -110,12 +110,52 @@ logger = logging.getLogger(__name__)
 
 # mark_fulfilled is re-exported so a route imports its whole paid-request
 # contract from one module (see the module docstring).
-__all__ = ["mark_fulfilled", "require_paid_request", "run_with_refund"]
+__all__ = ["challenge_if_unpaid", "mark_fulfilled", "require_paid_request", "run_with_refund"]
 
 
 def _payment_header(request: Request) -> str:
     """The incoming payment header, read under the same name the x402 package reads."""
     return header_value(request.headers, PAYMENT_SIGNATURE_HEADER)
+
+
+def challenge_if_unpaid(
+    request: Request,
+    *,
+    price: str,
+    resource: str,
+    description: str | None = None,
+    extensions: dict[str, Any] | None = None,
+    resource_path: str | None = None,
+) -> Response | None:
+    """The 402 offer for a request that carries no payment yet, else None.
+
+    A paid route calls this FIRST -- right after its circuit-breaker (and
+    any rate-limit) check, before it parses or validates any input -- with
+    exactly the offer kwargs it later passes to require_paid_request. The
+    standard x402 client flow is "send the request, read the 402 offer, pay,
+    resend", and an external prober sends a bare request with no body at
+    all: both must see the price regardless of input shape, so the challenge
+    is emitted before the body or query string is ever looked at. (Found
+    live 2026-09-05: every body-taking paid route answered a header-less
+    request with a 400 from input validation and never showed its offer.)
+
+    Returns None when a payment header is present -- the route then
+    validates its input as before, so a bad request still never costs money
+    -- and None for a preview or promo request, which require_paid_request
+    handles itself (a preview or promo caller is served validated input, not
+    a challenge). Nothing here touches the facilitator: a header-less
+    request never gets past the package's own "payment required" branch.
+    """
+    if _payment_header(request) or preview_requested(request) or promo_request_params(request)[0]:
+        return None
+    return require_payment(
+        request,
+        price=price,
+        resource=resource,
+        description=description,
+        extensions=extensions,
+        resource_path=resource_path,
+    ).error
 
 
 def require_paid_request(

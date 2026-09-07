@@ -275,6 +275,26 @@ become an excuse to defer proving the one thing the deadline depends on.
     the actual running code, how a payer verifies the proof) before any
     code — same "needs explicit human design decision" flag as the items
     below.
+26. **Algorand Open Registry** (owner idea, 2026-09-07, named 2026-09-07) —
+    a GitHub-style curated list (like an "awesome-X" list) where builders
+    submit their own Algorand project/product with a category, and PXke
+    publishes it as a reference/visibility page. Purpose is visibility, not
+    revenue — the operator's own words: "we don't have fucking visibility."
+    Distinct from item 3's x402 directory (paid, x402-native endpoints
+    only): this is a broader Algorand-ecosystem showcase, open to any
+    project regardless of x402 support. Design done (see
+    `docs/awesome-algorand-directory-design.md`): 17 categories, multiple
+    free tags per entry, a submit-time + periodic liveness check on every
+    listed page, free/anonymous human-reviewed submissions, featured tier
+    deferred to v1.1. No build started yet — remaining owner calls before
+    code are in that doc's §9 (contact field, seed scope, LLM blurb
+    helper, exact path).
+26b. **Algorand builder Discord/community channel** (owner idea, 2026-09-07)
+    — operator's read: the official Algorand Discord's builder space is
+    thin (one subchannel) and over-moderated. Idea is a PXke-run builder
+    channel as an alternative gathering point, likely feeding item 26's
+    directory. Not scoped, not started — a community/ops decision, not an
+    engineering task yet.
 
 **Sequencing note**: items 1, 2, 4 are the cheapest next builds after Phase 0
 proves out — same shape as the directory, no new infra or fund-custody

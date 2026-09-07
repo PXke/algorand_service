@@ -49,6 +49,7 @@ from app.core.config import (
     MISTRAL_MODEL_RESEARCH,
     MISTRAL_MODEL_TRANSLATE,
     MISTRAL_MODEL_WRITER,
+    mistral_configured,
 )
 from app.modules.ai.llm_openai_compatible import (
     DeepSeekProvider,
@@ -107,6 +108,30 @@ def _select_provider(purpose: str) -> str:
     if provider == "glm" and not GLM_API_KEY.strip():
         raise LLMError(f"LLM_PROVIDER_{purpose.upper()} resolved to glm but GLM_API_KEY is not set")
     return provider
+
+
+def purpose_provider_configured(purpose: str) -> bool:
+    """Is `purpose`'s CONFIGURED DEFAULT provider actually usable right now?
+
+    Checks LLM_PROVIDER_<PURPOSE>'s default against the matching API key --
+    deliberately ignores the canary roll (that only matters per-call, a
+    pre-flight "can this purpose compose at all" check needs the deterministic
+    primary path, not a random sample that could pass or fail depending on
+    the coin flip). Used by article_composer's pre-flight gate, which used to
+    hardcode a Mistral-only check (mistral_configured()) even after Mistral
+    was retired as the live writer provider -- see CLAUDE.md and this
+    module's own docstring -- so removing the now-dead MISTRAL_API_KEY would
+    have silently blocked every compose despite DeepSeek being configured and
+    working.
+    """
+    default_provider, _, _ = _PROVIDER_CONFIG[purpose]
+    if default_provider == "deepseek":
+        return bool(DEEPSEEK_API_KEY.strip())
+    if default_provider == "glm":
+        return bool(GLM_API_KEY.strip())
+    if default_provider == "mistral":
+        return mistral_configured()
+    return False
 
 
 def _client_for_purpose(

@@ -63,6 +63,19 @@ class StoredBackup:
     _backup_json). `content_hash` is a sha256 hex digest of the actual bytes,
     checked again on every restore (GET .../:backup_id) so silent corruption
     is caught rather than served.
+
+    `current_version` (migration 115) is the version number this row's own
+    connector/connector_params/size_bytes/content_hash/label currently
+    mirror -- 1 for a backup that has never had a version added (including
+    every row written before migration 115, which reads back
+    current_version=None, mapped to 1 in both stores' row mappers). This
+    row is ALWAYS what unversioned GET/list callers see (CLAUDE.md-adjacent
+    contract: "GET .../:backup_id still returns its current content the
+    same way it does today"). See services/backup_service.add_version and
+    StoredBackupVersion below for the per-version history this row's own
+    lifecycle does NOT track independently -- this row's own expiry is
+    still governed exactly as before (create/renew), unaffected by adding a
+    version other than which bytes/hash/size it now points at.
     """
 
     wallet: str
@@ -80,6 +93,7 @@ class StoredBackup:
     # (StoredListing, StoredPlacement). Replaced by a renewal's own txid,
     # same as those.
     settlement_tx_id: str = ""
+    current_version: int = 1
 
     @property
     def is_active(self) -> bool:
@@ -108,3 +122,68 @@ class ExpiryIndexRow:
 def expiry_day_utc(expires_at_epoch: int) -> date:
     """UTC calendar date of `expires_at_epoch` -- the expiry projection's partition key."""
     return datetime.fromtimestamp(expires_at_epoch, tz=UTC).date()
+
+
+@dataclass
+class StoredBackupVersion:
+    """One version's metadata + content pointer row (x402_storage_backup_versions, migration 115).
+
+    Written once at creation time (version 1 alongside every new
+    StoredBackup, or version N+1 by BackupService.add_version), and never
+    revised in place except the ONE later mutation delete()/delete_version()
+    make: flipping `status` to STATUS_DELETED, same "full re-INSERT, never a
+    partial UPDATE" rule as StoredBackup (CLAUDE.md section 3).
+
+    `expires_at_epoch` is computed fresh from THIS version's own
+    created_at_epoch (current_expires_at=None, exactly like a brand-new
+    create()) -- deliberately NEVER inherited from an older version, from
+    the head's remaining time, or extended by a later renew of the head.
+    This is what keeps the per-version retention ceiling independent: an
+    old, superseded version dies on its own original schedule regardless of
+    what happens to the backup_id's current content. The version currently
+    mirrored by the head (`StoredBackup.current_version`) is the one
+    exception -- its lifecycle is governed by the head's own expiry/renew,
+    not this row's own `expires_at_epoch` (see
+    services/reaper.py's `_reap_one_version`).
+    """
+
+    wallet: str
+    backup_id: str
+    version: int
+    connector: str
+    connector_params: dict[str, str] = field(default_factory=dict)
+    size_bytes: int = 0
+    content_hash: str = ""
+    label: str = ""
+    created_at_epoch: int = 0
+    expires_at_epoch: int = 0
+    status: str = STATUS_ACTIVE
+    settlement_tx_id: str = ""
+
+    @property
+    def is_active(self) -> bool:
+        """True unless this row has been soft-deleted."""
+        return self.status == STATUS_ACTIVE
+
+    def is_live(self, *, now_epoch: int) -> bool:
+        """True when this row is active AND has not passed its own expiry."""
+        return self.is_active and self.expires_at_epoch > now_epoch
+
+
+@dataclass(frozen=True, slots=True)
+class VersionExpiryIndexRow:
+    """One x402_storage_version_by_expiry projection row (migration 115).
+
+    Same shape and purpose as ExpiryIndexRow, one level down: enough to
+    find the canonical version row and to drop THIS projection row once it
+    has gone stale (status flipped to deleted, or -- the one case
+    ExpiryIndexRow never has to handle -- the version it points at is still
+    the backup's CURRENT content, in which case the head's own expiry
+    governs it and this row is dropped without touching the version or its
+    bytes; see reaper.py's `_reap_one_version`).
+    """
+
+    wallet: str
+    backup_id: str
+    version: int
+    expires_at_epoch: int

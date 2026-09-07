@@ -62,7 +62,7 @@
 />
 
 <div class="page stack">
-  <header>
+  <header class="page-head">
     <span class="accent-slug"></span>
     <p class="kicker">Glossary</p>
     <h1>Glossary</h1>
@@ -126,14 +126,6 @@
 </div>
 
 <style>
-  header h1 {
-    margin: 8px 0 0;
-    font-size: clamp(28px, 4vw, 34px);
-  }
-  .lead {
-    margin: 8px 0 0;
-    max-width: 42rem;
-  }
   .find {
     display: block;
     max-width: 420px;

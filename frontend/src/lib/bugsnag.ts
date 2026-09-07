@@ -2,11 +2,25 @@ import type { Breadcrumb } from '@bugsnag/browser'
 import { config } from './config'
 
 /**
- * Browser-side Bugsnag: passive client-side error monitoring, so real
- * user-facing JS bugs get caught even when nobody's watching devtools.
- * Mirrors the backend's init_bugsnag (backend/app/core/observability.py) —
- * opt-in on an env var, silent no-op if it's blank so local dev and test
- * runs never report.
+ * Browser-side Bugsnag: passive client-side error monitoring plus
+ * performance monitoring (full page loads, route changes, resource/network
+ * spans — auto-instrumented, no manual span code needed), so real
+ * user-facing JS bugs and slow page loads get caught even when nobody's
+ * watching devtools. Mirrors the backend's init_bugsnag
+ * (backend/app/core/observability.py) — opt-in on an env var, silent no-op
+ * if it's blank so local dev and test runs never report.
+ *
+ * Prod-minified stack traces are NOT yet fully deobfuscated on Bugsnag's
+ * side: build.sourcemap: 'hidden' (vite.config.ts) now generates real .map
+ * files, but nothing uploads them to Bugsnag, and 'hidden' deliberately
+ * omits the `//# sourceMappingURL` comment Bugsnag would otherwise use to
+ * fetch a map on its own — so this is a real prerequisite met, not the
+ * whole fix. Remaining step: an `@bugsnag/source-maps` (or the CLI)
+ * upload-and-associate call in the deploy pipeline after `vite build`,
+ * keyed by the same VITE_APP_VERSION/git-SHA already stamped below, gated
+ * the same opt-in way as everything else here. Blocked on a real frontend
+ * notifier key (see deploy/deploy.conf's FRONTEND_BUGSNAG_API_KEY, blank in
+ * every checked-in env file).
  */
 
 // Matches a full Algorand address (58-char base32, A-Z2-7). Truncated
@@ -93,7 +107,21 @@ export function initBugsnag(): void {
           // Bugsnag reads from automatically.
         },
       })
+      return Bugsnag
     })
+    .then((Bugsnag) =>
+      import('@bugsnag/browser-performance').then(({ default: BugsnagPerformance }) => {
+        BugsnagPerformance.start({
+          apiKey: config.bugsnagApiKey,
+          appVersion: config.appVersion || undefined,
+          releaseStage: 'production',
+          enabledReleaseStages: ['production'],
+          // Cross-links traces to error events (adds trace/span ids to
+          // Bugsnag.notify() reports) — same client instance started above.
+          bugsnag: Bugsnag,
+        })
+      }),
+    )
     .catch(() => {
       // Never let observability wiring break the app (matches the
       // try/except around bugsnag.configure() on the backend).

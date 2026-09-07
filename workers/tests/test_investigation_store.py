@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 
 import pytest
 
@@ -171,12 +172,15 @@ def test_load_investigation_trace_reads_past_the_old_25_row_limit(
 
 
 class _Row:
-    """A fake investigation_findings row with settable tool/arguments/result_json."""
+    """A fake investigation_findings row with settable tool/arguments/result_json/created_at."""
 
-    def __init__(self, tool: str, arguments: dict, result: dict) -> None:
+    def __init__(
+        self, tool: str, arguments: dict, result: dict, created_at: datetime | None = None
+    ) -> None:
         self.tool = tool
         self.arguments = json.dumps(arguments)
         self.result_json = json.dumps(result)
+        self.created_at = created_at
 
 
 class _FakeSession:
@@ -290,3 +294,50 @@ def test_format_prior_search_x_block_renders_query_and_posts() -> None:
 def test_format_prior_search_x_block_empty_findings_returns_empty_string() -> None:
     """No prior findings -> empty block, so callers can pass it straight through as enrichment_block with no conditional."""
     assert format_prior_search_x_block([]) == ""
+
+
+def test_load_prior_search_x_findings_carries_created_at_through(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The row's own clustering timestamp reaches the returned finding — the block's "judge this against today's date" instruction depends on it, and until 2026-09-05 the LIST statement never selected it, so the instruction's one required input could never be supplied."""
+    fetched = datetime(2026, 8, 30, 14, 5, tzinfo=UTC)
+    rows = [
+        _Row(
+            "search_x",
+            {"query": "algorand quantum"},
+            {"posts": [{"text": "hit"}]},
+            created_at=fetched,
+        )
+    ]
+    _patch_session(monkeypatch, rows)
+
+    findings = load_prior_search_x_findings("svc")
+    assert len(findings) == 1
+    assert findings[0]["created_at"] == fetched
+
+
+def test_format_prior_search_x_block_renders_per_query_fetch_date() -> None:
+    """Each query section is labeled with the UTC date its result was actually fetched, so the writer can judge the data's age instead of being told to judge an age it was never given."""
+    findings = [
+        {
+            "query": "algorand quantum",
+            "result": {"posts": [{"text": "hit", "likes": 1, "reposts": 0, "replies": 0}]},
+            "created_at": datetime(2026, 8, 30, 14, 5, tzinfo=UTC),
+        }
+    ]
+    block = format_prior_search_x_block(findings)
+    assert '### X search: "algorand quantum" (fetched 2026-08-30 UTC)' in block
+    assert "labeled with the UTC date it was actually fetched" in block
+
+
+def test_format_prior_search_x_block_omits_date_when_created_at_missing() -> None:
+    """A finding with no created_at (an old caller/test double) renders without a fetched label rather than fabricating a date or raising."""
+    findings = [
+        {
+            "query": "algorand quantum",
+            "result": {"posts": [{"text": "hit", "likes": 1, "reposts": 0, "replies": 0}]},
+        }
+    ]
+    block = format_prior_search_x_block(findings)
+    assert '### X search: "algorand quantum"\n' in block
+    assert "fetched" not in block.split("\n\n", 2)[2]  # no per-query label in the sections

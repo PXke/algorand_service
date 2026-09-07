@@ -91,7 +91,7 @@
 />
 
 <div class="page stack">
-  <header>
+  <header class="page-head">
     <span class="accent-slug"></span>
     <p class="kicker">{t($messages, 'navNews')}</p>
     <h1>{title ?? t($messages, 'newsFeedTitle')}</h1>
@@ -141,20 +141,6 @@
 </div>
 
 <style>
-  header {
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-  }
-  h1 {
-    margin: 0;
-    font-size: clamp(28px, 4vw, 34px);
-    line-height: 1.15;
-  }
-  .lead {
-    margin: 0;
-    max-width: 42rem;
-  }
   .empty {
     padding: 28px 0;
     text-align: start;

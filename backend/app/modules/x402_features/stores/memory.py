@@ -22,6 +22,13 @@ class InMemoryFeatureStore:
         self._totals: dict[str, int] = {}
         self._votes: dict[str, list[StoredVote]] = {}
         self._claims: dict[str, list[StoredClaim]] = {}
+        # Lifecycle status (migration 119), kept as its own dict rather than a
+        # mutated field on the StoredFeatureRequest object: a missing entry
+        # means "no status set yet" (pending), matching how get_statuses
+        # documents a missing id, and it mirrors the Cassandra backend's own
+        # separate-column-read shape (get_statuses/update_status) rather than
+        # coupling to a particular in-memory representation of the item.
+        self._statuses: dict[str, str] = {}
         # Guards the vote total specifically. `self._totals[id] += 1` is a
         # read-modify-write, and CPython's bytecode for it is interruptible
         # between the read and the write -- two threads voting on the same
@@ -98,7 +105,34 @@ class InMemoryFeatureStore:
         with self._lock:
             existed = self._items.pop(request_id, None) is not None
             self._claims.pop(request_id, None)
+            self._statuses.pop(request_id, None)
         return existed
+
+    def has_claimed(self, request_id: str, wallet: str) -> bool:
+        """Whether `wallet` has ever claimed this request, within the same bound get_claim_summaries uses.
+
+        Sorted and cut the same way (claimed_at DESC, claimer ASC, LIMIT
+        CLAIMS_SCAN_LIMIT) so a claim outside that window is "not found" here
+        too -- the same documented degradation the claim count already
+        accepts, rather than a stricter or looser check depending on which
+        method happens to look.
+        """
+        with self._lock:
+            claims = self._claims.get(request_id, [])
+            ordered = sorted(claims, key=lambda c: (-c.claimed_at_epoch, c.claimer))[
+                :CLAIMS_SCAN_LIMIT
+            ]
+            return any(c.claimer == wallet for c in ordered)
+
+    def update_status(self, request_id: str, status: str) -> None:
+        """Set a request's lifecycle status."""
+        with self._lock:
+            self._statuses[request_id] = status
+
+    def get_statuses(self, request_ids: list[str]) -> dict[str, str]:
+        """Return each request's lifecycle status, keyed by request id. Missing = pending."""
+        with self._lock:
+            return {rid: self._statuses[rid] for rid in request_ids if rid in self._statuses}
 
     def claims_for(self, request_id: str) -> list[StoredClaim]:
         """Return a request's claims. Test/dev helper -- not on the Protocol."""

@@ -37,7 +37,7 @@ Not on PyPI yet, but self-hosted -- install straight from our own server, no
 PyPI account needed on either side:
 
 ```bash
-pip install https://algorand-api.pxke.me/sdk/pxke_x402-0.1.0.tar.gz
+pip install https://algorand-api.pxke.me/sdk/latest.tar.gz
 ```
 
 Or skip pip entirely and just grab the single-file version:

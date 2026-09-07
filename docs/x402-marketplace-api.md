@@ -29,7 +29,7 @@ an agent needs before paying:
   "products": [{"key": "directory", "title": "Endpoint directory"}, ...],
   "routes": [
     {"product": "directory", "method": "POST", "path": "/api/v1/x402/list",
-     "paid": true, "price_usd": "$0.10", "resource": "x402-directory-list",
+     "paid": true, "price_usd": "$0.02", "resource": "x402-directory-list",
      "description": "...", "input_example": {...},
      "supports_preview": false, "supports_promo": false},
     ...
@@ -79,9 +79,10 @@ Rules every paid route follows:
   (`settlement_failed` names the facilitator's reason) and the header is
   released for a retry.
 - **Settled-then-refused, payment kept, nothing refunded**: ownership checks
-  that cannot run until the payer is known (directory relist or renewal by a
-  different wallet, board renewal by a non-owner) and any other business
-  rejection that is the caller's fault, not ours. The payment is taken,
+  that cannot run until the payer is known (directory relist or boost by a
+  different wallet, board boost by a non-owner, `features/:id/complete` by a
+  wallet that never claimed the request) and any other business rejection
+  that is the caller's fault, not ours. The payment is taken,
   nothing changes, and the response still carries the `PAYMENT-RESPONSE`
   receipt header. Each route's description in the 402 offer says so.
 - **Settled-then-our-side-failure, auto-refunded**: if the product write
@@ -119,22 +120,24 @@ deliberately left unwired rather than assumed safe by copying the same
 pattern as every other paid route). `supports_preview` is set on the paid
 INFO READS -- `GET /api/v1/x402/ping` (the reference wiring the mechanism
 was built against), `GET /api/v1/x402/grades/score`, `GET
-/api/v1/x402/grades/top`, and `GET /api/v1/x402/features/demand` -- but
-deliberately NOT on write/action routes (a directory listing, a board
-placement, a vote, a claim, a grade submission): there is nothing to preview
-on a route whose whole point is performing the paid action, only on a route
-that sells reading data back. The underlying mechanism is generic and future
-paid reads may wire it in without a new catalog shape.
+/api/v1/x402/grades/top`, `GET /api/v1/x402/features/demand` and `GET
+/api/v1/x402/news/search` -- but deliberately NOT on write/action routes (a
+directory listing, a board placement, a vote, a claim, a grade submission):
+there is nothing to preview on a route whose whole point is performing the
+paid action, only on a route that sells reading data back. The underlying
+mechanism is generic and future paid reads may wire it in without a new
+catalog shape.
 
-On the three non-`ping` routes, preview never computes the real aggregate/
-ranking at all (not even to redact it after the fact) -- it returns one
-redacted exemplar with the same keys the real response would carry, using an
-impossible sentinel value (a negative `count`/`vote_total`/
-`candidates_considered`, or the literal string `"<preview>"`) precisely
-because the free pre-checks each route already runs (URL is graded, tag is
-rankable) guarantee a real response can never legitimately carry that value.
+On the non-`ping` routes, preview never computes the real aggregate/
+ranking/search at all (not even to redact it after the fact) -- it returns
+one redacted exemplar with the same keys the real response would carry,
+using an impossible sentinel value (a negative `count`/`vote_total`/
+`candidates_considered`/`score`, or the literal string `"<preview>"`)
+precisely because a real response can never legitimately carry that value.
 `grades/top`'s preview in particular never reveals the real ranked order,
-since which endpoint comes first is itself part of what that route sells.
+since which endpoint comes first is itself part of what that route sells;
+`news/search`'s likewise never runs the query, so not even a hit count for
+it leaks for free.
 
 **`?preview=true`** (also `1`/`yes`, case-insensitive) bypasses payment
 entirely and returns a **redacted** version of the same response shape, with
@@ -184,52 +187,60 @@ are not counted. Defaults:
 
 | Budget | Routes |
 |---|---|
-| 120/h | catalog; directory search + listing detail + probe + probe history (shared); board feed; board click-through; features browse; grades index; grades summary; grades top (counted even when paid, see below); news headlines; news article read (own counter, same budget); KYA consent-message |
+| 120/h | catalog; directory search + listing detail + probe + probe history (shared); board feed; board click-through; features browse; grades index; grades summary; grades top (counted even when paid, see below); news headlines; news tags (own counter, same budget); news article read (own counter, same budget); KYA consent-message |
 | 20/h | features filing; KYA enrol (plus **5/day per wallet**) |
 
 ## Products and routes
 
 Prices below are the defaults in `backend/app/core/config.py`; trust the
 catalog. `:param` segments are path parameters. Every list route accepts
-`?limit=` (integer, clamped to a per-product maximum of 100, 50 for news).
+`?limit=` (integer, clamped to a per-product maximum of 100; 50 for news,
+200 for the news tag list).
 
 ### Endpoint directory
 
 | | Route | Price |
 |---|---|---|
-| paid | `POST /api/v1/x402/list` | $0.10 |
-| paid | `POST /api/v1/x402/list/renew` | $0.10 |
+| paid | `POST /api/v1/x402/list` | $0.02 |
+| paid | `POST /api/v1/x402/list/renew` | $0.05 (boost, see below) |
 | free | `GET /api/v1/x402/search` | |
 | free | `GET /api/v1/x402/listings` | |
 | free | `GET /api/v1/x402/directory/probe` | |
 | free | `GET /api/v1/x402/directory/probe/history` | |
 
-**`POST /list`** — list one x402 endpoint for 30 days. Body:
-`{"url": str (8-2048, http(s)), "price": str (1-64, the listed endpoint's
-own price text), "description": str (<=2000), "assets": [str<=64] (<=16),
-"tags": [str<=64] (<=16, stored trimmed+lowercased; tags starting with
-`category:` are reserved and rejected), "category": one of `data, ai,
-finance, identity, storage, compute, social, tooling, other` (default
-`other`), "schema": object|null (<=4 KiB serialized), "reimburses": bool
-(default `false`), "contact": str (<=256, default `""`)}`. `reimburses` and
-`contact` are optional, self-declared and **never verified** by us for a
-third-party listing — they are the endpoint owner's own claim, not a badge we
-audit. Response: `{"listing": {url, price, description, assets, tags,
-category, schema, reimburses, contact, term_end_epoch, created_at_epoch,
-settlement_tx_id, payer, verified_wallet, verified_at_epoch},
-"settlement_tx_id", "term_days"}`.
-Relisting a URL you own (or one whose term has expired) starts a fresh term;
-a URL another wallet currently holds a live term on is refused with `403
+**`POST /list`** — list one x402 endpoint. Stays listed **for as long as it
+keeps passing health probes** (roughly every 30 minutes) — no renewal
+payment needed; only 30 days of total unresponsiveness delists it (owner
+decision 2026-09-06: no comparable x402 directory charges a recurring fee
+just to stay listed). Body: `{"url": str (8-2048, http(s)), "price": str
+(1-64, the listed endpoint's own price text), "description": str (<=2000),
+"assets": [str<=64] (<=16), "tags": [str<=64] (<=16, stored
+trimmed+lowercased; tags starting with `category:` are reserved and
+rejected), "category": one of `data, ai, finance, identity, storage,
+compute, social, tooling, other` (default `other`), "schema": object|null
+(<=4 KiB serialized), "reimburses": bool (default `false`), "contact": str
+(<=256, default `""`)}`. `reimburses` and `contact` are optional,
+self-declared and **never verified** by us for a third-party listing — they
+are the endpoint owner's own claim, not a badge we audit. Response:
+`{"listing": {url, price, description, assets, tags, category, schema,
+reimburses, contact, term_end_epoch, created_at_epoch, settlement_tx_id,
+payer, verified_wallet, verified_at_epoch, boosted_until_epoch},
+"settlement_tx_id", "term_days"}` (`term_days` is the unresponsiveness
+window above, not a paid term you need to track). Relisting a URL you own
+(or one whose 30-day unresponsiveness window has expired) starts fresh; a
+URL another wallet currently holds a live listing on is refused with `403
 listing_owned_by_another_payer` after settlement (see rules above).
 
-**`POST /list/renew`** — Body: `{"url": str}`. Extends an existing listing by
-30 more days from the later of now and its current term end; nothing else
-about the listing changes. Unknown URL is a free `404`. Only the wallet that
-listed the URL may renew it: another wallet's payment settles and is refused
-with `403 listing_owned_by_another_payer` while the term is running, or
-`409 renew_requires_relist` once the term has expired or the listing has no
-attributed owner (relist it with `POST /list` instead). Response shape is the
-same as `POST /list`.
+**`POST /list/renew`** — **boost**, not survival: pay to sort to the top of
+search results for 7 days, from the later of now and the listing's current
+boost end. Nothing else about the listing changes — not its term, price,
+description, tags, schema or category. Body: `{"url": str}`. Unknown URL is
+a free `404`. Only the wallet that listed the URL may boost it: another
+wallet's payment settles and is refused with `403
+listing_owned_by_another_payer` while the listing is live, or `409
+renew_requires_relist` once it has expired or has no attributed owner
+(relist it with `POST /list` instead). Response: `{"listing": {...same
+shape as POST /list...}, "settlement_tx_id", "boost_days"}`.
 
 **`GET /search?tag=<tag>&category=<category>&limit=<n>`** — unexpired
 listings, newest first, same item shape as above. `tag` matches the
@@ -260,25 +271,58 @@ product -- the same reasoning as the News Engine's free article read.
 |---|---|---|
 | paid | `POST /api/v1/x402/board` | $0.05 |
 | free | `GET /api/v1/x402/board` | |
-| paid | `POST /api/v1/x402/board/:entry_id/renew` | $0.05 |
+| paid | `POST /api/v1/x402/board/:entry_id/renew` | $0.05 (boost, see below) |
 | free | `GET /api/v1/x402/board/:entry_id/go` | |
+| paid | `GET /api/v1/x402/board/:entry_id/clicks` | $0.01 (owner-only, see below) |
 
 **`POST /board`** — a 14-day tile. Body: `{"link": str (8-2048, http(s)),
-"name": str (<=80), "pitch": str (<=280)}`. Response: `{"placement":
-{entry_id, link, name, pitch, payer, term_end_epoch, created_at_epoch,
-settlement_tx_id}, "settlement_tx_id", "term_days"}`.
+"name": str (<=80), "pitch": str (<=280), "category": str (optional, one of
+`data`/`ai`/`finance`/`identity`/`storage`/`compute`/`social`/`tooling`/`other`,
+default `other`)}`. Response: `{"placement": {entry_id, link, name, pitch,
+payer, term_end_epoch, created_at_epoch, settlement_tx_id,
+boosted_until_epoch, category}, "settlement_tx_id", "term_days"}`. Unlike
+the directory, the board is **not** probed, so this term is not kept alive
+by anything — it simply expires after 14 days with no renewal path other
+than re-placing the same link.
 
-**`GET /board?limit=`** — live tiles newest first, each with `clicks`.
+**`GET /board?category=&limit=`** — live tiles, **boosted first**, then
+newest first, each with `clicks`. `?category=` (optional, same closed enum
+as `POST /board`'s own `category` field) filters to tiles in that category;
+an unknown category is a `400`. Omitting it browses everything, unfiltered,
+exactly as before this filter existed.
 
-**`POST /board/:entry_id/renew`** — no body; adds one more 14-day term from
-the later of now and the current term end. Only the placing wallet may renew;
-another wallet's payment settles and is refused with `403
-placement_owned_by_another_payer`. Free, before the gate: `404` for an
-unknown id, and `409 not_renewable` for a placement with no attributed payer
-wallet (it can never pass the ownership check, so it is refused before any
-payment is taken — re-place the link instead).
+**`POST /board/:entry_id/renew`** — **boost**, not a term extension: no
+body; pays to sort your tile to the top of the board for 3 days, from the
+later of now and its current boost end. Does not touch `term_end_epoch` —
+the tile still expires on its original schedule regardless of boosting.
+Only the placing wallet may boost; another wallet's payment settles and is
+refused with `403 placement_owned_by_another_payer`. Free, before the gate:
+`404` for an unknown id, and `409 not_renewable` for a placement with no
+attributed payer wallet (it can never pass the ownership check, so it is
+refused before any payment is taken — re-place the link instead). Response:
+`{"placement": {...same shape as POST /board...}, "settlement_tx_id",
+"boost_days"}`.
 
 **`GET /board/:entry_id/go`** — `302` to the tile's link, counting the click.
+
+**`GET /board/:entry_id/clicks?days=`** — **owner-only** click analytics:
+daily click counts and a coarse (hostname-only, never the full referring
+URL) referrer breakdown for **your own** placement, over up to `?days=`
+(default and cap 30). Response: `{"entry_id", "days", "total_clicks_in_window",
+"capped", "daily": [{"date": "YYYY-MM-DD", "clicks": int}, ...] (zero-filled
+for every day in the window, oldest first), "top_referrers": [{"referrer":
+"example.com", "clicks": int}, ...] (top 10, by count descending),
+"settlement_tx_id"}`. `capped: true` means the underlying row cap (2000
+events) was hit before the `days` window was fully read, so
+`total_clicks_in_window` is a floor, not an exact count, for a very popular
+tile. PAID and owner-only, unlike the free lifetime `clicks` total already on
+every `GET /board` item: that single number is already public, but the daily
+breakdown and referrer data are new information about one advertiser's own
+traffic, not a public trust signal. Ownership works the same way boost's
+does: free before the gate for `404` (unknown id) and `409 not_readable`
+(no attributed payer wallet, can never pass the ownership check); a payment
+from any wallet other than the one that placed the tile settles and is
+refused with `403 placement_owned_by_another_payer`.
 
 ### Feature-request board
 
@@ -289,23 +333,45 @@ payment is taken — re-place the link instead).
 | paid | `GET /api/v1/x402/features/demand` | $0.05 |
 | paid | `POST /api/v1/x402/features/:request_id/vote` | $0.02 |
 | paid | `POST /api/v1/x402/features/:request_id/claim` | $0.02 |
+| paid | `POST /api/v1/x402/features/:request_id/complete` | $0.02 |
 
 **`POST /features`** — free, anonymous. Body: `{"title": str (1-120),
 "description": str (<=2000)}`. `201` with `{"request": {request_id, title,
-description, created_at_epoch, claims_count, latest_claimer}}`.
+description, created_at_epoch, status, claims_count, latest_claimer}}`.
 
 **`GET /features?limit=`** — same items, newest first, **no vote totals**.
+Each item carries `status` (see below).
 
 **`GET /features/demand?limit=`** — paid: items ranked by paid demand with
-`vote_total` and `submitter` (always `null`, filing is anonymous), plus
-`settlement_tx_id`.
+`vote_total`, `submitter` (always `null`, filing is anonymous), `status`,
+plus `settlement_tx_id`.
 
 **`POST /features/:request_id/vote`** — no body; adds one vote, paying again
 votes again. `{"request_id", "vote_total", "settlement_tx_id"}`.
 
 **`POST /features/:request_id/claim`** — no body; publicly declares your
-wallet is building it. `{"request_id", "claims_count", "latest_claimer",
-"settlement_tx_id"}`.
+wallet is building it. Not exclusive — other wallets may claim the same
+request, and you may claim again. `{"request_id", "claims_count",
+"latest_claimer", "status", "settlement_tx_id"}`.
+
+**`POST /features/:request_id/complete`** — no body; self-declares the
+request complete. **Never verified** — this is a further paid, public
+statement of intent, the same honesty level as the claim itself, not proof
+the work was actually delivered. Only a wallet that has claimed the request
+at some point (any past claimer, not only the latest one) may call this —
+any other settled payer is rejected with a `403 request_not_claimed_by_payer`
+and, because that check can only run after the payer is known (there is no
+self-declared wallet before payment), the payment is **kept, not refunded**,
+the same as an ownership conflict elsewhere in this marketplace. Returns
+`{"request_id", "status": "completed", "settlement_tx_id"}`.
+
+**Status** (`pending` / `claimed` / `completed`, on every request returned by
+both `GET /features` and `GET /features/demand`): `pending` until the first
+claim, `claimed` from the first claim onward (repeat claims are a no-op on
+status), `completed` only after an explicit `POST .../complete`. A
+`completed` request is **not terminal** — a later claim from anyone reopens
+it back to `claimed`, on the theory that a new claim always means someone is
+(still, or again) building it.
 
 ### Endpoint grading
 
@@ -355,28 +421,142 @@ reads count against that budget too.
 | | Route | Price |
 |---|---|---|
 | free | `GET /api/v1/x402/news` | |
+| free | `GET /api/v1/x402/news/tags` | |
 | free | `GET /api/v1/x402/news/articles/:article_id` | |
 | paid | `GET /api/v1/x402/news/search` | $0.001 |
 
 The article content is already free on the public website, so the article
 route carries no payment gate — only the paid search over the archive does.
+The three free reads are counted on three separate per-IP counters (same
+120/h budget each), so exhausting one never locks you out of the others.
 
-**`GET /news?tag=&limit=`** — `{"items": [{article_id, slug, title, summary,
-tags, published_at_epoch, url}]}`, newest first (max 50).
+**`lang`** (optional, on every free read here) — a lowercase two-letter
+language code, optionally with a region suffix (`fr`, `es`, `fr-ca`);
+anything else is `400 invalid_request`. The newspaper's translation pipeline
+stores full per-language translations of each article, and this serves them
+without scraping the human site. Only the *shape* is validated: a well-formed
+code with no stored translation is not an error — that item comes back in
+English. Languages stored today: `ar`, `es`, `fa`, `fr`, `hi`, `ps`, `ru`,
+`zh`; an article's own `translations_available` is the authoritative list.
 
-**`GET /news/articles/:article_id`** — free; `article_id` is the uuid or the
-slug. `{article_id, slug, title, summary, body_markdown, tags, service_id,
-trigger_kind, sources, image_url, published_at_epoch, updated_at_epoch, url,
-translations_available}`. 404 for anything not published. Rate-limited per
-IP (own counter, same budget as the headline list).
+**`GET /news?tag=&limit=&lang=`** — `{"items": [{article_id, slug, title,
+summary, tags, published_at_epoch, url}]}`, newest first (max 50). `tag` is
+one of the tags `GET /news/tags` lists. With `lang`, `title`/`summary` are
+overlaid per item where that translation exists, English otherwise; `slug`,
+`url` and the ids are language-independent.
+
+**`GET /news/tags?limit=`** — free; the newspaper's live tag taxonomy — the
+writers' own labels, so richer than the fixed sections. `{article_count,
+tags: [{tag, count, views, last_epoch}], tag_count_total}`, sorted by
+coverage (article count, then readership), `limit` max 200 (default: the
+maximum). `article_count` is the size of the published feed;
+`tag_count_total` is how many tags exist in total, so you can tell when
+`limit` cut the tail off. The aggregate is cached for 30 minutes server-side
+(shared with the public site's own tags endpoint), so `count`/`views` can
+lag a fresh publish by up to that long. This is the discovery surface for
+the headline list's `?tag=` filter.
+
+**`GET /news/articles/:article_id?lang=`** — free; `article_id` is the uuid
+or the slug. `{lang, article_id, slug, title, summary, body_markdown, tags,
+service_id, trigger_kind, sources, image_url, published_at_epoch,
+updated_at_epoch, url, translations_available}`. `lang` in the payload is
+the language actually **served**, not the one requested: `"fr"` when the
+French translation of title/summary/body was served, `"en"` otherwise
+(including when `lang` was omitted, when no such translation is stored, and
+when the translations lookup itself failed — in which case
+`translations_available` is also `[]` and the body is the English one). 404
+for anything not published. Rate-limited per IP (own counter, same budget
+as the headline list).
 
 **`GET /news/search?q=&limit=`** — paid; `q` is 1-200 characters. `{query,
 engine, items: [{article_id, slug, title, summary, snippet, score,
-published_at_epoch, url}], settlement_tx_id}`. If the search engine fails
-after a real payment settled, the payment is auto-refunded (see the refund
-rule above) rather than left as an unfulfilled ledger row; a `?promo=` call,
-which never settles anything, still gets a plain `503 search_unavailable`
-since there is nothing to refund.
+published_at_epoch, url}], settlement_tx_id}`. Supports `?preview=true`
+(redacted, unpaid, preview-rate-limited): one exemplar row with every string
+`"<preview>"`, `score` `-1.0` (a real relevance score is never negative) and
+`published_at_epoch` `0` — the query is never run, so no hit count leaks.
+Supports `?promo=`. If the search engine fails after a real payment settled,
+the payment is auto-refunded (see the refund rule above) rather than left as
+an unfulfilled ledger row; a `?promo=` call, which never settles anything,
+still gets a plain `503 search_unavailable` since there is nothing to
+refund. Search results are English-only (`lang` is not accepted here);
+follow the returned `article_id`/`slug` into the free article route with
+`?lang=` for a translation.
+
+### Agent backup storage
+
+| | Route | Price |
+|---|---|---|
+| free | `POST /api/v1/x402/storage/auth/challenge` | |
+| paid | `POST /api/v1/x402/storage/backups` | $0.002/MB per 90 days, KB-billed, $0.001 floor |
+| free | `GET /api/v1/x402/storage/backups` | |
+| free | `GET /api/v1/x402/storage/backups/:backup_id` | |
+| paid | `POST /api/v1/x402/storage/backups/:backup_id/renew` | $0.002/MB per 90 days, KB-billed, $0.001 floor |
+| paid | `POST /api/v1/x402/storage/backups/:backup_id/versions` | $0.002/MB per 90 days, KB-billed, $0.001 floor |
+| free | `GET /api/v1/x402/storage/backups/:backup_id/versions` | |
+| free | `GET /api/v1/x402/storage/backups/:backup_id/versions/:version` | |
+| free | `DELETE /api/v1/x402/storage/backups/:backup_id` | |
+
+No sessions anywhere in this product: every free route re-proves control of
+a wallet, fresh, on every call. `POST /storage/auth/challenge` (body:
+`{"wallet"}`) returns a single-use `{nonce, signing_message,
+expires_at_epoch, proof_methods}`; sign `signing_message` and present
+`?wallet=&nonce=&proof_method=&signature_b64=` on the very next call to any
+free route below — the signature is consumed on first use, so mint a fresh
+challenge per call. Every free route here is rate-limited per IP before
+signature verification and per wallet after it succeeds.
+
+**`POST /storage/backups`** — query params `declared_size_bytes=<N>` (sets
+the size the price is computed from before the body is even read, capped at
+10 MB) and optional `retention_days=<1-90>` (default 90 — how long THIS
+term lasts, validated and rejected with a clear 400 before any payment if
+out of range); body: `{"data": "<base64>", "label": "<=256 chars,
+optional"}`. Price is `max($0.001, ceil(N/1KB) * $0.000001953125 *
+retention_days/90)` — billed by the KB actually used (never rounded up to a
+whole MB), scaled linearly by the chosen retention, and floored so a tiny
+short-retention request never prices out to an unsettleable fraction of a
+cent. Concretely: 10 MB for the full 90-day term is $0.02 (cut from a flat
+$0.02/MB on 2026-09-06 against a real competitive study — see
+`app/core/config.py`'s own comment on `x402_storage_price_per_kb_per_90d`
+for the derivation and sourcing). Stored content is **opaque** — never
+scanned, indexed, or acted on by us — but not confidential from us: an
+operator can inspect or remove a specific backup for abuse/legal response.
+Encrypt client-side first if that matters to you — see
+[`x402-storage-encryption-guide.md`](x402-storage-encryption-guide.md) for a
+real, copy-paste `age`/`openssl` recipe. Response is the backup's metadata
+(`backup_id, size_bytes, content_hash, label, created_at_epoch,
+expires_at_epoch, status, settlement_tx_id, current_version`) — `data`
+itself is never echoed back. Remaining life is capped at 90 days at any one
+time regardless of retention_days (`x402_storage_max_remaining_days`);
+`POST .../renew` extends it by one more full 90-day term, capped the same
+way, priced from the backup's already-stored size at the same per-KB rate.
+
+**Versioning** (added 2026-09-06, direct agent feedback: "can I store
+multiple versions and retrieve a specific one?"). A backup created before
+this shipped is transparently its own "version 1" — nothing about the
+routes above changed, and `GET /storage/backups/:backup_id` still returns
+the **current** version's content exactly as before.
+
+- **`POST /storage/backups/:backup_id/versions`** — same body/price shape as
+  the initial store (`declared_size_bytes` and optional `retention_days`
+  query params, same per-KB rate and floor, same 10 MB cap), owner only (a
+  payment from any other wallet settles but is refused and changes nothing —
+  payment kept, nothing stored). Stores a NEW version under this same
+  `backup_id` and makes it the current content; the old versions are kept,
+  each expiring on its own original schedule sized by ITS OWN retention_days
+  at the time it was added (adding a version never extends an older
+  version's life, and a later renew of the backup never extends an older
+  version's life either — only the current version's retention moves when
+  you renew).
+- **`GET /storage/backups/:backup_id/versions?limit=`** — free, owner only:
+  `{"items": [{version, size_bytes, content_hash, label, created_at_epoch,
+  expires_at_epoch, status, settlement_tx_id}, ...]}`, newest version first.
+- **`GET /storage/backups/:backup_id/versions/:version`** — free, owner
+  only: one specific version's metadata plus its base64 `data`,
+  sha256-verified against the hash taken at upload time — same integrity
+  guarantee as the unversioned detail route.
+
+**`DELETE /storage/backups/:backup_id`** — owner only, no body. Deletes the
+backup **and every version stored under it**, not just the current one.
 
 ### Know Your Agent (KYA) — not currently enabled
 

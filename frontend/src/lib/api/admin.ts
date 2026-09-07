@@ -179,5 +179,23 @@ export function createAdminApi(wallet: string, token: string | null) {
       api.postJson('/api/v1/admin/x402/promo', body, h()),
     deletePromoCode: (code: string) =>
       api.deleteJson(`/api/v1/admin/x402/promo?code=${encodeURIComponent(code)}`, h()),
+    // Algorand Open Registry (roadmap item 26) -- free ecosystem-project
+    // directory review queue. See app/modules/ecosystem/.
+    listEcosystemQueue: (status = 'pending', signal?: AbortSignal) =>
+      api.getJson(`/api/v1/admin/ecosystem?status=${encodeURIComponent(status)}`, {
+        headers: h(),
+        signal,
+      }),
+    getEcosystemEntry: (slug: string) =>
+      api.getJson(`/api/v1/admin/ecosystem/${encodeURIComponent(slug)}`, h()),
+    decideEcosystemEntry: (slug: string, body: Record<string, unknown>) =>
+      api.postJson(`/api/v1/admin/ecosystem/${encodeURIComponent(slug)}/decision`, body, h()),
+    updateEcosystemEntry: (slug: string, body: Record<string, unknown>) =>
+      api.patchJson(`/api/v1/admin/ecosystem/${encodeURIComponent(slug)}`, body, h()),
+    deleteEcosystemEntry: (slug: string) =>
+      api.deleteJson(`/api/v1/admin/ecosystem/${encodeURIComponent(slug)}`, h()),
+    seedEcosystem: () => api.postJson('/api/v1/admin/ecosystem/seed', {}, h()),
+    draftEcosystemBlurb: (slug: string) =>
+      api.postJson(`/api/v1/admin/ecosystem/${encodeURIComponent(slug)}/draft-blurb`, {}, h()),
   }
 }

@@ -49,3 +49,36 @@ def test_describe_json_endpoint_without_body_type_declares_a_query_extension() -
         output_example={"ok": True},
     )
     assert result["bazaar"]["info"]["input"]["queryParams"] == {"wallet": "..."}
+
+
+def test_a_post_declared_without_body_type_fails_the_facilitator_validator() -> None:
+    """A body-less POST (vote/follow/renew) still needs body_type="json".
+
+    Found live 2026-09-05: the resource server injects the real HTTP method
+    into the declaration at request time, and the query-params schema only
+    admits GET/HEAD/DELETE -- so a POST declared without body_type emits an
+    extension the facilitator's own validator rejects, and the route is
+    silently never catalogued in the Bazaar. This pins the package behaviour
+    both ways: the query shape fails for a POST, the body shape (with an
+    empty example body) passes.
+    """
+    from types import SimpleNamespace
+
+    from x402.extensions.bazaar import (
+        bazaar_resource_server_extension,
+        validate_discovery_extension,
+    )
+
+    post_context = SimpleNamespace(method="POST")
+
+    as_query = bazaar_resource_server_extension.enrich_declaration(
+        describe_json_endpoint(output_example={"ok": True})["bazaar"], post_context
+    )
+    assert validate_discovery_extension(as_query).valid is False
+
+    as_body = bazaar_resource_server_extension.enrich_declaration(
+        describe_json_endpoint(body_type="json", output_example={"ok": True})["bazaar"],
+        post_context,
+    )
+    assert validate_discovery_extension(as_body).valid is True
+    assert as_body["info"]["input"]["body"] == {}

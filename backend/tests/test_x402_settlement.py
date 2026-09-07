@@ -360,13 +360,21 @@ def test_recent_real_settlements_looks_back_across_empty_days() -> None:
     assert [r.tx_id for r in result] == ["yesterday-tx"]
 
 
-def test_cassandra_list_for_day_reverses_the_ascending_page(
+def test_cassandra_list_for_day_preserves_the_stores_newest_first_order(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The Cassandra store's page comes back stored-order-ASC; list_for_day serves it newest-first."""
+    """Regression: list_for_day must not reverse the store's own order.
+
+    x402_settlements is CLUSTERING ORDER BY (settled_at DESC, ...) (migration
+    090), so a bare LIMIT read already comes back newest-first from
+    Cassandra -- list_for_day must pass that order through unchanged, not
+    reverse it (2026-09-06 fix: it used to wrongly reverse a newest-first
+    page into oldest-first, under the false belief the table defaulted to
+    ascending).
+    """
     rows = [
         SimpleNamespace(
-            settled_at=datetime.fromtimestamp(1000 + i, tz=UTC),
+            settled_at=datetime.fromtimestamp(1002 - i, tz=UTC),
             tx_id=f"tx-{i}",
             asset_id="31566704",
             amount_atomic="10000",
@@ -392,4 +400,4 @@ def test_cassandra_list_for_day_reverses_the_ascending_page(
 
     result = store.list_for_day("2026-08-30", limit=200)
 
-    assert [r.tx_id for r in result] == ["tx-2", "tx-1", "tx-0"]
+    assert [r.tx_id for r in result] == ["tx-0", "tx-1", "tx-2"]

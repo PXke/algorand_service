@@ -220,6 +220,12 @@ def _settled_result(payer: str = _PAYER, txid: str = "TX123") -> x402_guard.Paym
 # --------------------------------------------------------------------------- #
 # Fixtures and helpers
 # --------------------------------------------------------------------------- #
+@pytest.fixture(autouse=True)
+def _already_paid(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Skip the pre-parse 402 for header-less requests: every route test here models a request that already carries a payment (the gate is stubbed, or run against the offline facilitator), so the unpaid challenge is out of scope. Its ordering has its own tests in tests/test_x402_unpaid_challenge.py."""
+    monkeypatch.setattr(grading_routes, "challenge_if_unpaid", lambda *_a, **_kw: None)
+
+
 @pytest.fixture
 def store() -> InMemoryGradeStore:
     """A fresh in-memory grade store per test."""

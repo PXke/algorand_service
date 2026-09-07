@@ -20,6 +20,7 @@ from app.modules.admin.api.routes import register_admin_routes
 from app.modules.auth.api.routes import register_auth_routes
 from app.modules.chain.algod_proxy import register_algod_proxy
 from app.modules.contact.api.routes import register_contact_routes
+from app.modules.ecosystem.api.routes import register_ecosystem_routes
 from app.modules.glossary.api.routes import register_glossary_routes
 from app.modules.ingest.api.routes import register_ingest_routes
 from app.modules.kya.api.routes import register_kya_routes
@@ -151,6 +152,8 @@ def create_app() -> falcon.App:
     register_search_routes(router)
     register_contact_routes(router)
     register_glossary_routes(router)
+    if settings.ecosystem_enabled:
+        register_ecosystem_routes(router)
     register_sharing_routes(router)
     if settings.suggestions_enabled:
         register_suggestions_routes(router)

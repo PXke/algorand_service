@@ -110,9 +110,9 @@ def x402_ping(request: Request) -> Response:
         description=(
             "Integration test: proves your x402 client can build, sign and settle a real "
             "payment against this marketplace's facilitator setup at the lowest price we "
-            "offer, before you risk money on an actual product. Supports ?preview=true "
-            "(redacted, unpaid, rate-limited) and an admin-issued ?promo=CODE&"
-            "promo_wallet=ADDRESS bypass (real response, still no payment)."
+            "offer, before you risk money on an actual product. Try it free first with "
+            "?preview=true, a redacted, unpaid, rate-limited dry run of the same response "
+            "shape."
         ),
         extensions=describe_json_endpoint(
             input=None,
@@ -287,6 +287,10 @@ def register_x402_catalog_routes(app: Router) -> None:
     """Register the free catalog route, the free recent-settlements proof-of-volume feed, the paid ping, and the admin promo-code routes."""
     app.get(CATALOG_PATH)(x402_catalog)
     app.get("/api/v1/x402/settlements/recent")(x402_recent_settlements)
+    # x402-marketplace-ux-audit.md section 3.3 "meta": /settlements is the
+    # clarified name ("/recent" was the only mode there ever was); the old
+    # path stays registered to the identical handler, never removed.
+    app.get("/api/v1/x402/settlements")(x402_recent_settlements)
     app.get("/api/v1/x402/ping")(x402_ping)
     app.get("/api/v1/admin/x402/promo")(x402_admin_list_promo)
     app.post("/api/v1/admin/x402/promo")(x402_admin_create_promo)

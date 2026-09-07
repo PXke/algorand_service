@@ -168,3 +168,75 @@ def test_finalize_publish_releases_slot_and_reraises_on_insert_failure(
     # bookkeeping must run against a non-existent article.
     fanout_mock.assert_not_called()
     cadence_mock.assert_not_called()
+
+
+def test_finalize_publish_still_returns_published_when_fanout_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression test (2026-09-07 review): once insert_article succeeds, the article is ALREADY live -- a failure in the secondary fanout side-effect must not propagate uncaught.
+
+    Before this fix, an uncaught exception here escaped _finalize_publish
+    entirely, meaning the caller (_process_review_row/_publish_standard_row)
+    never got a result to hand to resolve() at all -- not delayed, never
+    called -- leaving the queue row looking pending and re-composable (a
+    real double-publish path) by the next drain, even though the article
+    was already live. Matches CLAUDE.md invariant 9's "budget checks fail
+    open with a log line" for the same class of secondary-write reliability
+    problem.
+    """
+    monkeypatch.setattr(publish_tasks, "insert_article", MagicMock(return_value=_ARTICLE_ID))
+    monkeypatch.setattr(
+        publish_tasks,
+        "fanout_after_publish",
+        MagicMock(side_effect=RuntimeError("cassandra timeout")),
+    )
+    cadence_mock = MagicMock()
+    monkeypatch.setattr(publish_tasks, "record_compose_cadence", cadence_mock)
+
+    result = publish_tasks._finalize_publish(
+        _row(),
+        {},
+        _composed(),
+        hero_image="",
+        image_field="",
+        publish_kind=PublishKind.CONTENT_UPDATE,
+        topic=PublishTopic.COMMUNITY_RECAP,
+        tier=PublishTier.STANDARD,
+        compose_domain="perawallet.app",
+    )
+
+    assert result["status"] == "published"
+    assert result["article_id"] == _ARTICLE_ID
+    # The cadence write still runs even though fanout failed -- one
+    # secondary side effect failing must not skip the other.
+    cadence_mock.assert_called_once()
+
+
+def test_finalize_publish_still_returns_published_when_cadence_write_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Same regression as above, the other unguarded write: record_compose_cadence raising must not stop this function from returning its result to the caller."""
+    monkeypatch.setattr(publish_tasks, "insert_article", MagicMock(return_value=_ARTICLE_ID))
+    fanout_mock = MagicMock(return_value={"status": "ok", "article_id": _ARTICLE_ID})
+    monkeypatch.setattr(publish_tasks, "fanout_after_publish", fanout_mock)
+    monkeypatch.setattr(
+        publish_tasks,
+        "record_compose_cadence",
+        MagicMock(side_effect=RuntimeError("cassandra timeout")),
+    )
+
+    result = publish_tasks._finalize_publish(
+        _row(),
+        {},
+        _composed(),
+        hero_image="",
+        image_field="",
+        publish_kind=PublishKind.CONTENT_UPDATE,
+        topic=PublishTopic.COMMUNITY_RECAP,
+        tier=PublishTier.STANDARD,
+        compose_domain="perawallet.app",
+    )
+
+    assert result["status"] == "published"
+    assert result["article_id"] == _ARTICLE_ID
+    fanout_mock.assert_called_once()

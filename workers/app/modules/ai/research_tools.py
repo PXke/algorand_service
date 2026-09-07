@@ -1,7 +1,8 @@
 """External research tools the writer can call on demand.
 
-- search_web: general web research via self-hosted SearXNG (no Google, no key,
-  no per-query cost). SEARXNG_URL is operator-configured and trusted, so it is
+- search_web: general web research via self-hosted SearXNG (no key in this
+  repo; the instance's general-category engine is the paid Brave Search API,
+  configured host-side). SEARXNG_URL is operator-configured and trusted, so it is
   called directly; any RESULT url the model later fetches still goes through the
   SSRF-guarded fetch tool.
 - search_bluesky: free public Bluesky post search for community sentiment.

@@ -19,9 +19,30 @@ function parseAddressList(raw: string): string[] {
     .filter(Boolean)
 }
 
+export type Product = 'news' | 'marketplace' | 'registry'
+
+/** Which Vite build this is — see vite.config.ts and docs/x402-marketplace-product-redesign.md §3.1 row 7. */
+function product(): Product {
+  const raw = env('VITE_PRODUCT', 'news')
+  if (raw === 'marketplace') return 'marketplace'
+  if (raw === 'registry') return 'registry'
+  return 'news'
+}
+
 export const config = {
   apiBaseUrl: env('VITE_API_BASE_URL', ''),
   authDomain: env('VITE_AUTH_DOMAIN', 'localhost'),
+  // 'news' (default, algorand.pxke.me), 'marketplace' (x402.pxke.me), or
+  // 'registry' (algorand-registry.pxke.me) — drives App.svelte's route table
+  // and AppShell's chrome. One codebase, three build outputs (npm run build /
+  // build:marketplace / build:registry).
+  product: product(),
+  // Absolute origins of the sibling products, used by each build's product
+  // switcher to link back across domains (real cross-origin navs, not
+  // client-side routing — three separate SPAs, one company).
+  newsSiteUrl: env('VITE_NEWS_SITE_URL', 'https://algorand.pxke.me'),
+  marketplaceSiteUrl: env('VITE_MARKETPLACE_SITE_URL', 'https://x402.pxke.me'),
+  registrySiteUrl: env('VITE_REGISTRY_SITE_URL', 'https://algorand-registry.pxke.me'),
   algodApiUrl: algodApiUrl(),
   // Pera keeps WalletConnect v1 alive on its bridges; bridge.walletconnect.org is gone.
   walletConnectBridge: env(

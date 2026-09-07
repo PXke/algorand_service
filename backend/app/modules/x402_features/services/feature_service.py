@@ -20,6 +20,8 @@ from datetime import UTC, datetime
 from app.core.config import settings
 from app.modules.x402.probe_payers import is_probe_payer
 from app.modules.x402_features.models.domain import (
+    FEATURE_STATUS_CLAIMED,
+    FEATURE_STATUS_COMPLETED,
     ClaimSummary,
     FeatureError,
     RankedFeatureRequest,
@@ -208,6 +210,17 @@ class FeatureService:
 
         The returned summary is a read-back and may lag a claim that settled
         concurrently; it is a courtesy echo for the payer.
+
+        Store before mark (CLAUDE.md section 2): the claim row is appended
+        FIRST, then the request's lifecycle status is set to 'claimed' --
+        unconditionally, even if it was already 'claimed' (a no-op
+        transition) or 'completed' (a REOPEN, see domain.FEATURE_STATUS_*
+        for why a new claim reopening a completed request is the right
+        default). A status-write failure is not caught here: unlike the vote
+        audit row, the status IS a product surface both read routes serve,
+        so losing it silently would misreport the request as still pending
+        after a real, paid claim -- it should propagate the same way
+        append_claim's own failure would.
         """
         moment = now or datetime.now(tz=UTC)
         self.store.append_claim(
@@ -218,7 +231,67 @@ class FeatureService:
                 claimed_at_epoch=int(moment.timestamp()),
             )
         )
+        self.store.update_status(request_id, FEATURE_STATUS_CLAIMED)
         return self.store.get_claim_summaries([request_id]).get(request_id, ClaimSummary())
+
+    def mark_completed(self, *, request_id: str, claimer: str) -> None:
+        """Explicitly, self-declare a request completed. Never verified.
+
+        Authorization: the settled payer must have claimed this request at
+        SOME point -- any past claimer, not only the latest one. That is the
+        most defensible bar this module's own trust model supports: a claim
+        is already an unverified, costly, public declaration of intent (see
+        StoredClaim), so completion is just a further one of the same kind,
+        made by someone who at least once put money behind "I am building
+        this." This method does NOT verify that the work was actually done
+        -- doing so would re-derive the escrow-with-an-enforcement-arm
+        pattern already rejected for this marketplace (see
+        docs/x402-execution-trust-evaluation.md): the remedy for a false
+        completion claim is the same as for any other self-declared
+        statement here (reputation via grading), never an adjudication arm.
+
+        Raises FeatureError('request_not_claimed_by_payer') if the payer
+        never claimed. This can only be checked AFTER settlement -- there is
+        no self-declared wallet field before payment, the same reason the
+        claim/vote routes take their identity from the settled payer rather
+        than the request body -- so unlike the existence check (checked
+        before the payment gate) this rejection happens with money already
+        collected. It is intentionally NOT refunded: run_with_refund treats
+        any PlatformError raised from a product write as a payment-kept,
+        ownership-style rejection (the same shape as the directory's
+        relist-not-yours check), not a delivery failure of ours, and this is
+        exactly that -- the payer chose to pay for an action they were not
+        entitled to take, not a failure on our end.
+
+        A completed request is not terminal: see `claim` for how a later
+        claim reopens it back to 'claimed'.
+        """
+        if not self.store.has_claimed(request_id, claimer.strip()):
+            raise FeatureError(
+                "request_not_claimed_by_payer",
+                "Only a wallet that has claimed this request may mark it completed",
+            )
+        self.store.update_status(request_id, FEATURE_STATUS_COMPLETED)
+
+    def statuses_for(self, items: list[StoredFeatureRequest]) -> dict[str, str]:
+        """Lifecycle statuses for a page of requests, keyed by request id (missing = pending).
+
+        One batched, bounded read, the same shape claim_summaries and the
+        vote-total read already use. An unreadable status column degrades to
+        "pending" with a log line rather than taking a read surface down --
+        the requests are the product and status is an annotation on them,
+        same posture claim_summaries already takes.
+        """
+        if not items:
+            return {}
+        try:
+            return self.store.get_statuses([item.request_id for item in items])
+        except Exception:
+            logger.warning(
+                "x402 features: statuses unreadable; page served as pending",
+                exc_info=True,
+            )
+            return {}
 
     def claim_summaries(self, items: list[StoredFeatureRequest]) -> dict[str, ClaimSummary]:
         """Claim summaries for a page of requests, keyed by request id (missing = none).

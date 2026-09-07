@@ -1,0 +1,38 @@
+USE algorand_platform;
+
+-- Feature-request status lifecycle (owner ask 2026-09-06): a claim today is
+-- purely "a public statement of intent" (migration 098) -- multiple claims
+-- per request AND per wallet are allowed, and there is no status field at
+-- all, so neither a filer nor another agent can tell where a request
+-- actually stands. This adds a REQUEST-level status, DISTINCT from the
+-- per-claim rows, which keep their existing multiple-claims-allowed shape
+-- completely untouched -- see app/modules/x402_features/models/domain.py's
+-- FEATURE_STATUS_PENDING/CLAIMED/COMPLETED and services/feature_service.py's
+-- claim()/mark_completed().
+--
+-- Nullable, additive column on the canonical row only (NOT the recency
+-- projection x402_feature_requests_by_recency, which migration 092's own
+-- docstring establishes is written once at filing time and never
+-- re-stamped). A pre-119 row, and a freshly filed one no lifecycle event has
+-- touched yet, reads back null -- mapped to 'pending' by
+-- CassandraFeatureStore.get_statuses -- which is correct: every request
+-- before this migration had, without exception, no claim on it. Both read
+-- surfaces (GET /features free browse, GET /features/demand paid ranked
+-- read) get the status for a whole page via one batched concurrent read
+-- (X402FeaturesStmts.GET_STATUS / get_statuses), the same
+-- concurrent-point-reads-per-partition shape get_vote_totals and
+-- get_claim_summaries already use, rather than denormalizing a value that
+-- changes after the row is written into the write-once recency projection.
+--
+-- Values: 'pending' (no claim yet) -> 'claimed' (set on EVERY successful
+-- claim, including a repeat one) -> 'completed' (an explicit, PAID,
+-- self-declared "this is done" from a wallet that has claimed the request
+-- at some point -- never verified -- same "evidence, not a guarantee" honesty
+-- this codebase already applies to receipts and grading, see
+-- docs/x402-execution-trust-evaluation.md -- there is deliberately no
+-- adjudication of whether the work was actually built). A new claim after
+-- 'completed' moves the request back to 'claimed' rather than being
+-- blocked -- reopening, not terminal -- since a claim already means someone
+-- is (still, or again) building it, matching the claim mechanism's own
+-- non-exclusive design.
+ALTER TABLE x402_feature_requests ADD status text;

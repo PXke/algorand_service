@@ -81,6 +81,7 @@ celery_app.conf.imports = (
     "app.tasks.metrics",
     "app.tasks.x402_probe",
     "app.tasks.x402_storage_reaper",
+    "app.tasks.ecosystem_probe",
 )
 
 
@@ -106,6 +107,17 @@ def _add_x402_beats(schedule: dict) -> None:
             "task": "app.tasks.x402_storage_reaper.reap_expired_backups",
             "schedule": reaper_seconds,
             "options": {"expires": reaper_seconds},
+        }
+
+
+def _add_ecosystem_probe_beat(schedule: dict) -> None:
+    """Register the Algorand Open Registry liveness re-check beat when its gate is on (roadmap item 26, off by default -- same "real requests, enabled deliberately per deployment" convention as _add_x402_beats)."""
+    if config.ECOSYSTEM_PROBE_ENABLED:
+        probe_seconds = float(config.ECOSYSTEM_PROBE_INTERVAL_SECONDS)
+        schedule["ecosystem-probe-registry-entries"] = {
+            "task": "app.tasks.ecosystem_probe.probe_registry_entries",
+            "schedule": probe_seconds,
+            "options": {"expires": probe_seconds},
         }
 
 
@@ -228,6 +240,7 @@ def _build_beat_schedule() -> dict:
     # under ruff's C901 branch budget -- same extraction as falcon_main.py's
     # _register_x402_storage_if_enabled.
     _add_x402_beats(schedule)
+    _add_ecosystem_probe_beat(schedule)
     if is_crawler_enabled(CrawlerType.METRICS):
         schedule["collect-price-metrics"] = {
             "task": "app.tasks.metrics.collect_price_metrics",

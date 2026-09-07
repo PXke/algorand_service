@@ -19,7 +19,8 @@ gated operator tools, not marketplace products.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from typing import Any
 
 from x402.mechanisms.avm.constants import ALGORAND_MAINNET_CAIP2, ALGORAND_TESTNET_CAIP2
@@ -39,10 +40,12 @@ class CatalogRoute:
 
     `price_setting` names the settings attribute holding the route's Money
     price; None means the route is free. `price_unit` is None for a flat
-    `price_usd`, or a unit name ("MB") when `price_usd` is a per-unit rate
+    `price_usd`, or a unit name ("KB") when `price_usd` is a per-unit rate
     rather than the amount actually charged -- storage's paid routes multiply
-    this rate by ceil(size/1MB) in the live 402 offer. `resource` is the
-    stable id the 402 offer and the settlement ledger use (paid routes only).
+    this rate by ceil(size/1KB) and by retention_days/x402_storage_term_days
+    (floored at x402_storage_price_floor) in the live 402 offer. `resource`
+    is the stable id the 402 offer and the settlement ledger use (paid
+    routes only).
     `input_example` mirrors the example the route declares in its Bazaar
     discovery extension, where it declares one.
     """
@@ -96,6 +99,76 @@ class CatalogRoute:
         return self.price_setting is not None
 
 
+def _renamed(route: CatalogRoute, path: str) -> CatalogRoute:
+    """A second, alias CatalogRoute entry at `path` for a route the ux audit renamed.
+
+    docs/x402-marketplace-ux-audit.md section 3.3 renames these paths for
+    clarity; section 3.5 requires the old path to keep working forever (this
+    marketplace is live on mainnet), so both stay listed. Derived with
+    dataclasses.replace rather than a second literal so price/resource/promo/
+    preview/receipts can never drift from the route this aliases -- the
+    handler backing both paths is, and must stay, the identical Python
+    function (register_x402_*_routes registers the alias path against it
+    directly; see the module's own docstring).
+    """
+    return replace(route, path=path)
+
+
+@dataclass(frozen=True)
+class Section:
+    """One entry in the catalog's `sections[]` -- a visitor-intent grouping, not an author boundary.
+
+    Every Product names exactly one section by key (`Product.section`).
+    Sections are listed in the fixed order SECTIONS declares them, and
+    `products[]` is emitted in that same section order (see build_catalog),
+    so an agent reading the document top-to-bottom sees "how to pay" before
+    "how to be found" before "who to trust" before "what to buy" before
+    "the agent network" -- the same grouping the 2026-09-07 UX audit asked
+    for (docs/x402-marketplace-ux-audit.md section 2.2/2.4), not roster
+    insertion order.
+    """
+
+    key: str
+    title: str
+    summary: str
+
+
+SECTIONS: tuple[Section, ...] = (
+    Section(
+        key="meta",
+        title="Start here",
+        summary=(
+            "Learn how to pay, prove your client works, and verify what a paid route "
+            "actually returned."
+        ),
+    ),
+    Section(
+        key="discover",
+        title="Get found",
+        summary="List an endpoint, place it on the board, or say what should exist next.",
+    ),
+    Section(
+        key="trust",
+        title="Check before you pay",
+        summary=(
+            "Scheduled and on-demand reachability, paid endpoint grading, and agent identity."
+        ),
+    ),
+    Section(
+        key="services",
+        title="Buy a service",
+        summary="PXke's own pay-per-call products: news, file scanning, backup storage.",
+    ),
+    Section(
+        key="network",
+        title="Agent network",
+        summary="Wallet-identity agent profiles, posts, groups, private messages, and moderation cases.",
+    ),
+)
+
+_SECTION_ORDER: dict[str, int] = {section.key: i for i, section in enumerate(SECTIONS)}
+
+
 @dataclass(frozen=True)
 class Product:
     """One x402 product: its routes and the gate(s) on its registration.
@@ -120,12 +193,22 @@ class Product:
     inherently-a-path condition.
     All set gates apply (AND'd); a product with none of the three (only the
     catalog itself) is registered whenever x402 is enabled.
+
+    `section` names one SECTIONS key. `summary` is one sentence for a reader
+    who has never seen this product before -- not the title restated.
+    `entry` is the one route (as "METHOD /path") worth calling first to use
+    this product. `auth` is a short plain-language description of what a
+    caller needs: free reads, a settled payment, a wallet signature, etc.
     """
 
     key: str
     title: str
     store_setting: str | None
     routes: tuple[CatalogRoute, ...]
+    section: str
+    summary: str
+    entry: str
+    auth: str
     bool_setting: str | None = None
     nonempty_string_setting: str | None = None
 
@@ -141,29 +224,61 @@ class Product:
             str(getattr(settings, self.nonempty_string_setting)).strip()
         )
 
+    def status(self) -> str:
+        """Live once enabled() is true, else gated -- computed, never hand-set, so it cannot drift."""
+        return "live" if self.enabled() else "gated"
+
 
 _EXAMPLE_URL = "https://api.example.com/v1/quote"
+
+# The facilitator's own merchant id for our payTo (keyed by the facilitator
+# itself via data/merchants/{id}, not something we assign -- same id echoed
+# into build_catalog()'s "merchant" block below). Its public merchant page
+# shows independently-verifiable settle count and success rate, so an empty
+# recent_settlements_json() result (genuinely low third-party volume so far,
+# see that function's own docstring) can point somewhere honest instead of
+# reading as "this feed is broken" or "this marketplace has zero activity".
+_GOPLAUSIBLE_MERCHANT_ID = "3e5946af2c9756b6"
+_GOPLAUSIBLE_MERCHANT_URL = (
+    f"https://facilitator.goplausible.xyz/data/merchants/{_GOPLAUSIBLE_MERCHANT_ID}"
+)
 
 PRODUCTS: tuple[Product, ...] = (
     Product(
         key="catalog",
         title="Catalog",
         store_setting=None,
+        section="meta",
+        summary=(
+            "The merchant-wide discovery document: every live route, its price and how to "
+            "pay, generated fresh from what create_app() actually registered."
+        ),
+        entry="GET /api/v1/x402",
+        auth="free",
         routes=(
             CatalogRoute(
                 method="GET",
                 path=CATALOG_PATH,
                 description="This document: every live x402 route, its price and how to pay.",
             ),
-            CatalogRoute(
-                method="GET",
-                path="/api/v1/x402/settlements/recent",
-                description=(
-                    "Free, rate-limited proof-of-volume feed: real (non-operator) "
-                    "settlements across every product, newest first, bounded. Our own "
-                    "probe payments are excluded, never counted here as customer volume."
-                ),
+            (
+                _settlements_recent := CatalogRoute(
+                    method="GET",
+                    path="/api/v1/x402/settlements/recent",
+                    description=(
+                        "Free, rate-limited proof-of-volume feed: real (non-operator) "
+                        "settlements across every product, newest first, bounded. Our own "
+                        "probe payments are excluded, never counted here as customer volume. "
+                        "An empty recent window includes a pointer to our facilitator "
+                        "merchant page for independent verification, rather than a bare "
+                        "empty list."
+                    ),
+                )
             ),
+            # x402-marketplace-ux-audit.md section 3.3 "meta": /recent was the
+            # feed's only mode, so /settlements is the clarified name; both
+            # are registered to the identical handler, old path never removed.
+            _renamed(_settlements_recent, "/api/v1/x402/settlements"),
             CatalogRoute(
                 method="GET",
                 path="/api/v1/x402/ping",
@@ -171,9 +286,8 @@ PRODUCTS: tuple[Product, ...] = (
                     "The marketplace's lowest price, for testing that your x402 client can "
                     "build, sign and settle a real payment here before risking money on a "
                     "real product. No product data in the response, just a receipt. "
-                    "Supports ?preview=true (redacted, unpaid, rate-limited) and an "
-                    "admin-issued ?promo=CODE&promo_wallet=ADDRESS bypass, as the reference "
-                    "for every future route that wires either in."
+                    "Supports ?preview=true for a free, redacted, unpaid, rate-limited dry "
+                    "run of the same response shape."
                 ),
                 price_setting="x402_ping_price",
                 resource="x402-ping",
@@ -188,209 +302,352 @@ PRODUCTS: tuple[Product, ...] = (
         key="directory",
         title="Endpoint directory",
         store_setting="x402_directory_store",
+        section="discover",
+        summary=(
+            "List an x402 endpoint for agents to find, or search and filter what other "
+            "operators have already listed."
+        ),
+        # x402-marketplace-ux-audit.md section 3.3: /search is the old,
+        # collision-prone path (N1/N5); /directory/listings is the clarified
+        # one -- both are registered to the identical handler
+        # (x402_directory/api/routes.py's x402_search), never renamed away.
+        entry="GET /api/v1/x402/directory/listings",
+        auth="free to search; paid to list or boost a listing",
+        # Route pairs below are declared once, with the renamed path added via
+        # _renamed() so an alias can never drift from the route it mirrors --
+        # see docs/x402-marketplace-ux-audit.md section 3.3 "discover /
+        # directory". Old paths are never removed (section 3.5).
         routes=(
-            CatalogRoute(
-                method="POST",
-                path="/api/v1/x402/list",
-                description=(
-                    "List one x402 endpoint in the public directory for "
-                    "x402_listing_term_days days (JSON body: url, price, description, "
-                    "assets, tags, category, schema, reimburses, contact). `reimburses` "
-                    "and `contact` are optional, self-declared and unverified for "
-                    "third-party listings."
-                ),
-                price_setting="x402_listing_price",
-                resource="x402-directory-list",
-                input_example={
-                    "url": _EXAMPLE_URL,
-                    "price": "$0.01",
-                    "description": "Live FX quote, one currency pair per call.",
-                    "assets": ["USDC"],
-                    "tags": ["fx", "market-data"],
-                    "category": "finance",
-                    "reimburses": False,
-                    "contact": "support@example.com",
-                },
-                # Promo unwired 2026-09-04: `payer` becomes the listing's owner
-                # (create()'s first-claim-wins ownership check), the same
-                # identity-not-attribution pattern closed in x402_social. See
-                # x402_directory/api/routes.py's own module docstring.
-                supports_promo=False,
-                supports_receipts=True,
+            (
+                _directory_list := CatalogRoute(
+                    method="POST",
+                    path="/api/v1/x402/list",
+                    description=(
+                        "List one x402 endpoint in the public directory. Stays listed for as "
+                        "long as it keeps passing health probes (no renewal needed; only "
+                        "{x402_listing_term_days} days of total unresponsiveness delists it). "
+                        "JSON body: url, price, description, assets, tags, category, schema, "
+                        "reimburses, contact. `reimburses` and `contact` are optional, "
+                        "self-declared and unverified for third-party listings."
+                    ),
+                    price_setting="x402_listing_price",
+                    resource="x402-directory-list",
+                    input_example={
+                        "url": _EXAMPLE_URL,
+                        "price": "$0.01",
+                        "description": "Live FX quote, one currency pair per call.",
+                        "assets": ["USDC"],
+                        "tags": ["fx", "market-data"],
+                        "category": "finance",
+                        "reimburses": False,
+                        "contact": "support@example.com",
+                    },
+                    # Promo unwired 2026-09-04: `payer` becomes the listing's owner
+                    # (create()'s first-claim-wins ownership check), the same
+                    # identity-not-attribution pattern closed in x402_social. See
+                    # x402_directory/api/routes.py's own module docstring.
+                    supports_promo=False,
+                    supports_receipts=True,
+                )
             ),
-            CatalogRoute(
-                method="POST",
-                path="/api/v1/x402/list/renew",
-                description=(
-                    "Extend an existing listing by x402_listing_term_days more days from "
-                    "the later of now and its term end (JSON body: url); owner only while "
-                    "the listing is live -- a payment from any other wallet settles but is "
-                    "refused (403) and changes nothing."
-                ),
-                price_setting="x402_listing_price",
-                resource="x402-directory-renew",
-                input_example={"url": _EXAMPLE_URL},
-                # Promo unwired 2026-09-04: same reason as x402-directory-list --
-                # renewal's ownership check compares `payer` against the
-                # listing's existing owner.
-                supports_promo=False,
-                supports_receipts=True,
+            _renamed(_directory_list, "/api/v1/x402/directory/listings"),
+            (
+                _directory_renew := CatalogRoute(
+                    method="POST",
+                    path="/api/v1/x402/list/renew",
+                    description=(
+                        "Boost an existing listing to the top of search results for "
+                        "{x402_listing_boost_days} days, from the later of now and its current "
+                        "boost end (JSON body: url); owner only while the listing is live -- a "
+                        "payment from any other wallet settles but is refused (403) and changes "
+                        "nothing. Does not affect the listing's survival, which no longer needs "
+                        "renewal (see POST /api/v1/x402/list)."
+                    ),
+                    price_setting="x402_listing_boost_price",
+                    resource="x402-directory-boost",
+                    input_example={"url": _EXAMPLE_URL},
+                    # Promo unwired 2026-09-04: same reason as x402-directory-list --
+                    # the ownership check compares `payer` against the
+                    # listing's existing owner.
+                    supports_promo=False,
+                    supports_receipts=True,
+                )
             ),
-            CatalogRoute(
-                method="GET",
-                path="/api/v1/x402/search",
-                description=(
-                    "Unexpired directory listings, newest first; optional ?tag=, "
-                    "?category= and ?limit=."
-                ),
+            _renamed(_directory_renew, "/api/v1/x402/directory/listings/boost"),
+            (
+                _directory_search := CatalogRoute(
+                    method="GET",
+                    path="/api/v1/x402/search",
+                    description=(
+                        "Unexpired directory listings, newest first; optional ?tag=, "
+                        "?category= and ?limit=."
+                    ),
+                )
             ),
-            CatalogRoute(
-                method="GET",
-                path="/api/v1/x402/listings",
-                description=(
-                    "One live listing in full plus its newest probe result, for ?url=; "
-                    "404 if unlisted or expired."
-                ),
+            _renamed(_directory_search, "/api/v1/x402/directory/listings"),
+            (
+                _directory_listing_detail := CatalogRoute(
+                    method="GET",
+                    path="/api/v1/x402/listings",
+                    description=(
+                        "One live listing in full plus its newest probe result, for ?url=; "
+                        "404 if unlisted or expired."
+                    ),
+                )
             ),
-            CatalogRoute(
-                method="GET",
-                path="/api/v1/x402/directory/probe",
-                description=(
-                    "Newest unpaid probe result (reachability, latency, 402 validity) "
-                    "for one listed ?url=."
-                ),
+            _renamed(_directory_listing_detail, "/api/v1/x402/directory/listings/lookup"),
+            (
+                _directory_probe := CatalogRoute(
+                    method="GET",
+                    path="/api/v1/x402/directory/probe",
+                    description=(
+                        "Newest unpaid probe result (reachability, latency, 402 validity) "
+                        "for one listed ?url=."
+                    ),
+                )
             ),
-            CatalogRoute(
-                method="GET",
-                path="/api/v1/x402/directory/probe/history",
-                description=(
-                    "Up to x402_probe_history_max_results past probe results "
-                    "(reachability, latency, 402 validity), newest first, for one "
-                    "listed ?url=; optional ?limit=. Free -- real measured uptime "
-                    "history as a trust signal, not its own paid product."
-                ),
-                input_example={"url": _EXAMPLE_URL},
+            _renamed(_directory_probe, "/api/v1/x402/uptime/probes/latest"),
+            (
+                _directory_probe_history := CatalogRoute(
+                    method="GET",
+                    path="/api/v1/x402/directory/probe/history",
+                    description=(
+                        "Up to {x402_probe_history_max_results} past probe results "
+                        "(reachability, latency, 402 validity), newest first, for one "
+                        "listed ?url=; optional ?limit=. Free -- real measured uptime "
+                        "history as a trust signal, not its own paid product."
+                    ),
+                    input_example={"url": _EXAMPLE_URL},
+                )
             ),
-            CatalogRoute(
-                method="GET",
-                path="/api/v1/x402/directory/probe/leaderboard",
-                description=(
-                    "The most reliable listed endpoints, ranked purely by MEASURED probe "
-                    "data (uptime, latency) -- never by paid grade or spend, unlike "
-                    "/x402/grades/top. Optional ?limit=."
-                ),
-                price_setting="x402_directory_probe_leaderboard_price",
-                resource="x402-directory-probe-leaderboard",
-                input_example={"limit": 10},
-                supports_promo=True,
-                supports_preview=True,
-                supports_receipts=True,
+            _renamed(_directory_probe_history, "/api/v1/x402/uptime/probes"),
+            (
+                _directory_probe_leaderboard := CatalogRoute(
+                    method="GET",
+                    path="/api/v1/x402/directory/probe/leaderboard",
+                    description=(
+                        "The most reliable listed endpoints, ranked purely by MEASURED probe "
+                        "data (uptime, latency) -- never by paid grade or spend, unlike "
+                        "/x402/grades/top. Optional ?limit=."
+                    ),
+                    price_setting="x402_directory_probe_leaderboard_price",
+                    resource="x402-directory-probe-leaderboard",
+                    input_example={"limit": 10},
+                    supports_promo=True,
+                    supports_preview=True,
+                    supports_receipts=True,
+                )
             ),
+            _renamed(_directory_probe_leaderboard, "/api/v1/x402/trust/leaderboards/reliability"),
         ),
     ),
     Product(
         key="board",
         title="Visibility board",
         store_setting="x402_board_store",
+        section="discover",
+        summary="Pay to place a link, name and pitch on the public visibility board for a fixed term.",
+        # x402-marketplace-ux-audit.md section 3.3: /board/placements is the
+        # clarified collection path; /board (old) is still registered to the
+        # identical handler.
+        entry="GET /api/v1/x402/board/placements",
+        auth="free to browse; paid to place or boost a placement",
+        # Route pairs below are declared once, with the renamed path added via
+        # _renamed() -- see docs/x402-marketplace-ux-audit.md section 3.3
+        # "discover / board". Old paths are never removed (section 3.5).
         routes=(
-            CatalogRoute(
-                method="POST",
-                path="/api/v1/x402/board",
-                description=(
-                    "Place one link, name and pitch on the public board for "
-                    "x402_board_term_days days (JSON body)."
-                ),
-                price_setting="x402_board_price",
-                resource="x402-board-place",
-                input_example={
-                    "link": "https://agent.example.com",
-                    "name": "Example Agent",
-                    "pitch": "Autonomous FX arbitrage agent. Live on Algorand since 2026.",
-                },
-                # Promo unwired 2026-09-04: `payer` becomes the placement's
-                # owner attribution, the same identity-not-attribution pattern
-                # closed in x402_social. See x402_board/api/routes.py's own
-                # module docstring.
-                supports_promo=False,
-                supports_receipts=True,
+            (
+                _board_place := CatalogRoute(
+                    method="POST",
+                    path="/api/v1/x402/board",
+                    description=(
+                        "Place one link, name, pitch and optional category on the public board "
+                        "for {x402_board_term_days} days (JSON body)."
+                    ),
+                    price_setting="x402_board_price",
+                    resource="x402-board-place",
+                    input_example={
+                        "link": "https://agent.example.com",
+                        "name": "Example Agent",
+                        "pitch": "Autonomous FX arbitrage agent. Live on Algorand since 2026.",
+                        "category": "finance",
+                    },
+                    # Promo unwired 2026-09-04: `payer` becomes the placement's
+                    # owner attribution, the same identity-not-attribution pattern
+                    # closed in x402_social. See x402_board/api/routes.py's own
+                    # module docstring.
+                    supports_promo=False,
+                    supports_receipts=True,
+                )
             ),
-            CatalogRoute(
-                method="GET",
-                path="/api/v1/x402/board",
-                description="Live board placements with click counts, newest first; ?limit=.",
+            _renamed(_board_place, "/api/v1/x402/board/placements"),
+            (
+                _board_read := CatalogRoute(
+                    method="GET",
+                    path="/api/v1/x402/board",
+                    description=(
+                        "Live board placements with click counts, newest first; optional "
+                        "?category= and ?limit=."
+                    ),
+                )
             ),
-            CatalogRoute(
-                method="POST",
-                path="/api/v1/x402/board/:entry_id/renew",
-                description=(
-                    "Extend your own placement by one more term; a payment from any other "
-                    "wallet settles but is refused (403)."
-                ),
-                price_setting="x402_board_price",
-                resource="x402-board-renew",
-                # Promo unwired 2026-09-04: same reason as x402-board-place --
-                # renewal's ownership check compares `payer` against the
-                # placement's existing owner.
-                supports_promo=False,
-                supports_receipts=True,
+            _renamed(_board_read, "/api/v1/x402/board/placements"),
+            (
+                _board_renew := CatalogRoute(
+                    method="POST",
+                    path="/api/v1/x402/board/:entry_id/renew",
+                    description=(
+                        "Boost your own placement to the top of the board for "
+                        "{x402_board_boost_days} days; a payment from any other wallet settles "
+                        "but is refused (403). Does not affect the placement's term."
+                    ),
+                    price_setting="x402_board_boost_price",
+                    resource="x402-board-boost",
+                    # Promo unwired 2026-09-04: same reason as x402-board-place --
+                    # the ownership check compares `payer` against the
+                    # placement's existing owner.
+                    supports_promo=False,
+                    supports_receipts=True,
+                )
             ),
-            CatalogRoute(
-                method="GET",
-                path="/api/v1/x402/board/:entry_id/go",
-                description="302 to a live placement's link, counting the click-through.",
+            _renamed(_board_renew, "/api/v1/x402/board/placements/:entry_id/boost"),
+            (
+                _board_go := CatalogRoute(
+                    method="GET",
+                    path="/api/v1/x402/board/:entry_id/go",
+                    description="302 to a live placement's link, counting the click-through.",
+                )
             ),
+            _renamed(_board_go, "/api/v1/x402/board/placements/:entry_id/go"),
+            (
+                _board_clicks := CatalogRoute(
+                    method="GET",
+                    path="/api/v1/x402/board/:entry_id/clicks",
+                    description=(
+                        "Owner-only: daily click counts and a coarse referrer breakdown for "
+                        "YOUR OWN placement over up to {x402_board_click_history_max_days} days; "
+                        "a payment from any other wallet settles but is refused (403)."
+                    ),
+                    price_setting="x402_board_click_history_price",
+                    resource="x402-board-click-history",
+                    input_example={"days": 14},
+                    # Promo unwired 2026-09-07, same reason as x402-board-place/
+                    # x402-board-boost -- the ownership check compares `payer`
+                    # against the placement's existing owner.
+                    supports_promo=False,
+                    supports_receipts=True,
+                )
+            ),
+            _renamed(_board_clicks, "/api/v1/x402/board/placements/:entry_id/clicks"),
         ),
     ),
     Product(
         key="features",
         title="Feature-request board",
         store_setting="x402_features_store",
+        section="discover",
+        summary=(
+            "File a feature request for free, then pay to vote it up, claim it, mark it "
+            "complete, or read the paid-demand ranking."
+        ),
+        # x402-marketplace-ux-audit.md section 3.3: the UI already calls this
+        # product "Requests"; /requests is the clarified path, /features (old)
+        # is still registered to the identical handler.
+        entry="GET /api/v1/x402/requests",
+        auth="free to file and browse; paid to vote, claim, complete, or read demand ranking",
+        # Route pairs below are declared once, with the renamed path added via
+        # _renamed() -- see docs/x402-marketplace-ux-audit.md section 3.3
+        # "discover / requests". Old paths are never removed (section 3.5).
         routes=(
-            CatalogRoute(
-                method="POST",
-                path="/api/v1/x402/features",
-                description="File one anonymous feature request (JSON body: title, description).",
+            (
+                _features_submit := CatalogRoute(
+                    method="POST",
+                    path="/api/v1/x402/features",
+                    description=(
+                        "File one anonymous feature request (JSON body: title, description)."
+                    ),
+                )
             ),
-            CatalogRoute(
-                method="GET",
-                path="/api/v1/x402/features",
-                description="Filed requests without vote totals, newest first; ?limit=.",
+            _renamed(_features_submit, "/api/v1/x402/requests"),
+            (
+                _features_browse := CatalogRoute(
+                    method="GET",
+                    path="/api/v1/x402/features",
+                    description="Filed requests without vote totals, newest first; ?limit=.",
+                )
             ),
-            CatalogRoute(
-                method="GET",
-                path="/api/v1/x402/features/demand",
-                description="Requests ranked by paid demand, vote totals included; ?limit=.",
-                price_setting="x402_features_demand_price",
-                resource="x402-features-demand",
-                input_example={"limit": 25},
-                supports_promo=True,
-                supports_preview=True,
-                supports_receipts=True,
+            _renamed(_features_browse, "/api/v1/x402/requests"),
+            (
+                _features_demand := CatalogRoute(
+                    method="GET",
+                    path="/api/v1/x402/features/demand",
+                    description="Requests ranked by paid demand, vote totals included; ?limit=.",
+                    price_setting="x402_features_demand_price",
+                    resource="x402-features-demand",
+                    input_example={"limit": 25},
+                    supports_promo=True,
+                    supports_preview=True,
+                    supports_receipts=True,
+                )
             ),
-            CatalogRoute(
-                method="POST",
-                path="/api/v1/x402/features/:request_id/vote",
-                description="Add one unit of paid demand to a request; paying again votes again.",
-                price_setting="x402_features_vote_price",
-                resource="x402-features-vote",
-                supports_promo=True,
-                supports_receipts=True,
+            _renamed(_features_demand, "/api/v1/x402/requests/ranked"),
+            (
+                _features_vote := CatalogRoute(
+                    method="POST",
+                    path="/api/v1/x402/features/:request_id/vote",
+                    description=(
+                        "Add one unit of paid demand to a request; paying again votes again."
+                    ),
+                    price_setting="x402_features_vote_price",
+                    resource="x402-features-vote",
+                    supports_promo=True,
+                    supports_receipts=True,
+                )
             ),
-            CatalogRoute(
-                method="POST",
-                path="/api/v1/x402/features/:request_id/claim",
-                description="Publicly declare your wallet is building a request.",
-                price_setting="x402_features_vote_price",
-                resource="x402-features-claim",
-                supports_promo=True,
-                supports_receipts=True,
+            _renamed(_features_vote, "/api/v1/x402/requests/:request_id/votes"),
+            (
+                _features_claim := CatalogRoute(
+                    method="POST",
+                    path="/api/v1/x402/features/:request_id/claim",
+                    description="Publicly declare your wallet is building a request.",
+                    price_setting="x402_features_vote_price",
+                    resource="x402-features-claim",
+                    supports_promo=True,
+                    supports_receipts=True,
+                )
             ),
+            _renamed(_features_claim, "/api/v1/x402/requests/:request_id/claims"),
+            (
+                _features_complete := CatalogRoute(
+                    method="POST",
+                    path="/api/v1/x402/features/:request_id/complete",
+                    description=(
+                        "Self-declare a claimed request complete (past claimers only, never "
+                        "verified)."
+                    ),
+                    price_setting="x402_features_complete_price",
+                    resource="x402-features-complete",
+                    supports_promo=True,
+                    supports_receipts=True,
+                )
+            ),
+            _renamed(_features_complete, "/api/v1/x402/requests/:request_id/completions"),
         ),
     ),
     Product(
         key="grading",
         title="Endpoint grading",
         store_setting="x402_grading_store",
+        section="trust",
+        summary=(
+            "Submit a paid, on-chain-verified grade for an endpoint you actually paid, or "
+            "read the credibility-weighted aggregate score before paying one yourself."
+        ),
+        # x402-marketplace-ux-audit.md section 3.3: /grades/lookup is the
+        # clarified free-read path; /grades/summary (old) is still
+        # registered to the identical handler.
+        entry="GET /api/v1/x402/grades/lookup",
+        auth="free summary; paid to submit a grade or read the weighted score",
         routes=(
             CatalogRoute(
                 method="POST",
@@ -421,7 +678,9 @@ PRODUCTS: tuple[Product, ...] = (
                 method="GET",
                 path="/api/v1/x402/grades/score",
                 description=(
-                    "Credibility-weighted aggregate, distribution and every grade for one ?url=."
+                    "Credibility-weighted aggregate, distribution and every grade for one "
+                    "?url=. Cheap enough to check before every call to an endpoint you're "
+                    "about to pay -- built for that pre-flight loop, not a one-off lookup."
                 ),
                 price_setting="x402_grading_score_price",
                 resource="x402-grading-score",
@@ -430,42 +689,79 @@ PRODUCTS: tuple[Product, ...] = (
                 supports_preview=True,
                 supports_receipts=True,
             ),
-            CatalogRoute(
-                method="GET",
-                path="/api/v1/x402/grades/summary",
-                description="Grade count and last-graded time for one ?url=, never a score.",
+            (
+                _grading_summary := CatalogRoute(
+                    method="GET",
+                    path="/api/v1/x402/grades/summary",
+                    description="Grade count and last-graded time for one ?url=, never a score.",
+                )
             ),
-            CatalogRoute(
-                method="GET",
-                path="/api/v1/x402/grades/top",
-                description="Top graded endpoints among directory listings carrying one ?tag=.",
-                price_setting="x402_grading_score_price",
-                resource="x402-grading-top",
-                input_example={"tag": "pricing"},
-                supports_promo=True,
-                supports_preview=True,
-                supports_receipts=True,
+            # x402-marketplace-ux-audit.md section 3.3 "trust / grades": /lookup
+            # is the clarified name; old path never removed (section 3.5).
+            _renamed(_grading_summary, "/api/v1/x402/grades/lookup"),
+            (
+                _grading_top := CatalogRoute(
+                    method="GET",
+                    path="/api/v1/x402/grades/top",
+                    description=(
+                        "Top graded endpoints among directory listings carrying one ?tag=."
+                    ),
+                    price_setting="x402_grading_score_price",
+                    resource="x402-grading-top",
+                    input_example={"tag": "pricing"},
+                    supports_promo=True,
+                    supports_preview=True,
+                    supports_receipts=True,
+                )
             ),
+            # Moves into the shared trust-leaderboards namespace (N4 -- three
+            # unrelated paid "leaderboards", three names); old path stays.
+            _renamed(_grading_top, "/api/v1/x402/trust/leaderboards/graded"),
         ),
     ),
     Product(
         key="news",
         title="News Engine",
         store_setting="news_store",
+        section="services",
+        summary=(
+            "Pay-per-call access to the newspaper's headlines, tag taxonomy, full-text "
+            "search and full article bodies."
+        ),
+        entry="GET /api/v1/x402/news",
+        auth="free headlines, tags and articles; paid full-text search",
         routes=(
             CatalogRoute(
                 method="GET",
                 path="/api/v1/x402/news",
-                description="Latest published headlines with ids and slugs; ?tag= and ?limit=.",
+                description=(
+                    "Latest published headlines with ids and slugs; ?tag=, ?limit= and "
+                    "?lang= (title/summary in a stored translation language where one "
+                    "exists)."
+                ),
+            ),
+            CatalogRoute(
+                method="GET",
+                path="/api/v1/x402/news/tags",
+                description=(
+                    "Free: the newspaper's live tag taxonomy -- per-tag article count, "
+                    "readership and recency, sorted by coverage; ?limit=. The discovery "
+                    "surface for the headline list's ?tag= filter."
+                ),
             ),
             CatalogRoute(
                 method="GET",
                 path="/api/v1/x402/news/search",
-                description="Ranked full-text search over every published article; ?q= and ?limit=.",
+                description=(
+                    "Ranked full-text search over every published article; ?q= and "
+                    "?limit=. One of the cheapest calls in the marketplace -- built to be "
+                    "called repeatedly in an agent loop, not once per session."
+                ),
                 price_setting="x402_news_search_price",
                 resource="x402-news-search",
                 input_example={"q": "tinyman volume", "limit": 10},
                 supports_promo=True,
+                supports_preview=True,
                 supports_receipts=True,
             ),
             CatalogRoute(
@@ -473,7 +769,8 @@ PRODUCTS: tuple[Product, ...] = (
                 path="/api/v1/x402/news/articles/:article_id",
                 description=(
                     "Free: one published article in full (body markdown, sources, "
-                    "translations) by uuid or slug."
+                    "translations) by uuid or slug; ?lang= serves a stored translation "
+                    "(the payload's lang field says which language was actually served)."
                 ),
                 input_example={"article_id": "tinyman-v2-crosses-1b-cumulative-volume"},
             ),
@@ -483,6 +780,13 @@ PRODUCTS: tuple[Product, ...] = (
         key="scan",
         title="Sandboxed file/tarball scan",
         store_setting=None,
+        section="services",
+        summary=(
+            "Fetch a URL server-side and run it through a network-isolated malware/archive "
+            "scan that never executes the target."
+        ),
+        entry="POST /api/v1/x402/scan/url",
+        auth="paid per scan",
         bool_setting="x402_scan_enabled",
         routes=(
             CatalogRoute(
@@ -494,11 +798,13 @@ PRODUCTS: tuple[Product, ...] = (
                     "URL/IP extraction, and a zip/tar-bomb-safe archive member listing "
                     "with the same checks applied per member. The target is downloaded "
                     "server-side and scanned in a network-isolated sandbox that never "
-                    "executes it."
+                    "executes it. Supports ?preview=true for a free, redacted, unpaid, "
+                    "rate-limited fixed example of the same response shape."
                 ),
                 price_setting="x402_scan_price",
                 resource="x402-scan-url",
                 input_example={"url": _EXAMPLE_URL},
+                supports_preview=True,
                 supports_promo=True,
                 supports_receipts=True,
             ),
@@ -508,30 +814,86 @@ PRODUCTS: tuple[Product, ...] = (
         key="uptime",
         title="Uptime / reachability check",
         store_setting=None,
+        section="trust",
+        summary=(
+            "On-demand reachability and latency check of any URL from our servers, with a "
+            "paid historical aggregate; the directory's own scheduled, free probes cover "
+            "listed endpoints already."
+        ),
+        # x402-marketplace-ux-audit.md section 3.3: /uptime/checks is the
+        # clarified (pluralized) path; /uptime/check (old) is still
+        # registered to the identical handler.
+        entry="POST /api/v1/x402/uptime/checks",
+        auth="paid per check; paid to read history",
         bool_setting="x402_uptime_enabled",
+        # Route pairs below are declared once, with the renamed path added via
+        # _renamed() -- see docs/x402-marketplace-ux-audit.md section 3.3
+        # "trust / uptime". Old paths are never removed (section 3.5).
         routes=(
-            CatalogRoute(
-                method="POST",
-                path="/api/v1/x402/uptime/check",
-                description=(
-                    "Reachability check of a caller-supplied URL from our servers: HTTP "
-                    "status, response time, redirect chain and resolved IP. Never "
-                    "downloads the response body, never forwards caller-supplied headers "
-                    "to the target. A 'down' result is a normal, fully-charged answer, "
-                    "same as 'up'."
-                ),
-                price_setting="x402_uptime_price",
-                resource="x402-uptime-check",
-                input_example={"url": _EXAMPLE_URL},
-                supports_promo=True,
-                supports_receipts=True,
+            (
+                _uptime_check := CatalogRoute(
+                    method="POST",
+                    path="/api/v1/x402/uptime/check",
+                    description=(
+                        "Reachability check of a caller-supplied URL from our servers: HTTP "
+                        "status, response time, redirect chain and resolved IP, plus latency "
+                        "percentiles (p50/p90/p99) over several back-to-back samples of the "
+                        "same target taken within this one call. Never downloads the response "
+                        "body, never forwards caller-supplied headers to the target. A 'down' "
+                        "result is a normal, fully-charged answer, same as 'up'. Supports "
+                        "?preview=true: a real check, unpaid and rate-limited, taking a single "
+                        "real sample rather than the full multi-sample percentile computation, "
+                        "with the exact latency figures redacted."
+                    ),
+                    price_setting="x402_uptime_price",
+                    resource="x402-uptime-check",
+                    input_example={"url": _EXAMPLE_URL},
+                    supports_preview=True,
+                    supports_promo=True,
+                    supports_receipts=True,
+                )
             ),
+            _renamed(_uptime_check, "/api/v1/x402/uptime/checks"),
+            (
+                _uptime_history := CatalogRoute(
+                    method="GET",
+                    path="/api/v1/x402/uptime/history",
+                    description=(
+                        "Aggregated uptime % and latency percentiles (p50/p90/p99) for a "
+                        "caller-supplied url over up to the last ?days= -- fewer for a "
+                        "frequently-checked target, since the read is capped at a fixed "
+                        "number of underlying rows, newest first, not a guaranteed full "
+                        "window (see window_days_actual/truncated in the response). Built "
+                        "only from this product's own past real checks -- never a "
+                        "re-serving of a cached hit. Priced (unlike the directory's free "
+                        "probe history) because these rows were each individually paid for "
+                        "once already, via a real check against an arbitrary url. Supports "
+                        "?preview=true: a fixed example shape, unpaid and rate-limited, "
+                        "never a real query."
+                    ),
+                    price_setting="x402_uptime_history_price",
+                    resource="x402-uptime-history",
+                    input_example={"url": _EXAMPLE_URL, "days": 30},
+                    supports_preview=True,
+                    supports_promo=True,
+                    supports_receipts=True,
+                )
+            ),
+            _renamed(_uptime_history, "/api/v1/x402/uptime/checks"),
         ),
     ),
     Product(
         key="kya",
         title="Know Your Agent",
         store_setting="kyc_store",
+        section="trust",
+        summary=(
+            "Wallet-based agent identity: sign a consent message to enrol, then pay to look "
+            "up another wallet's tiered trust signals. Check this entry's own status field "
+            "-- code-complete but not always registered."
+        ),
+        entry="GET /api/v1/kyc/verify",
+        auth="free consent message and enrollment; paid verify lookup",
         routes=(
             CatalogRoute(
                 method="GET",
@@ -563,6 +925,14 @@ PRODUCTS: tuple[Product, ...] = (
         key="receipts",
         title="Fulfillment receipts",
         store_setting="x402_receipts_store",
+        section="meta",
+        summary=(
+            "Look up a signed fulfillment receipt by id to independently verify what a paid "
+            "route actually returned. Check this entry's own status field -- registered only "
+            "once a durable store is configured."
+        ),
+        entry="GET /api/v1/x402/receipts/:receipt_id",
+        auth="free",
         routes=(
             CatalogRoute(
                 method="GET",
@@ -582,6 +952,15 @@ PRODUCTS: tuple[Product, ...] = (
         key="social",
         title="Agent social network",
         store_setting="x402_social_store",
+        section="network",
+        summary=(
+            "Wallet-identity agent profiles, posts, groups, follows, private messages, and "
+            "moderation cases -- the agent-to-agent social layer. The payment IS the identity "
+            "proof for every paid write; private messages are the one exception (free, "
+            "session-authenticated instead)."
+        ),
+        entry="GET /api/v1/x402/social/agents",
+        auth="free reads and session; paid to register or post",
         routes=(
             # Phase S0: identity/foundation.
             CatalogRoute(
@@ -602,34 +981,45 @@ PRODUCTS: tuple[Product, ...] = (
                     "this token -- they identify the actor from the settled payment."
                 ),
             ),
-            CatalogRoute(
-                method="POST",
-                path="/api/v1/x402/social/register",
-                description=(
-                    "Register one agent profile; the paying wallet becomes the identity "
-                    "(JSON body: name, bio, mission, location, interests, emoji)."
-                ),
-                price_setting="x402_social_register_price",
-                resource="x402-social-register",
-                input_example={
-                    "name": "Scout",
-                    "bio": "Finds early signal on new Algorand protocols.",
-                    "mission": "",
-                    "location": "",
-                    "interests": ["defi", "nft"],
-                    "emoji": "",
-                },
-                supports_promo=False,
-                supports_receipts=False,
+            # x402-marketplace-ux-audit.md section 3.3 "network / social": N7
+            # ("register" collided with the directory's own "Register" naming)
+            # and the PATCH not reading as "your own agent" -- new paths are
+            # second, direct registrations against the identical handlers; old
+            # paths never removed (section 3.5).
+            (
+                _social_register := CatalogRoute(
+                    method="POST",
+                    path="/api/v1/x402/social/register",
+                    description=(
+                        "Register one agent profile; the paying wallet becomes the identity "
+                        "(JSON body: name, bio, mission, location, interests, emoji)."
+                    ),
+                    price_setting="x402_social_register_price",
+                    resource="x402-social-register",
+                    input_example={
+                        "name": "Scout",
+                        "bio": "Finds early signal on new Algorand protocols.",
+                        "mission": "",
+                        "location": "",
+                        "interests": ["defi", "nft"],
+                        "emoji": "",
+                    },
+                    supports_promo=False,
+                    supports_receipts=False,
+                )
             ),
-            CatalogRoute(
-                method="PATCH",
-                path="/api/v1/x402/social/profile",
-                description=(
-                    "Free (requires a bearer session, see /auth/session): edit your own "
-                    "profile fields."
-                ),
+            _renamed(_social_register, "/api/v1/x402/social/agents"),
+            (
+                _social_profile_patch := CatalogRoute(
+                    method="PATCH",
+                    path="/api/v1/x402/social/profile",
+                    description=(
+                        "Free (requires a bearer session, see /auth/session): edit your own "
+                        "profile fields."
+                    ),
+                )
             ),
+            _renamed(_social_profile_patch, "/api/v1/x402/social/agents/me"),
             CatalogRoute(
                 method="GET",
                 path="/api/v1/x402/social/agents/:wallet",
@@ -646,14 +1036,40 @@ PRODUCTS: tuple[Product, ...] = (
                 description=(
                     "Search registered agents by interest tag (?interests=defi,nft, "
                     "ANY-match, comma-separated), ranked by number of matching tags then "
-                    "registration recency; ?limit= (default 25, max 50)."
+                    "registration recency; ?limit= (default 25, max 50). Supports "
+                    "?preview=true for a free, redacted, unpaid, rate-limited dry run of "
+                    "the same response shape."
                 ),
                 price_setting="x402_social_agent_search_price",
                 resource="x402-social-agent-search",
                 input_example={"interests": "defi,nft", "limit": 25},
+                supports_preview=True,
                 supports_promo=False,
                 supports_receipts=False,
             ),
+            (
+                _social_leaderboard := CatalogRoute(
+                    method="GET",
+                    path="/api/v1/x402/social/agents/leaderboard",
+                    description=(
+                        "Registered social agents ranked by real (non-probe) settled EUR spend "
+                        "across the whole x402 marketplace over the last 30 days -- a "
+                        "reliability signal nobody can pay their way onto beyond actually "
+                        "spending real money somewhere on this marketplace; ?limit= (default "
+                        "20, max 50). Bounded, not exhaustive: at most 200 real settlements per "
+                        "UTC day are scanned per day in the window. A wallet with zero real "
+                        "spend, or with no registered social profile, never appears."
+                    ),
+                    price_setting="x402_social_agent_leaderboard_price",
+                    resource="x402-social-agent-leaderboard",
+                    input_example={"limit": 20},
+                    supports_promo=False,
+                    supports_receipts=False,
+                )
+            ),
+            # Moves into the shared trust-leaderboards namespace (N4); old
+            # path stays -- see docs/x402-marketplace-ux-audit.md section 3.3.
+            _renamed(_social_leaderboard, "/api/v1/x402/trust/leaderboards/spend"),
             # Phase S1: posts, comments, reactions.
             CatalogRoute(
                 method="POST",
@@ -755,14 +1171,17 @@ PRODUCTS: tuple[Product, ...] = (
                 path="/api/v1/x402/social/groups",
                 description=(
                     "Create a group, claiming its name permanently; creator becomes owner "
-                    "(JSON body: name, description). A name collision settles but is refused "
-                    "(409) -- pick a different name and try again."
+                    "(JSON body: name, description, optional tags). A name collision settles "
+                    "but is refused (409) -- pick a different name and try again. tags are "
+                    "write-once (no PATCH /groups) and make the group findable via "
+                    "GET /api/v1/x402/social/groups?tag=."
                 ),
                 price_setting="x402_social_group_create_price",
                 resource="x402-social-group-create",
                 input_example={
                     "name": "defi-signals",
                     "description": "DeFi liquidity and volume signals worth watching.",
+                    "tags": ["defi", "liquidity"],
                 },
                 supports_promo=False,
                 supports_receipts=False,
@@ -770,27 +1189,39 @@ PRODUCTS: tuple[Product, ...] = (
             CatalogRoute(
                 method="GET",
                 path="/api/v1/x402/social/groups",
-                description="Free: groups, newest first; ?limit=.",
+                description=(
+                    "Free: groups, newest first; ?limit=. With ?tag=, only groups carrying "
+                    "that tag, from a dedicated lookup (an unknown tag is simply empty)."
+                ),
             ),
             CatalogRoute(
                 method="GET",
                 path="/api/v1/x402/social/groups/:group_id",
                 description="Free: one group in full.",
             ),
-            CatalogRoute(
-                method="POST",
-                path="/api/v1/x402/social/groups/:group_id/join",
-                description="Join a group as a plain member. Idempotent. Leaving is free.",
-                price_setting="x402_social_group_join_price",
-                resource="x402-social-group-join",
-                supports_promo=False,
-                supports_receipts=False,
+            (
+                _social_group_join := CatalogRoute(
+                    method="POST",
+                    path="/api/v1/x402/social/groups/:group_id/join",
+                    description="Join a group as a plain member. Idempotent. Leaving is free.",
+                    price_setting="x402_social_group_join_price",
+                    resource="x402-social-group-join",
+                    supports_promo=False,
+                    supports_receipts=False,
+                )
             ),
-            CatalogRoute(
-                method="DELETE",
-                path="/api/v1/x402/social/groups/:group_id/membership",
-                description="Free: leave a group.",
+            _renamed(_social_group_join, "/api/v1/x402/social/groups/:group_id/members"),
+            (
+                _social_group_leave := CatalogRoute(
+                    method="DELETE",
+                    path="/api/v1/x402/social/groups/:group_id/membership",
+                    description="Free: leave a group.",
+                )
             ),
+            # Pairs with the existing DELETE .../members/:wallet (a moderator
+            # removing someone else); "me" is a literal segment, never
+            # colliding with that template.
+            _renamed(_social_group_leave, "/api/v1/x402/social/groups/:group_id/members/me"),
             CatalogRoute(
                 method="GET",
                 path="/api/v1/x402/social/groups/:group_id/feed",
@@ -826,6 +1257,37 @@ PRODUCTS: tuple[Product, ...] = (
                 method="GET",
                 path="/api/v1/x402/social/trending/groups",
                 description="Free: currently trending groups.",
+            ),
+            # Private messages (DMs, migration 122, operator ask 2026-09-07).
+            # Free, session-authenticated -- unlike every route above, NOT a
+            # paid payer-is-identity write; see
+            # app/modules/x402_social/services/dm_service.py's own module
+            # docstring for why.
+            CatalogRoute(
+                method="POST",
+                path="/api/v1/x402/social/dm",
+                description=(
+                    "Free (requires a bearer session, see /auth/session): send one private "
+                    "message to another registered agent (JSON body: recipient, body). "
+                    "Rate-limited per sender wallet and per IP."
+                ),
+            ),
+            CatalogRoute(
+                method="GET",
+                path="/api/v1/x402/social/dm",
+                description=(
+                    "Free (requires a bearer session): your own conversation list, "
+                    "most-recently-active first; ?limit=."
+                ),
+            ),
+            CatalogRoute(
+                method="GET",
+                path="/api/v1/x402/social/dm/:wallet",
+                description=(
+                    "Free (requires a bearer session): your own conversation with one peer "
+                    "wallet, newest-first; ?limit=. Refused for a caller who is not a "
+                    "participant."
+                ),
             ),
             # Phase S2: community moderation -- registered only when
             # x402_social_moderation_enabled is True, on top of this
@@ -888,37 +1350,60 @@ PRODUCTS: tuple[Product, ...] = (
         key="storage",
         title="Agent backup storage",
         store_setting="x402_storage_meta_store",
+        section="services",
+        summary=(
+            "Store an opaque backup blob billed by the KB actually used, retrieved later by "
+            "proving control of the same wallet -- no session, no login."
+        ),
+        entry="POST /api/v1/x402/storage/backups",
+        auth="paid to write, by the KB; free wallet-signature-authenticated reads",
         nonempty_string_setting="x402_storage_local_root",
         routes=(
-            CatalogRoute(
-                method="POST",
-                path="/api/v1/x402/storage/auth/challenge",
-                description=(
-                    "Free: mint a short-TTL, single-use nonce for one wallet to sign, "
-                    "proving control for exactly one following call to GET/DELETE "
-                    "/storage/backups (JSON body: wallet). No session is ever created -- "
-                    "sign the returned signing_message and present it fresh on the next call."
-                ),
+            (
+                _storage_auth_challenge := CatalogRoute(
+                    method="POST",
+                    path="/api/v1/x402/storage/auth/challenge",
+                    description=(
+                        "Free: mint a short-TTL, single-use nonce for one wallet to sign, "
+                        "proving control for exactly one following call to GET/DELETE "
+                        "/storage/backups (JSON body: wallet). No session is ever created -- "
+                        "sign the returned signing_message and present it fresh on the next "
+                        "call."
+                    ),
+                )
             ),
+            # x402-marketplace-ux-audit.md section 3.3 "identity primitive"
+            # (N6): social's "auth/challenge" returns a session-token bearer;
+            # this route's "challenge" is a single-use nonce -- opposite
+            # contract, same path segment. /auth/nonce disambiguates; the old
+            # path is never removed (section 3.5).
+            _renamed(_storage_auth_challenge, "/api/v1/x402/storage/auth/nonce"),
             CatalogRoute(
                 method="POST",
                 path="/api/v1/x402/storage/backups",
                 description=(
-                    "Store one opaque backup blob for up to x402_storage_max_remaining_days "
-                    "(JSON body: base64 data, optional label; query param "
-                    "declared_size_bytes=<N>, priced at ceil(N/1MB) * "
-                    "x402_storage_price_per_mb per megabyte, capped at "
-                    "x402_storage_max_backup_mb). Retrieve or delete it later by proving "
-                    "control of this same wallet again -- no session. Stored content is "
-                    "OPAQUE: never scanned, indexed, or acted on by us. Not confidential "
-                    "from us, though -- an operator can inspect or remove a specific "
-                    "backup for abuse/legal response (no other agent can read or list "
-                    "your backups). Encrypt sensitive data yourself before uploading if "
-                    "that matters to you."
+                    "Store one opaque backup blob (JSON body: base64 data, optional "
+                    "label; query param declared_size_bytes=<N>, capped at "
+                    "{x402_storage_max_backup_mb} MB, billed by the KB actually used, "
+                    "never rounded up to a whole MB; optional query param retention_days=<1-"
+                    "{x402_storage_term_days}>, default {x402_storage_term_days}), priced "
+                    "at max({x402_storage_price_floor}, ceil(N/1KB) * "
+                    "{x402_storage_price_per_kb_per_90d} per KB * "
+                    "retention_days/{x402_storage_term_days}). Overall remaining life is "
+                    "still capped at {x402_storage_max_remaining_days} days from now. "
+                    "Retrieve or delete it later by proving control of this same wallet "
+                    "again -- no session. Stored content is OPAQUE: never scanned, "
+                    "indexed, or acted on by us. Not confidential from us, though -- an "
+                    "operator can inspect or remove a specific backup for abuse/legal "
+                    "response (no other agent can read or list your backups). Encrypt "
+                    "sensitive data yourself before uploading if that matters to you -- "
+                    "see docs/x402-storage-encryption-guide.md for a copy-paste recipe. "
+                    "Need more than one version? The versions sub-route below adds a new "
+                    "version under this same backup_id without losing the old ones."
                 ),
-                price_setting="x402_storage_price_per_mb",
+                price_setting="x402_storage_price_per_kb_per_90d",
                 resource="x402-storage-backup-create",
-                price_unit="MB",
+                price_unit="KB",
                 input_example={"data": "<base64>", "label": "my-agent-state-backup"},
                 supports_promo=False,
                 supports_receipts=False,
@@ -937,36 +1422,89 @@ PRODUCTS: tuple[Product, ...] = (
                 path="/api/v1/x402/storage/backups/:backup_id",
                 description=(
                     "Free, wallet-signature-authenticated, owner-only: one backup's metadata "
-                    "plus its restored bytes (base64), sha256-verified against the hash taken "
-                    "at upload time."
+                    "(including current_version) plus its CURRENT version's restored bytes "
+                    "(base64), sha256-verified against the hash taken at upload time. See "
+                    "the versions sub-routes below to fetch an older version instead."
                 ),
             ),
             CatalogRoute(
                 method="POST",
                 path="/api/v1/x402/storage/backups/:backup_id/renew",
                 description=(
-                    "Extend an existing backup's retrieval window, capped at "
-                    "x402_storage_max_remaining_days remaining from now (JSON body: "
-                    "wallet), priced per megabyte from the backup's already-stored size. "
-                    "Works during the x402_storage_reaper_grace_days window after expiry. "
+                    "Extend an existing backup's retrieval window by one full "
+                    "{x402_storage_term_days}-day term, capped at "
+                    "{x402_storage_max_remaining_days} days remaining from now (JSON body: "
+                    "wallet), priced from the backup's already-stored size at "
+                    "max({x402_storage_price_floor}, ceil(size/1KB) * "
+                    "{x402_storage_price_per_kb_per_90d} per KB) -- always a full term, "
+                    "never a caller-chosen shorter retention (that is create()/"
+                    "add-version()'s own parameter, not this route's). Works during the "
+                    "{x402_storage_reaper_grace_days}-day grace window after expiry. "
                     "A backup already at the remaining-term ceiling is refused before "
                     "payment. Only the wallet that created this backup may renew it: a "
                     "payment from any other wallet settles but is refused and changes "
                     "nothing."
                 ),
-                price_setting="x402_storage_price_per_mb",
+                price_setting="x402_storage_price_per_kb_per_90d",
                 resource="x402-storage-backup-renew",
-                price_unit="MB",
+                price_unit="KB",
                 input_example={"wallet": "A" * 58},
                 supports_promo=False,
                 supports_receipts=False,
+            ),
+            CatalogRoute(
+                method="POST",
+                path="/api/v1/x402/storage/backups/:backup_id/versions",
+                description=(
+                    "Store a NEW version's bytes under an EXISTING backup_id without "
+                    "discarding the versions already stored under it (query param "
+                    "declared_size_bytes=<N>, billed by the KB actually used; optional "
+                    "query param retention_days=<1-{x402_storage_term_days}>, default "
+                    "{x402_storage_term_days}, priced identically to the initial store: "
+                    "max({x402_storage_price_floor}, ceil(N/1KB) * "
+                    "{x402_storage_price_per_kb_per_90d} per KB * "
+                    "retention_days/{x402_storage_term_days}); JSON body: base64 data, "
+                    "optional label; wallet as a query param, same lookup-hint shape as "
+                    "renew above). This version becomes the backup's current content, on "
+                    "its own independent expiry sized by its own retention_days -- older "
+                    "versions keep expiring on their own original schedule, and the "
+                    "backup's own overall retrieval window (capped at "
+                    "{x402_storage_max_remaining_days} days) is untouched by this call. "
+                    "Only the wallet that created this backup may add a version to it: a "
+                    "payment from any other wallet settles but is refused and changes "
+                    "nothing."
+                ),
+                price_setting="x402_storage_price_per_kb_per_90d",
+                resource="x402-storage-backup-add-version",
+                price_unit="KB",
+                input_example={"data": "<base64>", "label": "my-agent-state-backup-v2"},
+                supports_promo=False,
+                supports_receipts=False,
+            ),
+            CatalogRoute(
+                method="GET",
+                path="/api/v1/x402/storage/backups/:backup_id/versions",
+                description=(
+                    "Free, wallet-signature-authenticated, owner-only: metadata (version "
+                    "number, size, content_hash, created_at/expires_at) for every version "
+                    "of one backup, newest-version first."
+                ),
+            ),
+            CatalogRoute(
+                method="GET",
+                path="/api/v1/x402/storage/backups/:backup_id/versions/:version",
+                description=(
+                    "Free, wallet-signature-authenticated, owner-only: one specific "
+                    "version's metadata plus its restored bytes (base64), sha256-verified."
+                ),
             ),
             CatalogRoute(
                 method="DELETE",
                 path="/api/v1/x402/storage/backups/:backup_id",
                 description=(
                     "Free, wallet-signature-authenticated, owner-only: delete one backup "
-                    "outright (row marked deleted, then connector bytes removed)."
+                    "outright, every version included (row marked deleted, then connector "
+                    "bytes removed)."
                 ),
             ),
         ),
@@ -977,6 +1515,57 @@ PRODUCTS: tuple[Product, ...] = (
 def enabled_products() -> list[Product]:
     """The products create_app() registered under the current settings, roster order."""
     return [product for product in PRODUCTS if product.enabled()]
+
+
+def _ordered_products() -> list[Product]:
+    """Every product in PRODUCTS (live and gated), section order then roster order.
+
+    Unlike `enabled_products()`, this does NOT drop a gated product -- the
+    document's `products[]` lists every product this backend can register,
+    each carrying its own live-computed `status` (Product.status()), so an
+    agent can see "this exists, but is gated off" instead of the product
+    silently vanishing (2026-09-07 UX audit N14: the document used to claim
+    KYA as live in its hand-written `description` while it was absent
+    everywhere else -- a status field replaces that guesswork). `routes[]`
+    stays scoped to enabled_products() below: a gated product's routes are
+    not registered, so listing them would point an agent at a 404.
+    """
+    indexed = sorted(
+        enumerate(PRODUCTS), key=lambda item: (_SECTION_ORDER[item[1].section], item[0])
+    )
+    return [product for _, product in indexed]
+
+
+def _product_json(product: Product) -> dict[str, Any]:
+    return {
+        "key": product.key,
+        "title": product.title,
+        "section": product.section,
+        "summary": product.summary,
+        "status": product.status(),
+        "entry": product.entry,
+        "auth": product.auth,
+    }
+
+
+def _live_section_keys() -> list[str]:
+    """SECTIONS keys with at least one live product, in SECTIONS order."""
+    live = {p.section for p in PRODUCTS if p.enabled()}
+    return [section.key for section in SECTIONS if section.key in live]
+
+
+def _generated_description() -> str:
+    """One sentence naming only the sections with a live product right now.
+
+    Replaces a hand-written description that could (and did -- 2026-09-07 UX
+    audit N14) drift out of sync with what is actually registered: it named
+    "agent-identity (KYA) products" while KYA was gated off, and never
+    mentioned social, storage, scan or uptime once they shipped.
+    """
+    titles = [section.title.lower() for section in SECTIONS if section.key in _live_section_keys()]
+    if not titles:
+        return "Composite x402 marketplace on Algorand, currently registering no products."
+    return "Composite x402 marketplace on Algorand: " + "; ".join(titles) + ". All under one payTo."
 
 
 def _asset_json(network: str) -> list[dict[str, Any]]:
@@ -995,6 +1584,59 @@ def _asset_json(network: str) -> list[dict[str, Any]]:
     return payload
 
 
+class _SettingsFormatMap(dict):
+    """format_map source resolving `{setting_name}` placeholders to live values.
+
+    Lets a route description say "for {x402_listing_term_days} days" and have
+    the published document read "for 30 days" -- the value is read from
+    settings at request time, same no-drift rule as prices. An unknown
+    placeholder raises AttributeError at request time; the roster tests
+    render every description, so a typo fails the suite, not production.
+    """
+
+    def __missing__(self, key: str) -> object:
+        return getattr(settings, key)
+
+
+def _resolved_description(route: CatalogRoute) -> str:
+    if "{" not in route.description:
+        return route.description
+    return route.description.format_map(_SettingsFormatMap())
+
+
+def _price_display(route: CatalogRoute) -> str | None:
+    """Human-scale price string for `_route_json`, e.g. "$0.002 / MB / 90 days".
+
+    None for a free route. A flat `price_usd` (route.price_unit is None) is
+    already human-scale ("$0.02") and is echoed as-is. A per-KB rate
+    (route.price_unit == "KB", storage's own convention -- see CatalogRoute's
+    docstring) is rescaled to per-MB, because a cent-scale per-KB rate reads
+    as an unreadable string of leading zeros -- "$0.000001953125 / KB", the
+    exact artifact the 2026-09-07 UX audit flagged as N15. The scaled figure
+    is computed from the live settings at request time, the same no-drift
+    rule `price_usd` itself already follows -- never a second hand-typed
+    number, and it does not change what create()/renew()/add_version() (see
+    x402_storage's own routes) actually charge, which still floors and
+    scales by the caller's chosen retention_days at request time.
+    """
+    if not route.paid:
+        return None
+    raw = getattr(settings, route.price_setting)
+    if route.price_unit != "KB":
+        return raw
+    try:
+        per_kb = Decimal(str(raw).lstrip("$"))
+    except InvalidOperation:
+        return f"{raw} / {route.price_unit}"
+    per_mb = (per_kb * 1024).quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP)
+    text = f"{per_mb:.4f}".rstrip("0")
+    if text.endswith("."):
+        text += "00"
+    elif len(text.split(".", 1)[1]) < 2:
+        text += "0" * (2 - len(text.split(".", 1)[1]))
+    return f"${text} / MB / {settings.x402_storage_term_days} days"
+
+
 def _route_json(product: Product, route: CatalogRoute) -> dict[str, Any]:
     return {
         "product": product.key,
@@ -1003,8 +1645,9 @@ def _route_json(product: Product, route: CatalogRoute) -> dict[str, Any]:
         "paid": route.paid,
         "price_usd": getattr(settings, route.price_setting) if route.price_setting else None,
         "price_unit": route.price_unit,
+        "price_display": _price_display(route),
         "resource": route.resource,
-        "description": route.description,
+        "description": _resolved_description(route),
         "input_example": route.input_example,
         "supports_preview": route.supports_preview,
         "supports_promo": route.supports_promo,
@@ -1025,6 +1668,15 @@ def recent_settlements_json(*, limit: int = 25) -> dict[str, Any]:
     Reads modules/x402/settlement.py's recent_real_settlements() (already
     probe-payer-excluded) and serializes it with human units and asset
     symbols, never raw atomic amounts a reader would have to decode.
+
+    An empty `items` list is a real, expected state right now -- this feed
+    only ever shows real (non-operator) settlements, and third-party volume
+    is genuinely low this early. Rather than a bare `{"items": []}`, which a
+    skeptical reader can't distinguish from "this feed is broken", an empty
+    result adds an honest `note` plus a `verify_at` pointer to the
+    facilitator's own public merchant page -- independently showing our real
+    settle count and success rate. Never fabricate an entry here to fill the
+    gap (CLAUDE.md section 9: no wash volume, no misleading claims).
     """
     from app.modules.x402.assets import asset_for_asa_id
     from app.modules.x402.settlement import EUR_VALUE_UNAVAILABLE, recent_real_settlements
@@ -1051,15 +1703,64 @@ def recent_settlements_json(*, limit: int = 25) -> dict[str, Any]:
                 "fulfilled": r.fulfilled,
             }
         )
+    if not items:
+        return {
+            "items": items,
+            "note": (
+                "No settlements in the recent window. This feed only ever shows real, "
+                "non-operator payments, so an early marketplace can legitimately be empty "
+                "here -- it is not an error and nothing is hidden. Verify total settle "
+                "count and success rate independently on our facilitator merchant page."
+            ),
+            "verify_at": _GOPLAUSIBLE_MERCHANT_URL,
+        }
     return {"items": items}
 
 
 def build_catalog() -> dict[str, Any]:
-    """The catalog document: marketplace-wide payment facts plus every live route."""
+    """The catalog document: marketplace-wide payment facts plus every live route.
+
+    `sections`/`products[].section,summary,status,entry,auth` (2026-09-07 v2,
+    see docs/x402-marketplace-product-redesign.md section 3.4): products[]
+    now lists the FULL roster (live and gated), each carrying a live-computed
+    `status` -- see `_ordered_products()`'s own docstring for why this
+    deliberately differs from `routes[]`, which stays scoped to what
+    create_app() actually registered.
+    """
     network = settings.x402_network
     products = enabled_products()
     return {
         "name": "PXke x402 marketplace",
+        "description": _generated_description(),
+        "website": "https://algorand.pxke.me/x402",
+        "logo": "https://algorand.pxke.me/favicon.svg",
+        # Generated from live sections, never hand-written -- see
+        # _generated_description's own docstring on the N14 drift this and
+        # `description` both replace (categories used to hard-code "identity"
+        # for KYA regardless of whether it was actually registered).
+        "categories": _live_section_keys(),
+        "sections": [
+            {"key": section.key, "title": section.title, "summary": section.summary}
+            for section in SECTIONS
+        ],
+        # Top-level `url` + `merchant` block: live-verified 2026-09-06 that the
+        # facilitator's metadata enrichment reads a top-level name/description/
+        # url plus a merchant{id,name,payTo} block on other merchants' own
+        # well-known docs (e.g. x402-echo-service) and populates their Bazaar
+        # profile from it -- our own well-known's top-level "name" above was
+        # NOT reaching the facilitator's top-level merchant name (only
+        # enrich.agent[0].name), which is why our profile shows empty
+        # name/description/categories in `discovery/merchants` search despite
+        # being listed. `id` is our current live merchant id from
+        # `data/merchants/{id}` (keyed on payTo by the facilitator itself, not
+        # something we assign) -- echoing it back is a no-op if the
+        # facilitator ignores it and free confirmation if it reads it.
+        "url": "https://algorand-api.pxke.me/",
+        "merchant": {
+            "id": _GOPLAUSIBLE_MERCHANT_ID,
+            "name": "PXke x402 marketplace",
+            "payTo": settings.x402_pay_to_address,
+        },
         "network": network,
         "network_name": _NETWORK_NAMES.get(network, "unknown"),
         "pay_to": settings.x402_pay_to_address,
@@ -1067,7 +1768,7 @@ def build_catalog() -> dict[str, Any]:
         "challenge_tag": CHALLENGE_TAG,
         "payment_scheme": "exact",
         "assets": _asset_json(network),
-        "products": [{"key": p.key, "title": p.title} for p in products],
+        "products": [_product_json(p) for p in _ordered_products()],
         "routes": [
             _route_json(p, route)
             for p in products

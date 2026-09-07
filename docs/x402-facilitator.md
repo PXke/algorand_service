@@ -69,20 +69,42 @@ Sources: [Official Rules PDF](https://algorand.co/hubfs/x402%20competition%20Off
   - `GET {base}/docs/openapi.json` — the facilitator's OpenAPI document.
   - `GET {base}/data/leaderboards?cat=<merchants|resources|payers|assets|networks|countries>&range=ALL&limit=<n ≤ 50>&offset=<n>`
     — the leaderboard data behind the UI, one category per call.
-  - `GET {base}/data/merchants/{id}` — one merchant's roll-up. Our merchant
-    id is `3e5946af2c9756b6` (keyed on `payTo`, so every route sharing our
-    `payTo` rolls up under it — the Composite category in practice).
+  - `GET {base}/data/merchants/{id}` — one merchant's **analytics** roll-up
+    (settle count, volume, resources with real payments). Our id here is
+    `3e5946af2c9756b6` (keyed on `payTo`, so every route sharing our `payTo`
+    rolls up under it — the Composite category in practice).
   - `GET {base}/data/transactions` — settled transactions.
   - `GET {base}/api/receipt/{txId}` — the receipt for one settlement.
   - Bazaar catalog: `GET {base}/discovery/resources`,
     `GET {base}/discovery/merchants`, `GET {base}/discovery/all`.
   - UI: `{base}/dashboard` and `{base}/dashboard/leaderboards?cat=resources`.
 
-### How a route gets into the Bazaar (verified live 2026-08-30)
+**IMPORTANT — the Bazaar namespace uses a DIFFERENT merchant id than the
+analytics namespace** (found live 2026-09-06, cost real confusion before
+this was known): `GET /discovery/resources?merchantId=3e5946af2c9756b6`
+returns `total: 0` and `GET /discovery/merchants/3e5946af2c9756b6` returns
+`Merchant not found` — NOT because we have nothing catalogued, but because
+that's the wrong id for this namespace. The Bazaar id is
+`S1NBVk9ZVFZOQjdBNk5LQ000VzJXQk9P` (base64url of the first 24 chars of our
+`payTo`); resource ids in this namespace are similarly base64url of
+`METHOD:url`. Always check Bazaar state with the Bazaar id, never the
+analytics id — they look interchangeable (both 16-ish char opaque strings)
+but are not.
+
+### How a route gets into the Bazaar (verified live 2026-08-30, corrected 2026-09-06)
 
 The facilitator catalogs a resource in the Bazaar **from the 402 offer's
-`resource.url`, after a settlement** on it. Two consequences, both observed
-on our own merchant entry:
+`resource.url`, after a `verify` call on it** — NOT necessarily a full
+settlement. `extensions/bazaar/facilitator.py` reads the bazaar extension
+and the `description`/`mimeType` off the **payment payload the paying
+client echoes back**, not from anything the resource server sends directly
+— a real merchant (`proptech.watch`) shows `settleCount: 0, resourceCount: 4`
+in the Bazaar, confirmed live. Consequence: **a non-conforming x402 client
+that doesn't echo the bazaar extension means the route is never catalogued,
+no matter how correctly we declare it** — there is no server-initiated
+registration call anywhere in the facilitator SDK.
+
+Other consequences, observed on our own merchant entry:
 
 - A settlement whose offer carried a non-URL `resource` (e.g. the bare ledger
   id `x402-directory-list`) **settles fine and counts on the leaderboard**
@@ -91,6 +113,15 @@ on our own merchant entry:
 - Only an offer whose `resource.url` is an absolute public URL gets a Bazaar
   entry, and it gets one **per distinct URL**, so a templated route must
   advertise its template, not one URL per path-parameter value.
+- A discovery extension on a body-taking route (POST/PUT/PATCH) MUST declare
+  `body_type="json"`, even when the route takes no body at all (a
+  path-parameter-only action like a vote or a follow) — the query-params
+  declaration's schema only admits `method` in `["GET","HEAD","DELETE"]`,
+  and the resource server injects the real method at request time, so a
+  body-method route declared without `body_type` fails the facilitator's
+  own `validate_discovery_extension` and is **silently never catalogued,
+  even after a real settlement** (found live 2026-09-05 on the
+  feature-vote route; see `modules/x402/discovery.py:describe_json_endpoint`).
 
 `backend/app/modules/x402/guard.py` therefore advertises
 `settings.x402_public_api_base` + the request path as the offer's
@@ -98,8 +129,54 @@ on our own merchant entry:
 stays what the settlement ledger records. Routes with a path parameter pass
 `resource_path=` to override the advertised path with the template (the
 feature-vote route advertises `/api/v1/x402/features/{request_id}/vote`).
-After this change our merchant reads `bazaar: true` with 7 challenge-tagged
-settlements.
+Our merchant reads `bazaar: true` with 7 challenge-tagged, catalogued
+routes as of 2026-09-06 (out of 27 paid routes) — the other 20 are blocked
+by a separate bug, also found and fixed 2026-09-05/06: most of our paid
+routes validated their request body BEFORE running the payment gate, so an
+unpaid probe (which is how any x402 client, and the facilitator's own
+`verify` call, first learns the price) got a plain validation error instead
+of ever seeing the 402 challenge. Fixed via a shared
+`app/modules/x402/paid_request.py:challenge_if_unpaid()` primitive applied
+across every paid module. See `test_x402_bazaar_extension_sweep.py` for the
+regression coverage (drives every real route registrar unpaid against a
+stub facilitator and validates the emitted extension survives the
+facilitator's own parser).
+
+### Merchant profile enrichment (name/description/website/logo/banner)
+
+Confirmed live 2026-09-06: our merchant record's `name`/`description`/
+`website`/`logo`/`categories` are all `null` in the Bazaar (`data/merchants`
+analytics view shows the same). This makes us unfindable by
+`discovery/merchants`'s own `search`/`category` filters. Two independent
+enrichment paths exist, neither is populated for us yet:
+
+1. **OpenGraph tags on the merchant's own domain root.** The facilitator's
+   metadata enrichment engine fetches each merchant domain roughly once a
+   day and reads `og:title`/`og:description`/`og:image` (Algorand's own
+   "Enabling x402 payments on Algorand" guide confirms this explicitly).
+   Our domain root (`https://algorand-api.pxke.me/`) served a bare nginx
+   404 with no HTML until a fix landed 2026-09-06 (undeployed as of this
+   writing) — see `deploy/nginx/algorand-platform.conf`'s `location = /`
+   and `shared/merchant-landing/index.html`.
+2. **`GET {base}/sponsorship/merchant-info?address={payTo}`** — this is
+   where a merchant's `title`/`description`/`url`/`logo`/`banner` actually
+   live (confirmed: querying our own `payTo` here returns the same 5 null
+   fields). This payload is populated as part of **purchasing an SU
+   (Settlement Unit) sponsorship card** (`POST /sponsorship/purchase/{tier}`,
+   $10 minimum tier) — a real, one-time purchase of facilitator gas credit,
+   paid to GoPlausible's own treasury, NOT to any of our own endpoints, so
+   it carries no wash-volume exposure and doesn't touch our USDC Volume
+   score. It also adds a sponsor badge and a chain-scoped Sponsors
+   leaderboard placement. This is the only mechanism found (after an
+   exhaustive read of the installed `x402` package and the facilitator's
+   full OpenAPI doc) that lets a merchant profile stop being anonymous —
+   there is no free/self-serve way to set these fields. Spending real money
+   on this is an owner decision, not something to do unattended.
+
+The facilitator also exposes an MCP interface (`GET /mcp`, `POST
+/mcp/call`, 9 tools) mirroring the same plain-HTTP discovery data with
+fewer filters — not a richer or alternate registration path, just another
+transport for the same read-only catalog.
 
 ## CAIP-2 network ids and USDC asset ids
 

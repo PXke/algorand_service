@@ -20,6 +20,8 @@ _READ_IP_PREFIX = "algorand:x402social:read_rl_ip:"
 _SESSION_IP_PREFIX = "algorand:x402social:session_rl_ip:"
 _SESSION_WALLET_FAIL_PREFIX = "algorand:x402social:session_rl_wallet_fail:"
 _FREE_WRITE_WALLET_PREFIX = "algorand:x402social:free_write_rl_wallet:"
+_DM_SEND_WALLET_PREFIX = "algorand:x402social:dm_send_rl_wallet:"
+_DM_SEND_IP_PREFIX = "algorand:x402social:dm_send_rl_ip:"
 _WINDOW_SECONDS = 3600
 
 
@@ -110,3 +112,50 @@ def free_write_rate_limited(*, wallet: str) -> bool:
     if count is None:
         return False
     return count > settings.x402_social_free_write_rate_limit_per_hour
+
+
+def dm_send_wallet_rate_limited(*, wallet: str) -> bool:
+    """True when this SENDER wallet has exceeded its hourly DM-send budget.
+
+    Keyed by wallet, same shape as free_write_rate_limited -- the caller is
+    already session-authenticated (a valid bearer token) by the time this
+    runs, so the wallet is a real, proven identity, not a caller-declared
+    claim. Deliberately a SEPARATE budget from free_write_rate_limited's
+    (PATCH /profile, unfollow, leave, ...): those are low-frequency
+    account-management actions sharing one generous budget, whereas DM
+    volume is the thing this feature specifically needs to bound (CLAUDE.md
+    section 9), so it gets its own setting
+    (x402_social_dm_send_rate_limit_per_hour) rather than competing with
+    unrelated actions for the same ceiling.
+    """
+    if not wallet:
+        return False
+    count = incr_with_expiry(f"{_DM_SEND_WALLET_PREFIX}{wallet}", window_seconds=_WINDOW_SECONDS)
+    if count is None:
+        return False
+    return count > settings.x402_social_dm_send_rate_limit_per_hour
+
+
+def dm_send_ip_rate_limited(request: Request) -> bool:
+    """True when this IP has exceeded its hourly DM-send budget.
+
+    Per-IP, IN ADDITION to dm_send_wallet_rate_limited's per-wallet budget
+    (CLAUDE.md section 9: rate limit every free endpoint per wallet AND per
+    IP) -- registration costs real money ($0.10,
+    settings.x402_social_register_price) but is still cheap enough that a
+    determined sender could spread DM volume across several of its own
+    freshly-registered wallets from one machine; this budget catches that
+    even though each individual wallet stays under its own per-wallet cap.
+    Deliberately wider than the per-wallet budget
+    (x402_social_dm_send_ip_rate_limit_per_hour default 300 vs. 60) so it
+    does not become the binding constraint for one honest agent's normal
+    traffic, or for several unrelated agents legitimately sharing an egress
+    IP.
+    """
+    ip = client_ip(request.headers)
+    if not ip:
+        return False
+    count = incr_with_expiry(f"{_DM_SEND_IP_PREFIX}{ip}", window_seconds=_WINDOW_SECONDS)
+    if count is None:
+        return False
+    return count > settings.x402_social_dm_send_ip_rate_limit_per_hour

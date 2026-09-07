@@ -6,6 +6,8 @@
   import { config } from '../lib/config'
   import { navigate, pathOnly } from '../lib/router'
   import { articleChromeCollapsed } from '../lib/articleChrome'
+  import { recoverFromStaleChunk, clearStaleChunkGuard } from '../lib/staleChunk'
+  import { ensureX402Catalog, x402CatalogState } from '../lib/x402/catalogStore'
   import BrandMark from './BrandMark.svelte'
   import Icon from './Icon.svelte'
   import MarketsBar from './MarketsBar.svelte'
@@ -14,6 +16,13 @@
   import type { Component } from 'svelte'
 
   let { children }: { children: import('svelte').Snippet } = $props()
+
+  // The marketplace build's nav below reads the live catalog v2 document
+  // (sections[]) instead of a hand-maintained page list -- fetched once,
+  // shared with every routes/marketplace/*.svelte page (lib/x402/
+  // catalogStore.ts). `config.product` is fixed per build, so this never
+  // fires an extra request on a newspaper page load.
+  if (config.product === 'marketplace') ensureX402Catalog()
 
   let drawerOpen = $state(false)
   let walletOpen = $state(false)
@@ -38,114 +47,303 @@
     void import('./WalletDialog.svelte')
       .then((m) => {
         WalletDialog = m.default
+        clearStaleChunkGuard()
       })
       .catch((e) => {
         console.error('Failed to load WalletDialog', e)
-        walletOpen = false
+        void recoverFromStaleChunk().then((reloading) => {
+          if (!reloading) walletOpen = false
+        })
       })
   })
 
   /* The masthead tab row carries content destinations only. Top, About and
      Contact still exist — they live in the drawer and the footer — but three
      near-identical feed tabs plus two marketing pages made the row read as
-     noise. */
-  const sections = $derived([
-    {
-      href: '/news',
-      label: t($messages, 'navLatest'),
-      icon: 'bolt' as const,
-      match: (p: string) => p === '/news',
-    },
-    {
-      href: '/hot',
-      label: t($messages, 'navHot'),
-      icon: 'fire' as const,
-      match: (p: string) => p === '/hot',
-    },
-    {
-      href: '/top',
-      label: t($messages, 'navTop'),
-      icon: 'trending' as const,
-      match: (p: string) => p === '/top',
-    },
-    {
-      href: '/topics',
-      label: t($messages, 'navTopics'),
-      icon: 'tag' as const,
-      match: (p: string) => p === '/topics' || p.startsWith('/topic/'),
-    },
-  ])
+     noise.
 
-  const moreNav = $derived([
+     Marketplace build (config.product === 'marketplace', x402.pxke.me): x402
+     pages are the only surface, so this same tab row carries the marketplace's
+     own top-level pages instead of the newspaper's -- no newspaper chrome, no
+     second nav component. Each entry is tagged with the catalog v2 section
+     (`sections[]`) it belongs to and only shows once that section is actually
+     present in the live document -- genuinely restructured per
+     docs/x402-marketplace-product-redesign.md §4.1 (Directory · Board ·
+     Requests · Trust · Services · Developers), not the old hardcoded
+     Directory/Board/Requests/Grades/Our-Endpoints list this replaces. "List an
+     endpoint" is deliberately a CTA in `moreNav` below, not a nav pill --
+     Social has no entry at all (agent-only, per the redesign's own "not in
+     the nav" rule). */
+  const MARKETPLACE_NAV_PAGES = [
     {
-      href: '/about',
-      label: t($messages, 'navAbout'),
-      icon: 'info' as const,
-      match: (p: string) => p === '/about',
-    },
-    {
-      href: '/contact',
-      label: t($messages, 'navContact'),
-      icon: 'mail' as const,
-      match: (p: string) => p === '/contact',
-    },
-    {
-      href: '/x402',
-      label: t($messages, 'navX402'),
+      section: 'discover',
+      href: '/directory',
+      label: 'Directory',
       icon: 'hub' as const,
-      match: (p: string) => p === '/x402' || p.startsWith('/x402/'),
+      match: (p: string) => p === '/directory' || p === '/listing',
     },
-  ])
+    {
+      section: 'discover',
+      href: '/board',
+      label: 'Board',
+      icon: 'bar_chart' as const,
+      match: (p: string) => p === '/board',
+    },
+    {
+      section: 'discover',
+      href: '/requests',
+      label: 'Requests',
+      icon: 'lightbulb' as const,
+      match: (p: string) => p === '/requests',
+    },
+    {
+      section: 'trust',
+      href: '/trust',
+      label: 'Trust',
+      icon: 'insights' as const,
+      match: (p: string) => p === '/trust',
+    },
+    {
+      section: 'services',
+      href: '/services',
+      label: 'Services',
+      icon: 'layers' as const,
+      match: (p: string) => p === '/services',
+    },
+    {
+      section: 'meta',
+      href: '/developers',
+      label: 'Developers',
+      icon: 'article' as const,
+      match: (p: string) => p === '/developers',
+    },
+  ] as const
+
+  // Registry build (algorand-registry.pxke.me): a single-purpose site, so
+  // one tab -- Browse (the listing itself, filters live inline on the page,
+  // there's no separate /registry/categories route) -- with "Submit a
+  // project" as the one secondary CTA in moreNav below. No newspaper chrome,
+  // no marketplace/x402 chrome, no social -- plain literals per the same
+  // "not a new i18n key" convention as the marketplace build above.
+  const REGISTRY_NAV_PAGES = [
+    {
+      href: '/registry',
+      label: 'Browse',
+      icon: 'hub' as const,
+      match: (p: string) =>
+        p === '/' || p === '/registry' || (p.startsWith('/registry/') && p !== '/registry/submit'),
+    },
+  ] as const
+
+  const sections = $derived(
+    config.product === 'marketplace'
+      ? (() => {
+          const liveSectionKeys = $x402CatalogState.catalog
+            ? new Set($x402CatalogState.catalog.sections?.map((s) => s.key) ?? [])
+            : null
+          // While the catalog hasn't loaded (or failed), show every page --
+          // these are static routes, not conjured from the document, so a
+          // slow/failed fetch degrades product summaries, never the nav
+          // itself.
+          return MARKETPLACE_NAV_PAGES.filter(
+            (entry) => !liveSectionKeys || liveSectionKeys.has(entry.section),
+          )
+        })()
+      : config.product === 'registry'
+      ? REGISTRY_NAV_PAGES
+      : [
+          {
+            href: '/news',
+            label: t($messages, 'navLatest'),
+            icon: 'bolt' as const,
+            match: (p: string) => p === '/news',
+          },
+          {
+            href: '/hot',
+            label: t($messages, 'navHot'),
+            icon: 'fire' as const,
+            match: (p: string) => p === '/hot',
+          },
+          {
+            href: '/top',
+            label: t($messages, 'navTop'),
+            icon: 'trending' as const,
+            match: (p: string) => p === '/top',
+          },
+          {
+            href: '/topics',
+            label: t($messages, 'navTopics'),
+            icon: 'tag' as const,
+            match: (p: string) => p === '/topics' || p.startsWith('/topic/'),
+          },
+        ],
+  )
+
+  const moreNav = $derived(
+    config.product === 'marketplace'
+      ? [
+          {
+            href: '/list',
+            label: t($messages, 'x402CtaListLabel'),
+            icon: 'send' as const,
+            match: (p: string) => p === '/list',
+          },
+        ]
+      : config.product === 'registry'
+      ? [
+          {
+            href: '/registry/submit',
+            label: 'Submit a project',
+            icon: 'send' as const,
+            match: (p: string) => p === '/registry/submit',
+          },
+        ]
+      : [
+          {
+            href: '/about',
+            label: t($messages, 'navAbout'),
+            icon: 'info' as const,
+            match: (p: string) => p === '/about',
+          },
+          {
+            href: '/contact',
+            label: t($messages, 'navContact'),
+            icon: 'mail' as const,
+            match: (p: string) => p === '/contact',
+          },
+          {
+            href: '/x402',
+            label: t($messages, 'navX402'),
+            icon: 'hub' as const,
+            match: (p: string) => p === '/x402' || p.startsWith('/x402/'),
+          },
+        ],
+  )
 
   const drawerNav = $derived([...sections, ...moreNav])
 
+  // The product switcher. On the News build it lists News/Marketplace (+
+  // Suggestions/Admin) as in-app SPA routes. On the Marketplace build it is
+  // just Marketplace (self) + News -- but News is a DIFFERENT domain
+  // (algorand.pxke.me), a real cross-origin navigation, not client-side
+  // routing -- hence `external`, rendered as a plain <a>, never go()/navigate().
+  // Registry entry, shared by whichever build ISN'T the registry build --
+  // always external (a separate domain/SPA either way).
+  const registrySwitcherEntry = {
+    href: config.registrySiteUrl,
+    label: 'Registry',
+    tagline: 'A free, human-reviewed directory of Algorand projects.',
+    icon: 'hub' as const,
+    active: (_p: string): boolean => false,
+    external: true,
+  } as const
+
   const products = $derived(
-    [
-      {
-        href: '/',
-        label: t($messages, 'navNews'),
-        tagline: t($messages, 'homeNewsDescription'),
-        icon: 'menu_book' as const,
-        active: (p: string) =>
-          p === '/' ||
-          p.startsWith('/news') ||
-          p === '/hot' ||
-          p === '/top' ||
-          p === '/topics' ||
-          p.startsWith('/topic/') ||
-          p === '/about' ||
-          p === '/contact',
-      },
-      {
-        href: '/x402',
-        label: t($messages, 'navX402'),
-        tagline: t($messages, 'x402ProductTagline'),
-        icon: 'hub' as const,
-        active: (p: string) => p === '/x402' || p.startsWith('/x402/'),
-      },
-      ...(config.suggestionsEnabled
-        ? [
-            {
-              href: '/suggestions',
-              label: t($messages, 'navSuggestions'),
-              tagline: t($messages, 'homeSuggestionsDescription'),
-              icon: 'lightbulb' as const,
-              active: (p: string) => p.startsWith('/suggestions'),
-            },
-          ]
-        : []),
-      ...($isAdmin
-        ? [
-            {
-              href: '/admin',
-              label: t($messages, 'navAdmin'),
-              tagline: t($messages, 'adminSubtitle'),
-              icon: 'admin' as const,
-              active: (p: string) => p.startsWith('/admin'),
-            },
-          ]
-        : []),
-    ] as const,
+    config.product === 'marketplace'
+      ? ([
+          {
+            href: '/',
+            label: t($messages, 'navX402'),
+            tagline: t($messages, 'x402ProductTagline'),
+            icon: 'hub' as const,
+            active: (_p: string): boolean => true,
+            external: false,
+          },
+          {
+            href: config.newsSiteUrl,
+            label: t($messages, 'navNews'),
+            tagline: t($messages, 'homeNewsDescription'),
+            icon: 'menu_book' as const,
+            active: (_p: string): boolean => false,
+            external: true,
+          },
+          registrySwitcherEntry,
+        ] as const)
+      : config.product === 'registry'
+      ? // Registry build: a small, single-purpose site, but still one of
+        // three sibling products -- News and Marketplace need a way out
+        // (operator ask 2026-09-07: "no menu to go to news/x402?").
+        ([
+          {
+            href: '/',
+            label: 'PXke Registry',
+            tagline: 'A free, human-reviewed directory of Algorand projects.',
+            icon: 'hub' as const,
+            active: (_p: string): boolean => true,
+            external: false,
+          },
+          {
+            href: config.newsSiteUrl,
+            label: t($messages, 'navNews'),
+            tagline: t($messages, 'homeNewsDescription'),
+            icon: 'menu_book' as const,
+            active: (_p: string): boolean => false,
+            external: true,
+          },
+          {
+            href: config.marketplaceSiteUrl,
+            label: t($messages, 'navX402'),
+            tagline: t($messages, 'x402ProductTagline'),
+            icon: 'hub' as const,
+            active: (_p: string): boolean => false,
+            external: true,
+          },
+        ] as const)
+      : ([
+          {
+            href: '/',
+            label: t($messages, 'navNews'),
+            tagline: t($messages, 'homeNewsDescription'),
+            icon: 'menu_book' as const,
+            active: (p: string): boolean =>
+              p === '/' ||
+              p.startsWith('/news') ||
+              p === '/hot' ||
+              p === '/top' ||
+              p === '/topics' ||
+              p.startsWith('/topic/') ||
+              p === '/about' ||
+              p === '/contact',
+            external: false,
+          },
+          {
+            // Cross-origin since 2026-09-07 (x402.pxke.me split out) -- /x402
+            // still 301s here for old links/bookmarks, but the switcher
+            // itself should send a fresh click straight to the real domain,
+            // not through a redirect hop.
+            href: config.marketplaceSiteUrl,
+            label: t($messages, 'navX402'),
+            tagline: t($messages, 'x402ProductTagline'),
+            icon: 'hub' as const,
+            active: (_p: string): boolean => false,
+            external: true,
+          },
+          registrySwitcherEntry,
+          ...(config.suggestionsEnabled
+            ? [
+                {
+                  href: '/suggestions',
+                  label: t($messages, 'navSuggestions'),
+                  tagline: t($messages, 'homeSuggestionsDescription'),
+                  icon: 'lightbulb' as const,
+                  active: (p: string): boolean => p.startsWith('/suggestions'),
+                  external: false,
+                },
+              ]
+            : []),
+          ...($isAdmin
+            ? [
+                {
+                  href: '/admin',
+                  label: t($messages, 'navAdmin'),
+                  tagline: t($messages, 'adminSubtitle'),
+                  icon: 'admin' as const,
+                  active: (p: string): boolean => p.startsWith('/admin'),
+                  external: false,
+                },
+              ]
+            : []),
+        ] as const),
   )
 
   const dateline = $derived(formatDateline($activeLocale))
@@ -234,8 +432,24 @@
       >
         <BrandMark size={34} />
         <span class="titles">
-          <span class="name wide">{t($messages, 'appTitle')}</span>
-          <span class="name compact">PXke</span>
+          <!-- Marketplace/registry builds: masthead word changes, everything
+               else (brand mark, dateline, layout) stays the shared design
+               system -- plain literals, not new i18n keys, matching how the
+               compact "PXke" fallback below was already untranslated. -->
+          <span class="name wide">
+            {config.product === 'marketplace'
+              ? 'PXke x402'
+              : config.product === 'registry'
+              ? 'PXke Registry'
+              : t($messages, 'appTitle')}
+          </span>
+          <span class="name compact"
+            >{config.product === 'marketplace'
+              ? 'x402'
+              : config.product === 'registry'
+              ? 'Registry'
+              : 'PXke'}</span
+          >
           <span class="dateline">
             <span class="date-long">{dateline}</span>
             <span class="date-short">{datelineShort}</span>
@@ -309,18 +523,35 @@
             <div class="popover apps-popover" role="menu">
               <p class="popover-hint">{t($messages, 'navProductsMenuHint')}</p>
               {#each products as product (product.href)}
-                <button
-                  type="button"
-                  class="product-row"
-                  class:active={product.active($pathOnly)}
-                  role="menuitem"
-                  onclick={() => go(product.href)}
-                >
-                  <span class="product-copy">
-                    <span class="product-label">{product.label}</span>
-                    <span class="product-tagline">{product.tagline}</span>
-                  </span>
-                </button>
+                {#if product.external}
+                  <!-- Cross-domain product (News, from the Marketplace build): a
+                       real navigation, never go()/navigate() -- the two builds
+                       are separate SPAs on separate origins. -->
+                  <a
+                    class="product-row"
+                    href={product.href}
+                    role="menuitem"
+                    onclick={closePopovers}
+                  >
+                    <span class="product-copy">
+                      <span class="product-label">{product.label}</span>
+                      <span class="product-tagline">{product.tagline}</span>
+                    </span>
+                  </a>
+                {:else}
+                  <button
+                    type="button"
+                    class="product-row"
+                    class:active={product.active($pathOnly)}
+                    role="menuitem"
+                    onclick={() => go(product.href)}
+                  >
+                    <span class="product-copy">
+                      <span class="product-label">{product.label}</span>
+                      <span class="product-tagline">{product.tagline}</span>
+                    </span>
+                  </button>
+                {/if}
               {/each}
             </div>
           {/if}
@@ -397,7 +628,13 @@
     </div>
   </header>
 
-  <MarketsBar />
+  <!-- Registry build: a single-purpose directory site, not the newspaper --
+       no ALGO price/round ticker chrome. MarketsBar's own showOn already
+       gates on `/`, which the registry build also uses as its root, so this
+       is excluded at the call site rather than inside the shared component. -->
+  {#if config.product !== 'registry'}
+    <MarketsBar />
+  {/if}
 
   {#if drawerOpen}
     <div class="drawer-backdrop" onclick={() => (drawerOpen = false)} role="presentation"></div>
@@ -413,18 +650,28 @@
       {#if products.length > 1}
         <p class="drawer-label">{t($messages, 'navApps')}</p>
         {#each products as product (product.href)}
-          <button
-            type="button"
-            class="drawer-link"
-            class:selected={product.active($pathOnly)}
-            onclick={() => go(product.href)}
-          >
-            {product.label}
-          </button>
+          {#if product.external}
+            <a class="drawer-link" href={product.href}>{product.label}</a>
+          {:else}
+            <button
+              type="button"
+              class="drawer-link"
+              class:selected={product.active($pathOnly)}
+              onclick={() => go(product.href)}
+            >
+              {product.label}
+            </button>
+          {/if}
         {/each}
       {/if}
 
-      <p class="drawer-label">{t($messages, 'navNews')}</p>
+      <p class="drawer-label">
+        {config.product === 'marketplace'
+          ? t($messages, 'navX402')
+          : config.product === 'registry'
+          ? 'Registry'
+          : t($messages, 'navNews')}
+      </p>
       {#each drawerNav as item (item.href)}
         <button
           type="button"

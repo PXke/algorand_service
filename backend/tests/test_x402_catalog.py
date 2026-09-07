@@ -376,17 +376,154 @@ def test_prices_come_from_settings(monkeypatch: pytest.MonkeyPatch) -> None:
     assert by_key[("POST", "/api/v1/x402/list")]["paid"] is True
 
 
-def test_storage_paid_routes_advertise_price_per_mb(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Storage create/renew are per-MB: price_usd is the rate, price_unit is MB, unlike every flat-priced route."""
+def test_storage_paid_routes_advertise_price_per_kb(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Storage create/renew/add-version are per-KB: price_usd is the rate, price_unit is KB, unlike every flat-priced route."""
     _all_gates_on(monkeypatch)
     by_key = {(r["method"], r["path"]): r for r in _catalog_routes(monkeypatch)}
     create = by_key[("POST", "/api/v1/x402/storage/backups")]
     renew = by_key[("POST", "/api/v1/x402/storage/backups/:backup_id/renew")]
-    assert create["price_usd"] == settings.x402_storage_price_per_mb
-    assert create["price_unit"] == "MB"
-    assert renew["price_unit"] == "MB"
+    assert create["price_usd"] == settings.x402_storage_price_per_kb_per_90d
+    assert create["price_unit"] == "KB"
+    assert renew["price_unit"] == "KB"
     listing = by_key[("POST", "/api/v1/x402/list")]
     assert listing["price_unit"] is None
+
+
+def test_storage_price_display_is_a_readable_per_mb_rate_not_the_raw_per_kb_float(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """price_display must rescale storage's per-KB rate to a readable per-MB figure.
+
+    2026-09-07 UX audit N15: price_usd for storage's per-KB routes is an unreadable raw
+    float ("$0.000001953125"); price_display must rescale it to a sane per-MB figure instead
+    of repeating that artifact, while price_usd itself is left untouched (still the exact rate
+    create()/renew()/add_version() actually charge from).
+    """
+    _all_gates_on(monkeypatch)
+    monkeypatch.setattr(settings, "x402_storage_price_per_kb_per_90d", "$0.000001953125")
+    monkeypatch.setattr(settings, "x402_storage_term_days", 90)
+    by_key = {(r["method"], r["path"]): r for r in _catalog_routes(monkeypatch)}
+    create = by_key[("POST", "/api/v1/x402/storage/backups")]
+    assert create["price_usd"] == "$0.000001953125"
+    assert create["price_display"] == "$0.002 / MB / 90 days"
+    # A flat-priced route's price_display is just its already-human price_usd, echoed as-is.
+    listing = by_key[("POST", "/api/v1/x402/list")]
+    assert listing["price_display"] == listing["price_usd"]
+    # A free route has no price_display at all.
+    search = by_key[("GET", "/api/v1/x402/search")]
+    assert search["price_display"] is None
+
+
+def test_products_v2_fields_present_and_status_reflects_actual_gating(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every products[] entry carries section/summary/status/entry/auth, status live-computed.
+
+    2026-09-07 v2 discovery document (docs/x402-marketplace-product-redesign.md section 3.4):
+    status is computed from the SAME gate create_app() uses -- never a hand-set flag that
+    could drift.
+
+    With every store gate OFF except x402_scan/x402_uptime's bool gates and the catalog
+    itself (the closest config to today's live prod, where kya and receipts are genuinely
+    not registered -- see the 2026-09-07 UX audit's live-fetched fact table), kya and
+    receipts must be the only two products marked "gated"; every other product in the
+    roster is "live".
+    """
+    _configure(
+        monkeypatch,
+        x402_directory_store="cassandra",
+        x402_board_store="cassandra",
+        x402_features_store="cassandra",
+        x402_grading_store="cassandra",
+        news_store="cassandra",
+        x402_social_store="cassandra",
+        x402_storage_meta_store="cassandra",
+        x402_scan_enabled=True,
+        x402_uptime_enabled=True,
+        # kyc_store and x402_receipts_store are left at _configure's "memory" baseline.
+    )
+    doc = catalog_service.build_catalog()
+    products_by_key = {p["key"]: p for p in doc["products"]}
+    roster_by_key = {p.key: p for p in catalog_service.PRODUCTS}
+    assert set(products_by_key) == set(roster_by_key)
+    section_keys = {s["key"] for s in doc["sections"]}
+    for key, product in products_by_key.items():
+        for field in ("section", "summary", "status", "entry", "auth"):
+            assert product[field], f"{key}.{field} is empty"
+        assert product["section"] in section_keys, key
+        assert product["status"] in {"live", "gated"}, key
+        method, _, path = product["entry"].partition(" ")
+        assert method in {"GET", "POST", "PUT", "PATCH", "DELETE"}, key
+        assert path.startswith("/api/v1/"), key
+        # entry must be one of this product's OWN routes, not a typo pointing elsewhere.
+        own_paths = {(r.method, r.path) for r in roster_by_key[key].routes}
+        assert (method, path) in own_paths, key
+    assert products_by_key["kya"]["status"] == "gated"
+    assert products_by_key["receipts"]["status"] == "gated"
+    live_keys = {key for key, p in products_by_key.items() if p["status"] == "live"}
+    assert live_keys == {product.key for product in catalog_service.PRODUCTS} - {
+        "kya",
+        "receipts",
+    }
+
+
+def test_products_v2_gated_products_are_absent_from_routes_but_present_in_products(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """routes[] excludes gated products even though products[] now lists everything.
+
+    A gated product's routes are not registered (calling one would 404), so routes[] must
+    still exclude them -- only products[] gained the "list everything, mark the status" shape.
+    """
+    _configure(monkeypatch)  # every gate off (the harness's "memory"/False baseline)
+    doc = catalog_service.build_catalog()
+    products_by_key = {p["key"]: p for p in doc["products"]}
+    assert set(products_by_key) == {p.key for p in catalog_service.PRODUCTS}
+    assert all(p["status"] == "gated" for k, p in products_by_key.items() if k != "catalog")
+    assert {r["product"] for r in doc["routes"]} == {"catalog"}
+
+
+def test_sections_cover_every_product_and_categories_are_generated_not_hand_written(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`categories`/`description` are generated from which sections have a live product now.
+
+    2026-09-07 UX audit N14: the old hard-coded description/categories claimed KYA/
+    "identity" as live regardless of whether it was actually registered.
+    """
+    _all_gates_on(monkeypatch)
+    doc = catalog_service.build_catalog()
+    section_keys = {s["key"] for s in doc["sections"]}
+    product_sections = {p["section"] for p in doc["products"]}
+    assert product_sections <= section_keys
+    assert doc["categories"], "categories must not be empty when every product is live"
+    assert set(doc["categories"]) <= section_keys
+    assert "identity" not in doc["categories"]
+    assert "KYA" not in doc["description"]
+
+
+def test_descriptions_resolve_setting_placeholders(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Published descriptions carry live values ("30 days"), never a raw setting name.
+
+    The roster writes `{x402_listing_term_days}`-style placeholders;
+    _route_json must resolve every one from settings, so no document surface
+    (catalog, /.well-known/x402, /openapi.json) ever shows an agent a config
+    attribute name instead of the number it stands for. Rendering every
+    description here also makes a typo'd placeholder fail the suite instead
+    of raising in production.
+    """
+    _all_gates_on(monkeypatch)
+    monkeypatch.setattr(settings, "x402_listing_term_days", 30)
+    routes = _catalog_routes(monkeypatch)
+    assert routes
+    for route in routes:
+        description = route["description"]
+        assert "{" not in description, route["path"]
+        assert "}" not in description, route["path"]
+        assert not re.search(r"\bx402_[a-z0-9_]+\b", description), route["path"]
+    by_key = {(r["method"], r["path"]): r for r in routes}
+    listing = by_key[("POST", "/api/v1/x402/list")]
+    assert "30 days" in listing["description"]
 
 
 def test_every_paid_route_has_a_real_price_setting_and_resource() -> None:
@@ -444,6 +581,11 @@ _PROMO_UNWIRED_RESOURCES = {
     # candidate for `supports_promo=True` if this module's promo stance is
     # ever revisited.
     "x402-social-agent-search",
+    # Spend-weighted agent leaderboard (added 2026-09-06): same reasoning as
+    # Agent Discovery Search immediately above -- payer here is only payment
+    # attribution for a read, not an identity claim -- staying consistent
+    # with the rest of x402_social's current promo-off stance.
+    "x402-social-agent-leaderboard",
     # x402_storage's two paid routes (backup create, renew): same reasoning
     # as x402_social's reversal above -- PaymentResult.payer is fed straight
     # in as the ROW'S OWNING WALLET (x402_storage_backups is partitioned by
@@ -454,6 +596,10 @@ _PROMO_UNWIRED_RESOURCES = {
     # closed for the same reason.
     "x402-storage-backup-create",
     "x402-storage-backup-renew",
+    # Same reasoning again: add_version's ownership check compares
+    # result.payer straight against the backup's owning wallet, identical
+    # shape to renew's own no-proven-payer gap above.
+    "x402-storage-backup-add-version",
     # x402_directory's paid list/renew routes (2026-09-04): the identical
     # result.payer-as-ownership pattern flagged, not fixed, alongside the
     # x402_social reversal above (commit f8d84a6) -- `payer` becomes the
@@ -462,13 +608,18 @@ _PROMO_UNWIRED_RESOURCES = {
     # claim/grief a url or free-renew a listing by its already-public payer
     # address. See x402_directory/api/routes.py's own module docstring.
     "x402-directory-list",
-    "x402-directory-renew",
+    "x402-directory-boost",
     # x402_board's paid place/renew routes (2026-09-04): same pattern --
     # `payer` becomes the placement's owner attribution (create()'s
     # attribution, renew()'s `attributed != placement.payer` check). See
     # x402_board/api/routes.py's own module docstring.
     "x402-board-place",
-    "x402-board-renew",
+    "x402-board-boost",
+    # x402_board's new paid click-analytics read (2026-09-07): same pattern
+    # again -- the ownership check compares `payer` against the placement's
+    # existing owner (api/routes.py's _click_history_product). See that
+    # module's own module docstring.
+    "x402-board-click-history",
 }
 
 
@@ -498,13 +649,71 @@ def test_assets_follow_the_network(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(settings, "x402_network", ALGORAND_MAINNET_CAIP2)
     mainnet = catalog_service.build_catalog()
     assert mainnet["network_name"] == "mainnet"
-    assert [a["symbol"] for a in mainnet["assets"]] == ["USDC", "EURQ", "USDQ"]
+    assert [a["symbol"] for a in mainnet["assets"]] == ["USDC", "EURQ", "USDQ", "goBTC"]
     assert mainnet["assets"][0]["asa_id"] == 31566704
 
 
 # --------------------------------------------------------------------------- #
 # Rate limit
 # --------------------------------------------------------------------------- #
+# --------------------------------------------------------------------------- #
+# Recent-settlements proof-of-volume feed
+# --------------------------------------------------------------------------- #
+def test_recent_settlements_json_empty_state_points_to_facilitator_merchant_page() -> None:
+    """An empty recent window is honest, not a bare `{"items": []}` with no context.
+
+    Real (non-operator) third-party volume is genuinely low this early --
+    the response must say so plainly and point somewhere independently
+    verifiable, never fabricate an entry to fill the gap (CLAUDE.md section 9).
+    """
+    from app.modules.x402.settlement import InMemorySettlementStore, set_settlement_store
+
+    set_settlement_store(InMemorySettlementStore())
+    try:
+        result = catalog_service.recent_settlements_json()
+        assert result["items"] == []
+        assert result["note"]
+        assert "facilitator" in result["note"].lower()
+        assert result["verify_at"] == catalog_service._GOPLAUSIBLE_MERCHANT_URL
+        assert result["verify_at"].startswith("https://facilitator.goplausible.xyz/")
+    finally:
+        set_settlement_store(None)
+
+
+def test_recent_settlements_json_nonempty_has_no_empty_state_extras() -> None:
+    """A non-empty window is just the plain items list -- no note/verify_at clutter."""
+    from datetime import UTC, datetime
+
+    from app.modules.x402.settlement import (
+        InMemorySettlementStore,
+        SettlementRecord,
+        set_settlement_store,
+    )
+
+    store = InMemorySettlementStore()
+    store.record_settlement(
+        SettlementRecord(
+            tx_id="tx-1",
+            asset_id="31566704",
+            amount_atomic="1000",
+            payer="Q" * 58,
+            resource="x402-news-search",
+            network=ALGORAND_MAINNET_CAIP2,
+            settled_at_epoch=int(datetime.now(tz=UTC).timestamp()),
+            eur_value=0.001,
+            fulfilled=True,
+        )
+    )
+    set_settlement_store(store)
+    try:
+        result = catalog_service.recent_settlements_json()
+        assert [item["tx_id"] for item in result["items"]] == ["tx-1"]
+        assert "note" not in result
+        assert "verify_at" not in result
+    finally:
+        set_settlement_store(None)
+
+
 def test_catalog_is_rate_limited_per_ip_and_fails_open(monkeypatch: pytest.MonkeyPatch) -> None:
     """Third call from one IP within the budget of 2 is a 429; another IP is unaffected; a Redis failure fails open."""
     _configure(monkeypatch)

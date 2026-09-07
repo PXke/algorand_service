@@ -8,11 +8,13 @@ from __future__ import annotations
 
 import base64
 import json
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import ClassVar
 
 import pytest
+from algorand_shared.x402_statements import PROBE_QUEUE_NEVER_PROBED
 from celery.exceptions import SoftTimeLimitExceeded
 
 import app.celery_app as celery_app
@@ -72,8 +74,166 @@ class _FakeRepo:
     def record_result(self, url_hash: str, result: ProbeResult) -> None:
         self.events.append(("record", url_hash, result))
 
+    def mark_probed(self, listing: ListingRow, at: datetime) -> None:
+        self.events.append(("mark_probed", listing.url_hash, at))
+
     def set_verified(self, listing: ListingRow, wallet: str, at: datetime | None) -> None:
         self.events.append(("verify", listing.url_hash, wallet, at))
+
+    def extend_term(self, listing: ListingRow, until: datetime) -> None:
+        self.events.append(("extend", listing.url_hash, until))
+
+
+class _FakeQueueRepo:
+    """In-memory model of x402_probe_queue's real semantics: ASC-by-last-probed-at, LIMITed, self-pruning of expired rows, reposition on every probe attempt.
+
+    Used to prove the FAIRNESS CONTRACT run_probe_sweep now depends on --
+    every live listing gets probed within one full pass regardless of total
+    count -- without needing a real Cassandra session. The real
+    CassandraProbeRepository's CQL is exercised separately (see the
+    Cassandra-repository tests below); this fake proves the ALGORITHM the
+    real reads/writes implement is actually fair.
+    """
+
+    def __init__(self, listings: list[ListingRow]) -> None:
+        # Every listing starts "never probed" (queue_position defaults to
+        # PROBE_QUEUE_NEVER_PROBED), exactly like a freshly-seeded row.
+        self._by_hash: dict[str, ListingRow] = {item.url_hash: item for item in listings}
+        self.probed_order: list[str] = []
+        self.term_ends: dict[str, datetime] = {item.url_hash: item.term_end for item in listings}
+
+    def list_live_listings(self, *, now: datetime, limit: int) -> list[ListingRow]:
+        live = [
+            replace(item, term_end=self.term_ends[item.url_hash])
+            for item in self._by_hash.values()
+            if self.term_ends[item.url_hash] > now
+        ]
+        live.sort(key=lambda item: (item.queue_position, item.url_hash))
+        return live[:limit]
+
+    def record_result(self, url_hash: str, result: ProbeResult) -> None:  # noqa: ARG002 -- Protocol shape
+        self.probed_order.append(url_hash)
+
+    def mark_probed(self, listing: ListingRow, at: datetime) -> None:
+        self._by_hash[listing.url_hash] = replace(listing, queue_position=at)
+
+    def set_verified(self, listing: ListingRow, wallet: str, at: datetime | None) -> None:
+        pass
+
+    def extend_term(self, listing: ListingRow, until: datetime) -> None:
+        self.term_ends[listing.url_hash] = until
+
+
+class _PointResult:
+    """Fakes a Cassandra ResultSet's `.one()` for a single-row (or empty) point read."""
+
+    def __init__(self, row: object | None) -> None:
+        self._row = row
+
+    def one(self) -> object | None:
+        return self._row
+
+
+class _FakeCassandraSession:
+    """A faithful two-TABLE fake: x402_probe_queue and x402_listings' term_end are genuinely separate dicts, exactly like the real Cassandra tables.
+
+    Deliberately NOT the same trick as _FakeQueueRepo above (which fakes the
+    whole ProbeRepository Protocol to prove run_probe_sweep's round-robin
+    ALGORITHM is fair): this fake instead sits one layer down, faking the
+    Cassandra session itself, so the REAL CassandraProbeRepository code runs
+    against it -- list_live_listings(), mark_probed(), and extend_term() all
+    execute their actual CQL dispatch. A regression that reads
+    x402_probe_queue.term_end for an expiry decision, or that forgets to
+    write the canonical x402_listings.term_end on a healthy probe, fails a
+    test built on this fixture -- the exact gap the second same-night
+    adversarial review found in the prior round's test suite (a fake that
+    synthesized a fresh term_end into every queue read from a map extend_term
+    conveniently also wrote, which the real repository does not do).
+    """
+
+    def __init__(self) -> None:
+        # x402_probe_queue: (last_probed_at, url_hash) -> row. Ordering only.
+        self.queue: dict[tuple[datetime, str], SimpleNamespace] = {}
+        # x402_listings.term_end: url_hash -> term_end. The ONLY canonical
+        # field this fixture needs, since it's the only one under test here.
+        self.listing_term_end: dict[str, datetime] = {}
+
+    def seed_listing(self, listing: ListingRow) -> None:
+        """Seed both tables the way backend's create()/relist() does: a queue row at PROBE_QUEUE_NEVER_PROBED, and the canonical term_end."""
+        self.queue[(PROBE_QUEUE_NEVER_PROBED, listing.url_hash)] = SimpleNamespace(
+            url_hash=listing.url_hash,
+            url=listing.url,
+            created_at=listing.created_at,
+            tags=set(listing.tags),
+            term_end=listing.term_end,
+            payer=listing.payer,
+            verified_wallet=listing.verified_wallet,
+            category=listing.category,
+            last_probed_at=PROBE_QUEUE_NEVER_PROBED,
+        )
+        self.listing_term_end[listing.url_hash] = listing.term_end
+
+    def _execute_queue(self, stmt: str, params: tuple) -> object:
+        if stmt.startswith("SELECT"):
+            _directory, limit = params
+            rows = sorted(self.queue.values(), key=lambda r: (r.last_probed_at, r.url_hash))
+            return rows[:limit]
+        if stmt.startswith("DELETE"):
+            _directory, last_probed_at, url_hash = params
+            self.queue.pop((last_probed_at, url_hash), None)
+            return []
+        # INSERT (seed or reposition).
+        (
+            _directory,
+            last_probed_at,
+            url_hash,
+            url,
+            created_at,
+            tags,
+            term_end,
+            payer,
+            verified_wallet,
+            category,
+        ) = params
+        self.queue[(last_probed_at, url_hash)] = SimpleNamespace(
+            url_hash=url_hash,
+            url=url,
+            created_at=created_at,
+            tags=tags,
+            term_end=term_end,
+            payer=payer,
+            verified_wallet=verified_wallet,
+            category=category,
+            last_probed_at=last_probed_at,
+        )
+        return []
+
+    def _execute_canonical_listings(self, stmt: str, params: tuple) -> object:
+        if stmt.startswith("SELECT"):
+            (url_hash,) = params
+            term_end = self.listing_term_end.get(url_hash)
+            return _PointResult(None if term_end is None else SimpleNamespace(term_end=term_end))
+        if stmt.startswith("UPDATE") and "SET term_end" in stmt:
+            until, url_hash = params
+            if url_hash in self.listing_term_end:
+                self.listing_term_end[url_hash] = until
+            return []
+        return []  # e.g. SET_VERIFIED_LISTING -- badge writes, not modeled here
+
+    def execute(self, stmt: str, params: tuple) -> object:
+        if "x402_probe_queue" in stmt:
+            return self._execute_queue(stmt, params)
+        if "x402_listings_by_recency" in stmt or "x402_listings_by_tag" in stmt:
+            return []  # projections not modeled: irrelevant to term_end sourcing
+        if "x402_listings" in stmt:
+            return self._execute_canonical_listings(stmt, params)
+        if "x402_probe_results" in stmt or "x402_probe_latest" in stmt:
+            return []
+        raise AssertionError(f"_FakeCassandraSession: unexpected statement: {stmt}")
+
+    def execute_parallel_with_args(self, stmt: object, params_list: list, **_kw: object) -> list:
+        """Fakes app.core.cassandra.execute_parallel_with_args by fanning params_list through this same session's execute() -- same dispatch table as the primary reads/writes, never a second, independently-mutated copy of the data."""
+        return [(True, self.execute(stmt, params)) for params in params_list]
 
 
 # --------------------------------------------------------------------------- #
@@ -345,30 +505,104 @@ def test_badge_is_not_granted_to_an_unowned_listing() -> None:
 # --------------------------------------------------------------------------- #
 # The sweep: store before mark, per-URL isolation
 # --------------------------------------------------------------------------- #
-def test_sweep_records_the_probe_before_marking_verified() -> None:
-    """The probe result is stored first, the badge written second (store before mark)."""
+def test_sweep_records_the_probe_before_marking_verified_and_extending_term() -> None:
+    """The probe result is stored first, then the term_end extension, then the badge (store before mark)."""
     repo = _FakeRepo([_listing()])
     summary = run_probe_sweep(
         repo=repo,
         fetch=lambda _u: RawResponse(status=402, headers=_offer_header(), body=b""),
         now=NOW,
     )
-    assert [e[0] for e in repo.events] == ["record", "verify"]
-    assert repo.events[1][2:] == (PAYER, NOW)
+    assert [e[0] for e in repo.events] == ["record", "mark_probed", "extend", "verify"]
+    assert repo.events[3][2:] == (PAYER, NOW)
     assert summary["verified"] == 1
+    assert summary["extended"] == 1
     assert summary["probed"] == 1
 
 
 def test_sweep_clears_a_badge_when_payto_changes() -> None:
-    """A verified listing advertising a different payTo gets its badge cleared (wallet "" / at None)."""
+    """A verified listing advertising a different payTo gets its badge cleared (wallet "" / at None), and term_end still extends since the probe itself is healthy."""
     repo = _FakeRepo([_listing(verified=PAYER)])
     summary = run_probe_sweep(
         repo=repo,
         fetch=lambda _u: RawResponse(status=402, headers=_offer_header(OTHER), body=b""),
         now=NOW,
     )
+    assert [e[0] for e in repo.events] == ["record", "mark_probed", "extend", "verify"]
     assert repo.events[-1] == ("verify", "h-https://api.example.com/q", "", None)
     assert summary["cleared"] == 1
+    assert summary["extended"] == 1
+
+
+# --------------------------------------------------------------------------- #
+# Probe-fed keep-alive (2026-09-06 pricing-model change, migration 114):
+# a HEALTHY probe extends term_end; an UNHEALTHY one changes nothing.
+# --------------------------------------------------------------------------- #
+def test_a_healthy_probe_extends_term_end_forward_by_the_configured_window() -> None:
+    """Reachable AND served_valid_402 pushes term_end to now + X402_LISTING_TERM_DAYS."""
+    listing = _listing()
+    repo = _FakeRepo([listing])
+
+    summary = run_probe_sweep(
+        repo=repo,
+        fetch=lambda _u: RawResponse(status=402, headers=_offer_header(), body=b""),
+        now=NOW,
+    )
+
+    extends = [e for e in repo.events if e[0] == "extend"]
+    assert len(extends) == 1
+    assert extends[0] == (
+        "extend",
+        listing.url_hash,
+        NOW + timedelta(days=config.X402_LISTING_TERM_DAYS),
+    )
+    assert summary["extended"] == 1
+
+
+def test_an_unreachable_probe_never_extends_term_end() -> None:
+    """An outage must not extend survival -- the same 'transient outage changes nothing' rule the badge already follows."""
+    repo = _FakeRepo([_listing()])
+
+    def _unreachable(_url: str) -> RawResponse:
+        raise TimeoutError("connection timed out")
+
+    summary = run_probe_sweep(repo=repo, fetch=_unreachable, now=NOW)
+
+    assert [e for e in repo.events if e[0] == "extend"] == []
+    assert summary["extended"] == 0
+    assert summary["reachable"] == 0
+
+
+def test_a_reachable_but_invalid_402_never_extends_term_end() -> None:
+    """Reachable but NOT a valid x402 challenge is not something a payer could transact against -- must not extend term_end, mirroring probe_leaderboard()'s own 'healthy' definition."""
+    repo = _FakeRepo([_listing()])
+
+    summary = run_probe_sweep(
+        repo=repo,
+        fetch=lambda _u: RawResponse(status=200, headers={}, body=b"not a 402"),
+        now=NOW,
+    )
+
+    assert [e for e in repo.events if e[0] == "extend"] == []
+    assert summary["extended"] == 0
+    assert summary["reachable"] == 1
+    assert summary["valid_402"] == 0
+
+
+def test_extend_term_never_moves_term_end_backward() -> None:
+    """A listing whose term_end is already further out than now + the configured window is left alone -- extend_term is only ever called when it would move things forward (run_probe_sweep's own `target > listing.term_end` guard)."""
+    far_future = NOW + timedelta(days=config.X402_LISTING_TERM_DAYS + 100)
+    listing = replace(_listing(), term_end=far_future)
+    repo = _FakeRepo([listing])
+
+    summary = run_probe_sweep(
+        repo=repo,
+        fetch=lambda _u: RawResponse(status=402, headers=_offer_header(), body=b""),
+        now=NOW,
+    )
+
+    assert [e for e in repo.events if e[0] == "extend"] == []
+    assert summary["extended"] == 0
 
 
 def test_sweep_survives_a_failing_listing_and_probes_the_rest() -> None:
@@ -448,7 +682,110 @@ def test_sweep_never_pays_even_when_our_own_endpoint_is_listed() -> None:
     repo = _FakeRepo([_listing(url="https://algorand-api.pxke.me/api/v1/x402/list")])
     run_probe_sweep(repo=repo, fetch=_fetch, now=NOW)
     assert fetched == ["https://algorand-api.pxke.me/api/v1/x402/list"]
-    assert all(e[0] in ("record", "verify") for e in repo.events)
+    assert all(e[0] in ("record", "mark_probed", "extend", "verify") for e in repo.events)
+
+
+# --------------------------------------------------------------------------- #
+# Fairness queue: no listing is permanently stranded outside a naive LIMIT
+# window regardless of total listing count (finding #3, migration 118)
+# --------------------------------------------------------------------------- #
+def test_every_listing_is_eventually_probed_and_kept_alive_regardless_of_total_count() -> None:
+    """A directory with far more listings than any single sweep's LIMIT still gets every listing probed, and kept alive, within one full round-robin pass -- not just the newest ones.
+
+    Root cause this guards against: the OLD read (newest-created-first,
+    LIMITed, never advancing) meant anything past position `limit` was
+    NEVER read again once the directory grew past that many rows, so an
+    old-but-healthy listing's term_end silently stopped being extended and
+    it expired on schedule. The fairness queue (least-recently-probed
+    first, repositioned after every attempt) makes the sweep cover
+    everyone within ceil(total / limit) runs, independent of creation order
+    or total count.
+    """
+    total_listings = 237
+    per_run_limit = 50
+    # Long enough to survive every listing's wait for its turn in the
+    # round-robin (7 runs x 30 min = 3.5h here) without expiring first --
+    # this test is about COVERAGE ordering, not about racing term_end.
+    short_term = NOW + timedelta(days=1)
+    listings = [
+        ListingRow(
+            url_hash=f"h{i}",
+            url=f"https://svc{i}.example.com/x",
+            created_at=NOW - timedelta(days=total_listings - i),  # i=0 is the OLDEST listing
+            tags=(),
+            term_end=short_term,
+            payer=PAYER,
+            verified_wallet="",
+        )
+        for i in range(total_listings)
+    ]
+    repo = _FakeQueueRepo(listings)
+
+    def _fetch(_url: str) -> RawResponse:
+        return RawResponse(status=402, headers=_offer_header(), body=b"")
+
+    # One full round-robin pass takes ceil(total/limit) runs; run a couple
+    # extra to prove it does not merely happen to land exactly on the
+    # boundary.
+    runs = -(-total_listings // per_run_limit) + 2
+    moment = NOW
+    for _ in range(runs):
+        moment += timedelta(minutes=30)
+        run_probe_sweep(repo=repo, fetch=_fetch, now=moment, limit=per_run_limit)
+
+    # Every listing -- including h0, the OLDEST one, which the old
+    # newest-first LIMITed read would never have reached once the directory
+    # passed `per_run_limit` rows -- was actually probed at least once.
+    assert set(repo.probed_order) == {item.url_hash for item in listings}
+    # And every listing is still alive: each healthy probe pushed term_end
+    # forward, so nothing that started with a term expiring in an hour is
+    # still sitting at that original short_term after several 30-minute
+    # sweeps.
+    assert all(end > short_term for end in repo.term_ends.values())
+
+
+def test_an_unhealthy_listing_cannot_camp_at_the_front_of_the_queue() -> None:
+    """A listing that never passes its probe still gets repositioned (mark_probed runs regardless of health), so it cannot permanently hog the front of the least-recently-probed ordering and starve everyone else."""
+    always_broken = ListingRow(
+        url_hash="broken",
+        url="https://broken.example.com/x",
+        created_at=NOW,
+        tags=(),
+        term_end=NOW + timedelta(days=30),
+        payer=PAYER,
+        verified_wallet="",
+    )
+    healthy = [
+        ListingRow(
+            url_hash=f"ok{i}",
+            url=f"https://ok{i}.example.com/x",
+            created_at=NOW,
+            tags=(),
+            # Long enough that an unprobed one waiting its turn never expires
+            # mid-test (3 runs x 30 min here) -- this test is about ORDERING
+            # fairness, not about racing term_end.
+            term_end=NOW + timedelta(days=1),
+            payer=PAYER,
+            verified_wallet="",
+        )
+        for i in range(5)
+    ]
+    repo = _FakeQueueRepo([always_broken, *healthy])
+
+    def _fetch(url: str) -> RawResponse:
+        if "broken" in url:
+            raise TimeoutError("connect timed out")
+        return RawResponse(status=402, headers=_offer_header(), body=b"")
+
+    moment = NOW
+    for _ in range(3):
+        moment += timedelta(minutes=30)
+        run_probe_sweep(repo=repo, fetch=_fetch, now=moment, limit=2)
+
+    # Every healthy listing got probed even though "broken" is always first
+    # alphabetically/by-hash and never succeeds -- it did not get to camp at
+    # the front of every single run.
+    assert {item.url_hash for item in healthy}.issubset(set(repo.probed_order))
 
 
 # --------------------------------------------------------------------------- #
@@ -457,45 +794,81 @@ def test_sweep_never_pays_even_when_our_own_endpoint_is_listed() -> None:
 def test_repository_filters_expired_listings_and_writes_history_before_latest(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """LIST drops expired rows; record_result writes x402_probe_results then x402_probe_latest; set_verified touches canonical, recency, then every tag row including the reserved category row."""
+    """LIST reads x402_probe_queue for ordering, judges expiry off a CANONICAL term_end read (not the queue row's own, possibly-stale copy), prunes an expired row with a DELETE instead of carrying it forward; record_result writes x402_probe_results then x402_probe_latest; set_verified touches canonical, recency, then every tag row including the reserved category row.
+
+    "live"'s queue row carries a deliberately WRONG/stale term_end (100 days
+    in the past -- exactly what the second same-night adversarial-review
+    regression would have judged expired) while its CANONICAL term_end is
+    healthy; "dead"'s queue row carries the opposite lie (100 days in the
+    future) while its canonical term_end has actually lapsed. Only the
+    canonical value may decide either listing's fate -- this is what proves
+    list_live_listings() no longer trusts the queue's own denormalized copy.
+    """
     executed: list[tuple[str, tuple]] = []
 
     class _Session:
         def execute(self, stmt: str, params: tuple) -> list:
             executed.append((stmt, params))
-            if "x402_listings_by_recency" in stmt and stmt.startswith("SELECT"):
+            if "x402_probe_queue" in stmt and stmt.startswith("SELECT"):
                 return [
                     SimpleNamespace(
                         url_hash="live",
                         url="https://l.example.com",
                         created_at=NOW,
                         tags={"fx"},
-                        term_end=NOW + timedelta(days=1),
+                        term_end=NOW - timedelta(days=100),
                         payer=PAYER,
                         verified_wallet=None,
                         category="finance",
+                        last_probed_at=NOW - timedelta(days=2),
                     ),
                     SimpleNamespace(
                         url_hash="dead",
                         url="https://d.example.com",
                         created_at=NOW,
                         tags=set(),
-                        term_end=NOW - timedelta(days=1),
+                        term_end=NOW + timedelta(days=100),
                         payer=PAYER,
                         verified_wallet=None,
                         category=None,
+                        last_probed_at=NOW - timedelta(days=5),
                     ),
                 ]
+            if (
+                stmt.startswith("SELECT")
+                and "x402_listings" in stmt
+                and "x402_listings_by" not in stmt
+            ):
+                (url_hash,) = params
+                canonical = {"live": NOW + timedelta(days=1), "dead": NOW - timedelta(days=1)}
+                return _PointResult(SimpleNamespace(term_end=canonical[url_hash]))
             return []
 
     monkeypatch.setattr("app.core.cassandra.prepare_cached", lambda cql: cql)
-    monkeypatch.setattr("app.modules.x402_probe.service.get_cassandra_session", lambda: _Session())
+    session = _Session()
+    monkeypatch.setattr("app.modules.x402_probe.service.get_cassandra_session", lambda: session)
+    monkeypatch.setattr(
+        "app.modules.x402_probe.service.execute_parallel_with_args",
+        lambda stmt, params_list, **_kw: [(True, session.execute(stmt, p)) for p in params_list],
+    )
     repo = CassandraProbeRepository()
     listings = repo.list_live_listings(now=NOW, limit=50)
     assert [item.url_hash for item in listings] == ["live"]
     assert executed[0][1] == ("default", 50)
     assert "category" in executed[0][0]
     assert listings[0].category == "finance"
+    assert listings[0].queue_position == NOW - timedelta(days=2)
+    # The kept listing's term_end is the CANONICAL value, not the queue
+    # row's own (deliberately wrong, deliberately stale) copy.
+    assert listings[0].term_end == NOW + timedelta(days=1)
+    # The expired "dead" row is pruned outright, not merely skipped, so it
+    # cannot keep occupying a slot in every future LIMITed read -- even
+    # though ITS queue snapshot optimistically claimed 100 more days.
+    deletes = [(s, p) for s, p in executed if s.startswith("DELETE")]
+    assert len(deletes) == 1
+    stmt, params = deletes[0]
+    assert "x402_probe_queue" in stmt
+    assert params == ("default", NOW - timedelta(days=5), "dead")
 
     executed.clear()
     repo.record_result("live", _result(valid=True, payto=PAYER))
@@ -546,6 +919,175 @@ def test_set_verified_writes_the_default_category_row_for_a_pre_099_listing(
     CassandraProbeRepository().set_verified(listing, "", None)
     by_tag = [p for s, p in executed if "x402_listings_by_tag" in s]
     assert by_tag == [("", None, "category:other", NOW, "h")]
+
+
+def test_extend_term_touches_canonical_recency_and_every_tag_row(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """extend_term() writes term_end to the canonical row, the recency projection, and every by-tag row (including the reserved category row) -- same shape and IF EXISTS guard as set_verified()."""
+    executed: list[tuple[str, tuple]] = []
+
+    class _Session:
+        def execute(self, stmt: str, params: tuple) -> list:
+            executed.append((stmt, params))
+            return []
+
+    monkeypatch.setattr("app.core.cassandra.prepare_cached", lambda cql: cql)
+    monkeypatch.setattr("app.modules.x402_probe.service.get_cassandra_session", lambda: _Session())
+    listing = ListingRow(
+        url_hash="h",
+        url="https://l.example.com",
+        created_at=NOW,
+        tags=("fx",),
+        term_end=NOW + timedelta(days=1),
+        payer=PAYER,
+        verified_wallet="",
+        category="finance",
+    )
+    until = NOW + timedelta(days=30)
+
+    CassandraProbeRepository().extend_term(listing, until)
+
+    tables = [s.split(" ")[1] for s, _ in executed]
+    assert tables == [
+        "algorand_platform.x402_listings",
+        "algorand_platform.x402_listings_by_recency",
+        "algorand_platform.x402_listings_by_tag",
+        "algorand_platform.x402_listings_by_tag",
+    ]
+    assert all("IF EXISTS" in s for s, _ in executed)
+    assert executed[0][1] == (until, "h")
+    assert executed[1][1] == (until, "default", NOW, "h")
+    assert executed[2][1] == (until, "fx", NOW, "h")
+    assert executed[3][1] == (until, "category:finance", NOW, "h")
+
+
+def test_mark_probed_deletes_the_old_queue_position_and_inserts_the_new_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """mark_probed() deletes the row at the listing's OLD queue_position, then inserts a fresh row at the new timestamp -- the reposition that makes the queue round-robin (migration 118)."""
+    executed: list[tuple[str, tuple]] = []
+
+    class _Session:
+        def execute(self, stmt: str, params: tuple) -> list:
+            executed.append((stmt, params))
+            return []
+
+    monkeypatch.setattr("app.core.cassandra.prepare_cached", lambda cql: cql)
+    monkeypatch.setattr("app.modules.x402_probe.service.get_cassandra_session", lambda: _Session())
+    old_position = NOW - timedelta(days=3)
+    listing = ListingRow(
+        url_hash="h",
+        url="https://l.example.com",
+        created_at=NOW - timedelta(days=10),
+        tags=("fx",),
+        term_end=NOW + timedelta(days=1),
+        payer=PAYER,
+        verified_wallet="",
+        category="finance",
+        queue_position=old_position,
+    )
+
+    CassandraProbeRepository().mark_probed(listing, NOW)
+
+    assert len(executed) == 2
+    delete_stmt, delete_params = executed[0]
+    assert delete_stmt.startswith("DELETE")
+    assert "x402_probe_queue" in delete_stmt
+    assert delete_params == ("default", old_position, "h")
+    insert_stmt, insert_params = executed[1]
+    assert insert_stmt.startswith("INSERT")
+    assert "x402_probe_queue" in insert_stmt
+    assert insert_params == (
+        "default",
+        NOW,
+        "h",
+        "https://l.example.com",
+        listing.created_at,
+        {"fx"},
+        listing.term_end,
+        PAYER,
+        "",
+        "finance",
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Regression (second same-night adversarial-review finding, 2026-09-06): a
+# healthy listing must survive indefinitely, never dropped from the queue
+# purely because of elapsed wall-clock time since its last extension.
+# --------------------------------------------------------------------------- #
+def test_a_healthy_listing_survives_many_sweep_cycles_past_the_term_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A listing that keeps passing its probe is never pruned from the queue merely because X402_LISTING_TERM_DAYS has elapsed since it was created/last relisted.
+
+    Root cause this guards against: x402_probe_queue.term_end is written
+    once at seed/reposition time and never refreshed by extend_term(),
+    which only ever writes the canonical x402_listings row (and its
+    recency/by-tag projections). Judging expiry off the queue's own copy
+    (the bug this test exists to catch) means a listing gets pruned and
+    permanently stops being reprobed after X402_LISTING_TERM_DAYS from
+    creation, no matter how many times extend_term() has since pushed the
+    REAL term_end forward -- worse than the LIMIT-window bug migration 118
+    itself fixed, since it hits every listing at any scale. This runs the
+    REAL CassandraProbeRepository (via run_probe_sweep) against
+    _FakeCassandraSession, which keeps the queue and the canonical
+    x402_listings term_end as genuinely separate dicts -- a reintroduction
+    of the bug (list_live_listings trusting the queue's own term_end, or
+    extend_term failing to write the canonical one) fails this test.
+    """
+    monkeypatch.setattr("app.core.cassandra.prepare_cached", lambda cql: cql)
+    session = _FakeCassandraSession()
+    monkeypatch.setattr("app.modules.x402_probe.service.get_cassandra_session", lambda: session)
+    monkeypatch.setattr(
+        "app.modules.x402_probe.service.execute_parallel_with_args",
+        session.execute_parallel_with_args,
+    )
+
+    created_at = NOW - timedelta(days=1)
+    listing = ListingRow(
+        url_hash="h-durable",
+        url="https://durable.example.com/x",
+        created_at=created_at,
+        tags=("fx",),
+        term_end=created_at + timedelta(days=config.X402_LISTING_TERM_DAYS),
+        payer=PAYER,
+        verified_wallet="",
+    )
+    session.seed_listing(listing)
+
+    repo = CassandraProbeRepository()
+
+    def _fetch(_url: str) -> RawResponse:
+        # served_valid_402=True (healthy) with a payTo that is not a valid
+        # Algorand address, so payto_seen == "" and badge_decision() never
+        # fires (keeps this fixture's dispatch table to only what the fix
+        # under test needs: queue ordering + canonical term_end).
+        return RawResponse(status=402, headers=_offer_header("not-an-address"), body=b"")
+
+    # Sweep well past X402_LISTING_TERM_DAYS worth of elapsed wall-clock
+    # time since creation -- always healthy, one sweep per simulated day --
+    # exactly the scenario that silently failed before this fix.
+    moment = NOW
+    cycles = config.X402_LISTING_TERM_DAYS + 15
+    for _ in range(cycles):
+        moment += timedelta(days=1)
+        summary = run_probe_sweep(repo=repo, fetch=_fetch, now=moment, limit=50)
+        assert summary["failed"] == 0
+        assert summary["probed"] == 1
+
+    # Still in the fairness queue (never pruned) and its canonical term_end
+    # keeps getting pushed forward -- still comfortably alive past `moment`.
+    assert any(row.url_hash == "h-durable" for row in session.queue.values())
+    assert session.listing_term_end["h-durable"] > moment
+
+    # One more sweep proves it is still actually being reached by
+    # list_live_listings(), not merely sitting unpruned but unreachable.
+    moment += timedelta(minutes=1)
+    final = run_probe_sweep(repo=repo, fetch=_fetch, now=moment, limit=50)
+    assert final["listings"] == 1
+    assert final["probed"] == 1
 
 
 # --------------------------------------------------------------------------- #

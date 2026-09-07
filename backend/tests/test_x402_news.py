@@ -1,17 +1,19 @@
-"""x402 News Engine tests: free headline list, free article read, paid search.
+"""x402 News Engine tests: free headline list, free tag discovery, free article read, paid search.
 
 Fully offline. The facilitator is a stub that never touches the network (same
-shape as test_x402_board.py's), Redis is a fake at the get_redis seam, the
-articles live in the news module's own in-memory store, and Typesense is
-stubbed out so search falls through to the feed-scan path. Nothing here
-settles a real payment or reaches TestNet.
+shape as test_x402_board.py's), Redis is a fake at the get_redis seam (and at
+app.core.cache's client for the tag aggregate), the articles live in the news
+module's own in-memory store, and Typesense is stubbed out so search falls
+through to the feed-scan path. Nothing here settles a real payment or reaches
+TestNet.
 
 Replay protection and the settlement ledger are shared infrastructure
 (modules/x402/) already covered by test_x402_directory.py -- they are not
 re-tested here. What IS News-Engine-specific and tested here: the pre-gate
 404 for unknown/draft articles, the pre-gate query validation for search, the
-paid search payload, the free list's and free article's bounds and rate
-limits, and the two paid-but-degraded search paths (translations lookup
+paid search payload and its redacted preview, the free list's, tag list's
+and free article's bounds and rate limits, the `lang` overlay (and the
+served-language report), and the two degraded paths (translations lookup
 failing after a free article read, search engine failing after payment).
 """
 
@@ -153,6 +155,7 @@ def _article(
     tags: list[str] | None = None,
     draft: bool = False,
     translations: dict[str, str] | None = None,
+    translated_titles: dict[str, str] | None = None,
 ) -> StoredArticle:
     return StoredArticle(
         article_id=article_id,
@@ -165,12 +168,19 @@ def _article(
         tags=tags or ["defi"],
         slug=slug,
         translations=translations,
+        translated_titles=translated_titles,
         draft=draft,
     )
 
 
 def _must_not_charge(*_args: object, **_kwargs: object) -> Never:
     raise AssertionError("the payment gate must not run for a request that was already doomed")
+
+
+@pytest.fixture(autouse=True)
+def _already_paid(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Skip the pre-parse 402 for header-less requests: every route test here models a request that already carries a payment (the gate is stubbed, or run against the offline facilitator), so the unpaid challenge is out of scope. Its ordering has its own tests in tests/test_x402_unpaid_challenge.py."""
+    monkeypatch.setattr(news_routes, "challenge_if_unpaid", lambda *_a, **_kw: None)
 
 
 @pytest.fixture
@@ -185,8 +195,21 @@ def engine(monkeypatch: pytest.MonkeyPatch) -> NewsEngineService:
             published_at_epoch=1_756_377_600,
             tags=["defi", "tinyman"],
             translations={
-                "fr": json.dumps({"title": "Tinyman v2 dépasse un milliard"}),
+                "fr": json.dumps(
+                    {
+                        "title": "Tinyman v2 dépasse un milliard",
+                        "summary": "Résumé en français",
+                        "body": "## Corps\n\nCorps complet en français.",
+                    }
+                ),
                 "de": json.dumps({"title": "Tinyman v2 überschreitet eine Milliarde"}),
+            },
+            # The feed projection's lightweight companion column (migration
+            # 087) -- what the headline list's lang overlay actually reads.
+            translated_titles={
+                "fr": json.dumps(
+                    {"title": "Tinyman v2 dépasse un milliard", "summary": "Résumé en français"}
+                ),
             },
         )
     )
@@ -236,6 +259,14 @@ def fake_redis(monkeypatch: pytest.MonkeyPatch) -> _FakeRedis:
     monkeypatch.setattr(replay_module, "get_redis", lambda **_kw: client)
     monkeypatch.setattr(rate_limit_core, "get_redis", lambda **_kw: client)
     monkeypatch.setattr(news_routes.circuit_breaker, "get_redis", lambda **_kw: client)
+    return client
+
+
+@pytest.fixture
+def fake_cache(monkeypatch: pytest.MonkeyPatch) -> _FakeRedis:
+    """Back app.core.cache's own client (the tag aggregate's 30-minute cache) with an in-process fake, same seam test_tag_summary_cache.py uses."""
+    client = _FakeRedis()
+    monkeypatch.setattr("app.core.cache._client", lambda: client)
     return client
 
 
@@ -389,6 +420,189 @@ def test_the_article_route_is_rate_limited_per_ip(monkeypatch: pytest.MonkeyPatc
 
 
 # --------------------------------------------------------------------------- #
+# The lang overlay (headline list and article)
+# --------------------------------------------------------------------------- #
+@pytest.mark.usefixtures("engine", "fake_redis")
+def test_headline_list_lang_overlays_stored_translations_per_item() -> None:
+    """`lang` swaps title/summary for the stored translation where one exists and leaves the rest in English -- best-effort per item, never an error."""
+    result = news_routes.x402_news_list(_request(query={"lang": "FR"}))
+
+    titles = [item["title"] for item in result["items"]]
+    assert titles == ["Tinyman v2 dépasse un milliard", "Governance period twelve opens"]
+    assert result["items"][0]["summary"] == "Résumé en français"
+    # The id/slug/url an agent follows up with are language-independent.
+    assert result["items"][0]["slug"] == "tinyman-v2-crosses-one-billion"
+
+
+@pytest.mark.usefixtures("engine", "fake_redis")
+@pytest.mark.parametrize("bad_lang", ["french", "fr_FR", "f", "12", "fr-"])
+def test_a_malformed_lang_is_a_400_on_list_and_article(bad_lang: str) -> None:
+    """Only the SHAPE of lang is validated: anything that is not a two-letter code (with optional region) is a 400 on both free reads."""
+    listed = news_routes.x402_news_list(_request(query={"lang": bad_lang}))
+    assert listed.status_code == 400
+    assert "invalid_request" in listed.description
+
+    article = news_routes.x402_news_article(
+        _request(path_params={"article_id": _LIVE_ID}, query={"lang": bad_lang})
+    )
+    assert article.status_code == 400
+    assert "invalid_request" in article.description
+
+
+@pytest.mark.usefixtures("engine", "fake_redis")
+def test_article_lang_serves_the_stored_translation_and_reports_it() -> None:
+    """A stored translation is served in full (title, summary, body) and the payload's `lang` says so."""
+    response = news_routes.x402_news_article(
+        _request(path_params={"article_id": _LIVE_ID}, query={"lang": "fr"})
+    )
+
+    assert response.status_code == 200
+    body = json.loads(response.description)
+    assert body["lang"] == "fr"
+    assert body["title"] == "Tinyman v2 dépasse un milliard"
+    assert body["summary"] == "Résumé en français"
+    assert body["body_markdown"].startswith("## Corps")
+    assert body["translations_available"] == ["de", "fr"]
+
+
+@pytest.mark.usefixtures("engine", "fake_redis")
+@pytest.mark.parametrize("requested", ["es", "fr-ca"])
+def test_article_lang_without_a_stored_translation_serves_english_and_says_so(
+    requested: str,
+) -> None:
+    """A well-formed code with no stored translation is not an error: English is served and `lang` reads "en", never the requested code."""
+    response = news_routes.x402_news_article(
+        _request(path_params={"article_id": _LIVE_ID}, query={"lang": requested})
+    )
+
+    assert response.status_code == 200
+    body = json.loads(response.description)
+    assert body["lang"] == "en"
+    assert body["title"] == "Tinyman v2 crosses one billion"
+    assert body["body_markdown"].startswith("## Body")
+
+
+@pytest.mark.usefixtures("engine", "fake_redis")
+def test_article_without_lang_reports_english() -> None:
+    """No `lang` at all is an explicit `lang: "en"` in the payload -- the served language is never left implicit."""
+    response = news_routes.x402_news_article(_request(path_params={"article_id": _LIVE_ID}))
+
+    assert json.loads(response.description)["lang"] == "en"
+
+
+@pytest.mark.usefixtures("fake_redis")
+def test_a_failed_translations_lookup_with_lang_reports_english_not_the_request(
+    engine: NewsEngineService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When the translations lookup fails after the body was resolved, the payload must not claim the requested language: it reads `lang: "en"` with no translations."""
+
+    def _boom(_article_id: str) -> Never:
+        raise RuntimeError("cassandra read timed out")
+
+    monkeypatch.setattr(engine._news, "translation_langs_for", _boom)
+
+    response = news_routes.x402_news_article(
+        _request(path_params={"article_id": _LIVE_ID}, query={"lang": "fr"})
+    )
+
+    assert response.status_code == 200
+    body = json.loads(response.description)
+    assert body["lang"] == "en"
+    assert body["translations_available"] == []
+
+
+# --------------------------------------------------------------------------- #
+# The free tag discovery
+# --------------------------------------------------------------------------- #
+@pytest.mark.usefixtures("engine", "fake_redis", "fake_cache")
+def test_tags_are_free_sorted_by_coverage_with_totals() -> None:
+    """The tag list serves every live tag with count/views/last_epoch, sorted by coverage, plus the feed size and the total tag count -- drafts never contribute."""
+    result = news_routes.x402_news_tags(_request(path="/api/v1/x402/news/tags"))
+
+    assert result["article_count"] == 2
+    assert result["tag_count_total"] == 3
+    by_tag = {entry["tag"]: entry for entry in result["tags"]}
+    assert set(by_tag) == {"defi", "tinyman", "governance"}
+    assert result["tags"][0]["tag"] == "defi"
+    assert by_tag["defi"]["count"] == 1
+    assert by_tag["defi"]["last_epoch"] == 1_756_377_600
+    assert by_tag["governance"]["last_epoch"] == 1_756_291_200
+    assert all(entry["views"] == 0 for entry in result["tags"])
+
+
+@pytest.mark.usefixtures("engine", "fake_redis", "fake_cache")
+def test_tags_limit_is_clamped_to_its_own_maximum_and_total_still_reports_the_rest(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`limit` is clamped to x402_news_max_tags (its own cap, not the headline cap) and `tag_count_total` still says how many tags exist beyond the slice."""
+    monkeypatch.setattr(settings, "x402_news_max_tags", 2)
+    monkeypatch.setattr(settings, "x402_news_max_results", 1)
+
+    result = news_routes.x402_news_tags(
+        _request(path="/api/v1/x402/news/tags", query={"limit": "9999"})
+    )
+
+    assert len(result["tags"]) == 2
+    assert result["tag_count_total"] == 3
+
+
+@pytest.mark.usefixtures("engine", "fake_redis", "fake_cache")
+def test_tags_rejects_a_non_integer_limit() -> None:
+    """A non-integer limit is a 400 rather than silently ignored -- same rule as the headline list."""
+    result = news_routes.x402_news_tags(
+        _request(path="/api/v1/x402/news/tags", query={"limit": "lots"})
+    )
+
+    assert result.status_code == 400
+    assert "invalid_request" in result.description
+
+
+@pytest.mark.usefixtures("fake_redis", "fake_cache")
+def test_tags_read_through_the_shared_cache_instead_of_recomputing(
+    engine: NewsEngineService, monkeypatch: pytest.MonkeyPatch, fake_cache: _FakeRedis
+) -> None:
+    """The tag aggregate fans out over the whole tag universe, so a second marketplace call within the TTL is served from the same cache key the public /api/v1/news/tags route fills."""
+    calls: list[int] = []
+    real = engine._news.tag_stats
+
+    def _counted() -> dict:
+        calls.append(1)
+        return real()
+
+    monkeypatch.setattr(engine._news, "tag_stats", _counted)
+
+    first = news_routes.x402_news_tags(_request(path="/api/v1/x402/news/tags"))
+    second = news_routes.x402_news_tags(_request(path="/api/v1/x402/news/tags"))
+
+    assert first == second
+    assert len(calls) == 1
+    assert "algorand:cache:news:tags" in fake_cache.store
+
+
+@pytest.mark.usefixtures("engine", "fake_redis", "fake_cache")
+def test_tags_are_rate_limited_per_ip_on_their_own_counter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Over the hourly budget is a 429 before the aggregate is read; the same IP's headline list is unaffected (its own counter)."""
+    monkeypatch.setattr(settings, "x402_news_rate_limit_per_hour", 2)
+
+    def _read(ip: str) -> Response | dict:
+        return news_routes.x402_news_tags(
+            _request(path="/api/v1/x402/news/tags", headers={"X-Real-IP": ip})
+        )
+
+    assert "tags" in _read("203.0.113.7")
+    assert "tags" in _read("203.0.113.7")
+    assert "tags" in _read("203.0.113.9")
+    assert "items" in news_routes.x402_news_list(_request(headers={"X-Real-IP": "203.0.113.7"}))
+
+    monkeypatch.setattr(news_routes.news_engine, "tag_stats", _must_not_charge)
+    limited = _read("203.0.113.7")
+    assert limited.status_code == 429
+    assert "rate_limited" in limited.description
+
+
+# --------------------------------------------------------------------------- #
 # The paid search
 # --------------------------------------------------------------------------- #
 @pytest.mark.usefixtures("engine", "fake_redis")
@@ -419,6 +633,31 @@ def test_search_without_payment_returns_402_with_the_search_price() -> None:
     bazaar = (payment_required.extensions or {}).get("bazaar")
     assert bazaar is not None
     assert "search" in (payment_required.resource.description or "").lower()
+
+
+@pytest.mark.usefixtures("testnet_settings", "fake_redis")
+def test_search_preview_is_the_redacted_shape_with_no_engine_call_and_no_settlement(
+    engine: NewsEngineService,
+    monkeypatch: pytest.MonkeyPatch,
+    fulfilled: list[tuple[str | None, str]],
+) -> None:
+    """?preview=true goes through the real gate (no facilitator call, the stub would raise), never runs the search engine, and comes back as the real response's keys with sentinel values -- not even a hit count leaks for free."""
+    monkeypatch.setattr(
+        engine, "search", lambda *_a, **_kw: pytest.fail("the engine must not run for a preview")
+    )
+
+    response = news_routes.x402_news_search(_request(query={"q": "governance", "preview": "true"}))
+
+    assert response.status_code == 200
+    body = json.loads(response.description)
+    assert body["query"] == "governance"
+    assert body["engine"] == "<preview>"
+    assert body["settlement_tx_id"] == "<preview>"
+    assert set(body["items"][0]) == set(news_routes._SEARCH_OUTPUT_EXAMPLE["items"][0])
+    assert body["items"][0]["score"] == -1.0
+    assert body["items"][0]["article_id"] == "<preview>"
+    assert "PAYMENT-RESPONSE" not in response.headers
+    assert fulfilled == []
 
 
 @pytest.mark.usefixtures("engine", "fake_redis")

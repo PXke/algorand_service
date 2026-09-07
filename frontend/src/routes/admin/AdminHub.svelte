@@ -5,6 +5,7 @@
   import { walletAddress, sessionToken, isAdmin } from '../../lib/auth/session'
   import { createAdminApi } from '../../lib/api/admin'
   import { route, navigate } from '../../lib/router'
+  import { recoverFromStaleChunk, clearStaleChunkGuard } from '../../lib/staleChunk'
   import PageMeta from '../../components/PageMeta.svelte'
   import BrandMark from '../../components/BrandMark.svelte'
 
@@ -14,6 +15,7 @@
     { id: 'Writer Briefs', label: 'Briefs', slug: 'briefs', group: 'Content' },
     { id: 'Inbox', label: 'Inbox', slug: 'inbox', group: 'Content' },
     { id: 'Glossary', label: 'Glossary', slug: 'glossary', group: 'Content' },
+    { id: 'Ecosystem', label: 'Registry', slug: 'ecosystem', group: 'Content' },
     { id: 'Queue', label: 'Artifacts', slug: 'artifacts', group: 'Pipeline' },
     { id: 'Classifier', label: 'Classifier', slug: 'classifier', group: 'Pipeline' },
     { id: 'Training', label: 'Training', slug: 'training', group: 'Pipeline' },
@@ -39,6 +41,7 @@
     'Articles',
     'Writer Briefs',
     'Glossary',
+    'Ecosystem',
     'Classifier',
     'Training',
     'Domains',
@@ -54,6 +57,7 @@
     'Writer Briefs': () => import('./tabs/BriefsTab.svelte'),
     Inbox: () => import('./tabs/InboxTab.svelte'),
     Glossary: () => import('./tabs/GlossaryTab.svelte'),
+    Ecosystem: () => import('./tabs/EcosystemTab.svelte'),
     Queue: () => import('./tabs/QueueTab.svelte'),
     Classifier: () => import('./tabs/ClassifierTab.svelte'),
     Training: () => import('./tabs/TrainingTab.svelte'),
@@ -84,9 +88,17 @@
 
   $effect(() => {
     if (!walletOpen || WalletDialog) return
-    void import('../../components/WalletDialog.svelte').then((m) => {
-      WalletDialog = m.default
-    })
+    void import('../../components/WalletDialog.svelte')
+      .then((m) => {
+        WalletDialog = m.default
+        clearStaleChunkGuard()
+      })
+      .catch((e) => {
+        console.error('Failed to load WalletDialog', e)
+        void recoverFromStaleChunk().then((reloading) => {
+          if (!reloading) walletOpen = false
+        })
+      })
   })
 
   $effect(() => {
@@ -99,9 +111,12 @@
         if (cancelled) return
         ActiveTab = m.default
         tabLoading = false
+        clearStaleChunkGuard()
       })
       .catch(() => {
-        if (!cancelled) tabLoading = false
+        void recoverFromStaleChunk().then((reloading) => {
+          if (!reloading && !cancelled) tabLoading = false
+        })
       })
     return () => {
       cancelled = true

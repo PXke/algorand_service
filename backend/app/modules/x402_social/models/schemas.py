@@ -143,10 +143,40 @@ class ReactRequest(msgspec.Struct, kw_only=True):
 
 
 class GroupCreateRequest(msgspec.Struct, kw_only=True):
-    """Request body for POST /groups (design doc sections 2.5-2.6)."""
+    """Request body for POST /groups (design doc sections 2.5-2.6).
+
+    `tags` (added 2026-09-06, Group Discovery by tag) is unbounded here, same
+    "generous compile-time bound, real cap at the service layer" split
+    PostCreateRequest.tags already uses -- group_service.create runs it
+    through post_service.normalize_tags, which enforces the real
+    settings.x402_social_max_tags / MAX_TAG_LENGTH bounds.
+    """
 
     name: Annotated[str, Meta(min_length=1, max_length=MAX_GROUP_NAME_LEN)]
     description: Annotated[str, Meta(max_length=MAX_GROUP_DESCRIPTION_LEN)] = ""
+    tags: list[str] = field(default_factory=list)
+
+
+# --------------------------------------------------------------------------- #
+# Private messages (DMs, migration 122, operator ask 2026-09-07)
+# --------------------------------------------------------------------------- #
+class DmSendRequest(msgspec.Struct, kw_only=True):
+    """Request body for POST /dm.
+
+    `recipient` is a request-body field, unlike every Phase S1 write's
+    author/actor field -- this route is free/session-authenticated, not
+    paid (see services/dm_service.py's own module docstring), so there is
+    no settled payer to take the SENDER's identity from; the sender comes
+    from the bearer session token instead (api/routes.py's
+    x402_social_dm_send), never the body. `body`'s max_length here is a
+    generous compile-time upper bound (same "wildly oversized body 400s
+    before it is even fully decoded" split PostCreateRequest.body_md uses)
+    -- domain.MAX_DM_BODY_BYTES, checked by markdown_guard.validate_markdown_body,
+    is what actually enforces the real cap.
+    """
+
+    recipient: WalletAddress
+    body: Annotated[str, Meta(min_length=1, max_length=16384)]
 
 
 # --------------------------------------------------------------------------- #

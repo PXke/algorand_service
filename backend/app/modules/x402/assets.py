@@ -99,9 +99,30 @@ USDQ = AcceptedAsset(
     asa_ids={ALGORAND_MAINNET_CAIP2: 2768603795},
 )
 
+# Added 2026-09-06: agents repeatedly asked for Bitcoin/Lightning/Cashu
+# payments (Moltbook/Clawstr demand signals, backup-storage feedback). Real
+# Lightning support would mean a second settlement path entirely outside
+# x402/Algorand (a Lightning node or custodial provider, new custody
+# surface, and payments that would not even count as x402 volume) -- an
+# explicit non-starter for this contest entry. goBTC is the answer that
+# actually fits this architecture: it is Bitcoin-backed but trades as an
+# ordinary Algorand ASA, so it settles through the exact same mechanism as
+# EURQ/USDQ with zero new infra or custody. Verified against the live
+# mainnet indexer (GET /v2/assets/386192725 -> name "goBTC", unit-name
+# "goBTC") and CoinGecko (id "gobtc" lists platforms.algorand ==
+# "386192725", the same id) before adding -- an ASA id here is a real
+# transaction destination, never guessed. 8 decimals, unlike the 6-decimal
+# stablecoins above -- read from the same indexer response.
+GOBTC = AcceptedAsset(
+    symbol="goBTC",
+    decimals=8,
+    coingecko_id="gobtc",
+    asa_ids={ALGORAND_MAINNET_CAIP2: 386192725},
+)
+
 # USDC first: this tuple's order is the 402 offer's order, which is what makes
 # USDC the preferred asset rather than merely a documented one.
-ACCEPTED_ASSETS: tuple[AcceptedAsset, ...] = (USDC, EURQ, USDQ)
+ACCEPTED_ASSETS: tuple[AcceptedAsset, ...] = (USDC, EURQ, USDQ, GOBTC)
 
 
 def asset_for_asa_id(asset_id: str | None, network: str) -> AcceptedAsset | None:

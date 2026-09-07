@@ -211,6 +211,7 @@ def test_review_and_revise_merges_final_cumulative_rubric_usage_once(
         quality_llm_arg: object,
         *,
         is_special_edition: bool = False,  # noqa: ARG001 -- name must match the real callee's keyword arg
+        debug: dict | None = None,  # noqa: ARG001 -- name must match the real callee's keyword arg
     ) -> dict:
         assert quality_llm_arg is quality_llm
         grade_calls["n"] += 1
@@ -313,6 +314,7 @@ def test_run_two_stage_compose_folds_digest_and_rubric_usage_into_extra_usage(
         quality_llm_arg: object,
         *,
         is_special_edition: bool = False,  # noqa: ARG001 -- name must match the real callee's keyword arg
+        debug: dict | None = None,  # noqa: ARG001 -- name must match the real callee's keyword arg
     ) -> dict:
         assert quality_llm_arg is quality_llm
         return {
@@ -416,6 +418,7 @@ def test_compose_final_aggregate_includes_rubric_and_digest_usage(
         quality_llm_arg: object,
         *,
         is_special_edition: bool = False,  # noqa: ARG001 -- name must match the real callee's keyword arg
+        debug: dict | None = None,  # noqa: ARG001 -- name must match the real callee's keyword arg
     ) -> dict:
         assert quality_llm_arg is quality_llm
         return {

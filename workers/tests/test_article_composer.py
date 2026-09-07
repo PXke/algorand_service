@@ -12,14 +12,19 @@ from app.modules.newspaper.article_composer import compose_scrape_article, compo
 from app.modules.newspaper.publish_policy import PublishKind, PublishTopic
 
 
-def test_compose_scrape_raises_when_mistral_not_configured(monkeypatch: pytest.MonkeyPatch) -> None:
-    """No template fallback exists (owner decision 2026-07-14) — every compose requires Mistral now, whether or not the caller ever set the now-vestigial mistral_only flag."""
-    import app.core.config as config
+def test_compose_scrape_raises_when_writer_provider_not_configured(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No template fallback exists (owner decision 2026-07-14) — every compose requires the writer purpose's configured provider (DeepSeek by default, see llm_purpose_router.py), whether or not the caller ever set the now-vestigial mistral_only flag. Regression test for the 2026-09-07 fix: this used to hardcode a mistral_configured() check even after DeepSeek became the live writer provider, so removing the by-then-unused MISTRAL_API_KEY would have silently blocked every compose despite DeepSeek being fully configured."""
+    import app.modules.ai.llm_purpose_router as purpose_router
 
-    monkeypatch.setattr(config, "MISTRAL_ENABLED", False)
-    monkeypatch.setattr(config, "MISTRAL_API_KEY", "")
+    # llm_purpose_router imports DEEPSEEK_API_KEY by value at module load, so
+    # the patch target is its own module-level name, not app.core.config's
+    # (patching the latter wouldn't be visible through the former's already-
+    # bound reference).
+    monkeypatch.setattr(purpose_router, "DEEPSEEK_API_KEY", "")
 
-    with pytest.raises(LLMError, match="MISTRAL"):
+    with pytest.raises(LLMError, match="writer purpose's configured LLM provider"):
         compose_scrape_article(
             service_name="Svc",
             source_url="https://example.com",

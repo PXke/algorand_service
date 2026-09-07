@@ -549,17 +549,55 @@ LLM_PROVIDER_RUBRIC_CANARY_PCT = env_int("LLM_PROVIDER_RUBRIC_CANARY_PCT", 0)
 # name despite the env var staying MISTRAL_MAX_TOKENS (renaming that would
 # silently break prod .env files).
 LLM_MAX_TOKENS = env_int("MISTRAL_MAX_TOKENS", 12000)
-# Writer agentic-loop context management — the FALLBACK only. Each provider
-# now asks its own GET /v1/models for each model's real max_context_length at
-# construction (llm_openai_compatible._fetch_model_metadata, cached per model
-# per process) and uses that instead whenever the live lookup succeeds. This
-# default is what a client falls back to if that lookup fails (network blip,
-# endpoint down) — it stopped mattering for correctness on 2026-07-15, when a
-# hardcoded comment here ("mistral-small ~128k") turned out to be stale:
-# Mistral had silently upgraded the "-latest" aliases to 262144 without
-# changing the model name. A single research/writer constant is enough now
-# since the real number comes from the live model, not this file.
-LLM_CONTEXT_TOKENS = env_int("MISTRAL_CONTEXT_TOKENS", 256000)
+# Writer agentic-loop context management. Each provider asks its own
+# GET /v1/models for each model's real max_context_length at construction
+# (llm_openai_compatible._fetch_model_metadata, cached per model per process)
+# and uses that instead whenever the live lookup returns one. This constant is
+# the fallback for when it does not.
+#
+# For the CURRENT live provider that fallback is not an edge case, it is the
+# only path: DeepSeek's GET /v1/models returns nothing but {id, object,
+# owned_by} per model — no max_context_length, no capabilities (verified live
+# 2026-09-06 against api.deepseek.com). So _fetch_model_metadata yields
+# max_context_length=None and every DeepSeek compose runs its context budget
+# off THIS number, not off the model's real window. The per-request trim
+# budget the agentic loop actually enforces is
+#   this - <response reserve, DEEPSEEK_MAX_TOKENS=40000> - LLM_CONTEXT_SAFETY_TOKENS
+# = 956_000 tokens at the current defaults (see the 2026-09-06 update below
+# for where 1_000_000 comes from); the prior default here was 256_000
+# (effective budget 212_000), and a 2026-09-05 measured peak real request in
+# prod was already 223_058 prompt_tokens -- see the token_budget note about
+# the estimator under-counting. This constant — not the model — is what caps
+# every compose and forces fit_messages_to_budget to elide tool results
+# early, so getting the real number right directly controls how often that
+# elision fires.
+# (The 2026-07-15 note this replaces said the number "stopped mattering for
+# correctness since the real number comes from the live model": that was true
+# of Mistral, whose /v1/models does publish max_context_length, and is not
+# true of DeepSeek.)
+#
+# Updated 2026-09-06 (factual correction, not a design change):
+# deepseek-v4-flash's real, documented context window is 1,000,000 tokens
+# ("1M"), confirmed against two independent DeepSeek-controlled/mirrored
+# sources on the verification date -- the official API docs' Models &
+# Pricing page (https://api-docs.deepseek.com/quick_start/pricing/, table
+# row for deepseek-v4-flash: Context Length "1M", max output "384K" -- the
+# 384K matches DEEPSEEK_MAX_TOKENS's own comment above, corroborating this
+# is the same model) and the model card
+# (https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash: "a context length of
+# one million tokens"). Neither source publishes a more precise byte-exact
+# figure (e.g. 1,048,576) than "1M" / "one million" -- other aggregator sites
+# guess 1,048,576, but that number appears nowhere in a DeepSeek-controlled
+# source, so this uses the plainly-documented 1_000_000 rather than an
+# unsourced extrapolation. deepseek-v4-pro is documented at the same "1M".
+# This constant is the shared fallback for every OpenAI-compatible provider
+# (see llm_openai_compatible._fetch_model_metadata), not DeepSeek-specific,
+# but DeepSeek is the only live path that ever actually falls back to it
+# (Mistral's own /v1/models publishes the real number; OpenAI/Kimi/GLM are
+# off by default with unverified placeholder model strings of their own, see
+# their config comments above) -- so raising the shared fallback for
+# DeepSeek's sake does not paper over an already-correct value anywhere else.
+LLM_CONTEXT_TOKENS = env_int("MISTRAL_CONTEXT_TOKENS", 1_000_000)
 # Per-tool-result character cap (structure-preserving — see token_budget). Large
 # enough to carry a full article body; ~24k chars ≈ a long page.
 LLM_TOOL_RESULT_MAX_CHARS = env_int("MISTRAL_TOOL_RESULT_MAX_CHARS", 24000)
@@ -662,6 +700,21 @@ LLM_STAGE2_EXTRAS_MAX_CHARS = env_int("MISTRAL_STAGE2_EXTRAS_MAX_CHARS", 160_000
 # kill the 2026-08-04 Humanitarian Network incident hit at the OLD ceiling.
 # The (tool+args) dedup guard still bounds true runaway loops.
 LLM_MAX_TOOL_ROUNDS = env_int("LLM_MAX_TOOL_ROUNDS", 48)
+# Bound on how many of one round's tool calls run concurrently
+# (llm_tool_loop.py's _run_tool_calls_parallel, added 2026-09-05 after a real
+# 94-message compose transcript showed most rounds' 2-4 tool calls -- page
+# fetches, indexer/algod queries, X/web search -- run one at a time despite
+# being I/O-bound and independent, a real contributor to composes taking
+# tens of minutes). Deliberately small: this bounds simultaneous outbound
+# connections/processes per round, not overall compose throughput -- a
+# round rarely requests more than a handful of calls at once, and nothing
+# here is free (paid APIs like search_x are separately capped by
+# CALL_CAPPED_TOOLS regardless of how many workers this allows). Excludes
+# Playwright-backed tools entirely (fetch_url, click_element, ... share one
+# PlaywrightSession per compose and always run one at a time, see
+# llm_tool_loop._BROWSER_BACKED_TOOLS) -- this cap only governs the plain
+# HTTP-fetch/API-call tools dispatched to the thread pool.
+LLM_TOOL_LOOP_MAX_PARALLEL_CALLS = env_int("LLM_TOOL_LOOP_MAX_PARALLEL_CALLS", 4)
 # Every celery task that composes an article (recompose_published,
 # recompose_review, recompose_session_service,
 # publish_from_chain_event, drain_to_compose (formerly
@@ -765,12 +818,19 @@ SPECIAL_EDITION_OUTLINE_ENABLED = env_bool("SPECIAL_EDITION_OUTLINE_ENABLED", Tr
 SPECIAL_EDITION_ENUMERATION_GAP_FILL_MAX_ROUNDS = env_int(
     "SPECIAL_EDITION_ENUMERATION_GAP_FILL_MAX_ROUNDS", 8
 )
-# A compose_session stuck in a non-terminal status (researching/writing) this
-# long is dead, not slow — the compose task's own hard time limit
-# (CELERY_TASK_TIME_LIMIT, 1860s/31min) means a crash that skips the
-# try/except checkpoint finalizers (e.g. a SIGKILL/OOM, or an exception before
-# the first checkpoint) is the only way a row gets stuck; reap_stale_compose_sessions
-# marks it "stale" so the admin Sessions view stops showing it as in-progress.
+# A compose_session stuck in a non-terminal status (researching/writing) with
+# NO checkpoint progress for this long is dead, not slow. Staleness is
+# measured from the row's last checkpoint upsert (created_at + duration_ms),
+# NOT from created_at: compose tasks legitimately run up to
+# COMPOSE_TASK_TIME_LIMIT (95 min), so an age-since-start check with this
+# 60-minute window was flipping LIVE long composes to "stale" mid-run — and
+# the write/grade/revise phase performs no checkpoints, so the false "stale"
+# stuck for the whole visible write phase (see
+# reap_stale_compose_sessions' docstring, root-caused 2026-09-05).
+# A crash that skips the try/except checkpoint finalizers (SIGKILL/OOM, or an
+# exception before the first checkpoint) is what actually leaves a row stuck;
+# reap_stale_compose_sessions marks it "stale" so the admin Sessions view
+# stops showing it as in-progress.
 COMPOSE_SESSION_STALE_MINUTES = env_int("COMPOSE_SESSION_STALE_MINUTES", 60)
 # A translation_sessions row stuck 'running' past this long is either a
 # genuinely hung model call or a worker that died mid-language without
@@ -1455,8 +1515,12 @@ X_SEARCH_DAILY_CAP = env_int("X_SEARCH_DAILY_CAP", 20)
 # manually re-run.
 X_SEARCH_WEEKLY_SWEEP_MAX_SERVICES = env_int("X_SEARCH_WEEKLY_SWEEP_MAX_SERVICES", 200)
 
-# Self-hosted SearXNG metasearch for general web research (no Google, no key,
-# no per-query cost). Empty = web search tool disabled.
+# Self-hosted SearXNG metasearch for general web research. Since 2026-08-04
+# the instance's general-category signal comes from the paid Brave Search API
+# (braveapi engine, $5/1000 queries after a $5/month free credit) configured
+# in /etc/searxng/settings.yml on the prod host -- so a search is no longer
+# strictly key-free/cost-free upstream, just free of any key in THIS repo.
+# Empty = web search tool disabled.
 SEARXNG_URL = env_str("SEARXNG_URL", "").rstrip("/")
 
 # MTTH gatekeeper — deterministic pre-publish gate (completeness rules +
@@ -1632,6 +1696,38 @@ X402_PROBE_INTERVAL_SECONDS = env_int("X402_PROBE_INTERVAL_SECONDS", 1800)
 X402_PROBE_TIMEOUT_SECONDS = env_float("X402_PROBE_TIMEOUT_SECONDS", 5.0)
 X402_PROBE_MAX_BODY_BYTES = env_int("X402_PROBE_MAX_BODY_BYTES", 64 * 1024)
 X402_PROBE_MAX_LISTINGS = env_int("X402_PROBE_MAX_LISTINGS", 200)
+# Algorand Open Registry periodic liveness re-check beat (roadmap item 26,
+# CLAUDE.md section 9.1; design doc's section 9 decision #6, owner-confirmed
+# 2026-09-07: a v1 requirement, not deferred). Same off-by-default,
+# config-driven cadence/scheduling pattern as the x402 probe beat above --
+# see app/modules/ecosystem_probe/. Never pays, SSRF-guarded, only re-checks
+# pending+approved entries (a rejected entry is never re-probed).
+ECOSYSTEM_PROBE_ENABLED = env_bool("ECOSYSTEM_PROBE_ENABLED", False)
+ECOSYSTEM_PROBE_INTERVAL_SECONDS = env_int("ECOSYSTEM_PROBE_INTERVAL_SECONDS", 21600)
+ECOSYSTEM_PROBE_TIMEOUT_SECONDS = env_float("ECOSYSTEM_PROBE_TIMEOUT_SECONDS", 5.0)
+# Bounded scan of ecosystem_projects (a small, fully-enumerable table -- see
+# EcosystemStmts.LIST_ALL's own docstring), never unbounded.
+ECOSYSTEM_PROBE_MAX_ENTRIES = env_int("ECOSYSTEM_PROBE_MAX_ENTRIES", 500)
+# Pricing-model change (owner decision 2026-09-06, migration 114): a listing
+# no longer survives on a one-time paid term -- it survives for as long as
+# it keeps passing health probes. Every HEALTHY probe (reachable AND
+# served_valid_402, the same "healthy" backend's ListingService.
+# probe_leaderboard() already uses) pushes the listing's term_end forward to
+# `now + this many days`; an unhealthy probe changes nothing (see
+# run_probe_sweep's own docstring).
+#
+# ****MUST MATCH backend/app/core/config.py's Settings.x402_listing_term_days
+# field (default 30) EXACTLY, or a listing's real term drifts from what the
+# 402 offer/catalog text tells the payer it bought.**** Workers and backend
+# are separate services with no shared config-loading mechanism (CLAUDE.md
+# section 0), so this is workers' own copy of the same number, not a read of
+# backend's Settings object, and nothing enforces the two stay equal --
+# there is no cross-service config-sharing system to build one from as part
+# of this change (deliberately out of scope, same call CLAUDE.md section 9
+# makes for KYB). If you change one, change the other in the SAME commit;
+# backend/app/core/config.py carries the reciprocal comment pointing back
+# here.
+X402_LISTING_TERM_DAYS = env_int("X402_LISTING_TERM_DAYS", 30)
 # x402 storage reaper beat: POSTs the API-host internal reap route because
 # the local-disk connector lives there, not in this worker process. Off when
 # the token is empty (same "empty = disabled" convention as the API's own

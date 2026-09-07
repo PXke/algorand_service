@@ -81,6 +81,35 @@ def _merge_usage_from(accumulator: dict[str, int] | None, client: LLMProvider) -
         _merge_usage(accumulator, client.usage_totals())
 
 
+def _now_ms() -> int:
+    """Wall-clock epoch milliseconds -- the unit every per-LLM-call timing annotation in the stored compose transcript uses (2026-09-05, owner ask: record when each call actually ran, not a timeline inferred from log gaps)."""
+    import time as _time
+
+    return int(_time.time() * 1000)
+
+
+def _note_llm_call(debug: dict | None, purpose: str, started_at_ms: int, ended_at_ms: int) -> None:
+    """Record one ephemeral LLM call's wall-clock window into ``debug["llm_calls"]``.
+
+    The tool loop's own rounds and the Stage-2 write stamp their timing
+    directly onto the assistant turn they append to ``debug["messages"]``
+    (see _OpenAIToolLoopAdapter.send_round / _append_stage2_debug_turn) --
+    but the digest-tier synthesis calls (digest synthesis, raw-mode gap
+    extraction, entity enumeration, narrative outline) and the rubric
+    grading call have NO message representation of their own, and inventing
+    one is unsafe: everything in ``debug["messages"]`` is replayed verbatim
+    into later revision-pass API requests (_merged_convo_with_prior_debug).
+    This side list is persistence-only -- record_compose_session appends it
+    to the stored transcript as a single trailing ``llm_call_log`` entry,
+    never into the live conversation.
+    """
+    if debug is None:
+        return
+    debug.setdefault("llm_calls", []).append(
+        {"purpose": purpose, "started_at_ms": started_at_ms, "ended_at_ms": ended_at_ms}
+    )
+
+
 @dataclass(frozen=True)
 class LLMArticleFields:
     """The composed article's title/summary/body plus grading metadata."""
@@ -1279,6 +1308,7 @@ def _extract_gaps_from_raw_trace(
     research_context: str,
     *,
     extra_usage: dict[str, int] | None = None,
+    debug: dict | None = None,
 ) -> str:
     """A cheap, single-purpose LLM call standing in for the '### Unresolved Gaps' section a synthesized digest would otherwise carry.
 
@@ -1300,6 +1330,7 @@ def _extract_gaps_from_raw_trace(
     for it (2026-08-28 audit).
     """
     digest_client = get_llm_digest_client()
+    started_at_ms = _now_ms()
     try:
         from app.core.config import LLM_TEMP_RESEARCH
 
@@ -1322,6 +1353,7 @@ def _extract_gaps_from_raw_trace(
         return ""
     finally:
         _merge_usage_from(extra_usage, digest_client)
+        _note_llm_call(debug, "raw_gap_extraction", started_at_ms, _now_ms())
 
 
 def _synthesize_research_digest(
@@ -1330,6 +1362,7 @@ def _synthesize_research_digest(
     research_context: str,
     provider: str = "",
     extra_usage: dict[str, int] | None = None,
+    debug: dict | None = None,
 ) -> str:
     """Stage 1→2 handoff: model-synthesized digest instead of raw tool JSON, unless RESEARCH_DIGEST_MODE=raw (see config.py) or the research provider is deepseek — deepseek's context window is large enough to read the raw trace directly (owner call, 2026-08-06), so it always skips synthesis regardless of the config value; RESEARCH_DIGEST_MODE=raw remains a manual override for forcing raw mode on Mistral too. Deterministic asset-facts appendix is still added either way, since that's free regardless of mode. Raw mode also runs a cheap, separate gap-extraction call (see _extract_gaps_from_raw_trace) so _run_digest_gap_fill's safety net still has something to find -- a full raw trace has no '### Unresolved Gaps' section of its own.
 
@@ -1348,7 +1381,7 @@ def _synthesize_research_digest(
         digest = f"{full_trace}\n\n{asset_facts}" if asset_facts else full_trace
         if DIGEST_GAP_FILL_ENABLED:
             gaps_section = _extract_gaps_from_raw_trace(
-                full_trace, research_context, extra_usage=extra_usage
+                full_trace, research_context, extra_usage=extra_usage, debug=debug
             )
             if gaps_section:
                 digest = f"{digest}\n\n{gaps_section}"
@@ -1358,6 +1391,7 @@ def _synthesize_research_digest(
     if not raw_trace.strip():
         return ""
     digest_client = get_llm_digest_client()
+    started_at_ms = _now_ms()
     try:
         from app.core.config import LLM_TEMP_RESEARCH
 
@@ -1384,6 +1418,7 @@ def _synthesize_research_digest(
         return raw_trace
     finally:
         _merge_usage_from(extra_usage, digest_client)
+        _note_llm_call(debug, "digest_synthesis", started_at_ms, _now_ms())
 
 
 def _extract_unresolved_gaps(digest: str) -> str:
@@ -1563,8 +1598,9 @@ def _grade_current_draft(
     quality_llm: MistralProvider,
     *,
     is_special_edition: bool = False,
+    debug: dict | None = None,
 ) -> dict:
-    """Run the deterministic heuristic grader and the LLM quality rubric, merging the rubric result into the returned review dict under "quality". Either grader's failure degrades to an error marker rather than raising."""
+    """Run the deterministic heuristic grader and the LLM quality rubric, merging the rubric result into the returned review dict under "quality". Either grader's failure degrades to an error marker rather than raising. The rubric's LLM call gets its wall-clock window recorded via _note_llm_call (the deterministic grader is not an LLM call and is not timed)."""
     from app.modules.newspaper.article_grader import fuse_quality_into_grade, grade_article_draft
     from app.modules.newspaper.article_quality_llm import grade_article_quality_llm
 
@@ -1574,10 +1610,13 @@ def _grade_current_draft(
         )
     except Exception as exc:
         review = {"error": str(exc)[:200], "grade": None}
+    rubric_started_at_ms = _now_ms()
     try:
         quality = grade_article_quality_llm(title=title, body=body, client=quality_llm)
     except Exception as exc:
         quality = {"model": "llm_rubric_error", "error": str(exc)[:200], "issues": []}
+    finally:
+        _note_llm_call(debug, "quality_rubric", rubric_started_at_ms, _now_ms())
     review["quality"] = quality
     return fuse_quality_into_grade(review, quality)
 
@@ -1891,6 +1930,35 @@ _RETRYABLE_REVISION_FAILURES = frozenset(
 )
 
 
+def _compact_revision_prior(current: dict) -> list[dict[str, Any]]:
+    """The bounded prior-context turn for the tool-enabled revision pass's chat_with_tools call (2026-09-06 cost fix, operator-approved).
+
+    Before this, the revision pass's outgoing request carried the FULL
+    accumulated transcript (every Stage-1 research round, digest synthesis,
+    gap-fill, the Stage-2 write) via chat_with_tools' default
+    `_merged_convo_with_prior_debug` merge — measured on a real compose
+    tonight at ~65% of the whole compose's real (uncached) token spend.
+    `revise_user` (`_build_revision_prompt`, built from `gen_user` =
+    `_build_stage2_user`) already restates the digest and the specific
+    flagged issues; the one thing it does NOT restate is the article the
+    earlier stage(s) actually produced, which the reviser previously only
+    ever saw via the raw transcript's own last assistant turn. This
+    reconstructs that turn directly from `current` instead, so the reviser
+    keeps everything it needs to actually revise (digest + draft + flagged
+    issues) without paying to resend every research tool call that produced
+    the digest — the reviser keeps its own tool access to re-fetch anything
+    a flagged issue needs fresh.
+
+    Internal bookkeeping keys (leading "_", e.g. `_heuristic_grade`,
+    stashed onto the dict by `_run_grade_revise_loop` AFTER the fact) are
+    dropped — they were never part of the model's own completion, so
+    echoing them back would be fabricated history, not a faithful stand-in
+    for the real prior turn.
+    """
+    draft = {k: v for k, v in current.items() if not k.startswith("_")}
+    return [{"role": "assistant", "content": json.dumps(draft)}]
+
+
 def _attempt_revision(
     llm: MistralProvider,
     gen_system: str,
@@ -1902,18 +1970,33 @@ def _attempt_revision(
     tool_handlers: dict | None = None,
     trace: list[dict] | None = None,
     debug: dict | None = None,
+    on_round: Callable[[], None] | None = None,
+    prior_override: list[dict] | None = None,
 ) -> dict | None:
     """Call the reviser. Returns the revised fields, or None — having already called note_failure — if the call failed or came back empty.
 
-    This builds only its OWN short turn (gen_system + revise_user) — it relies
-    on chat_with_tools' _merged_convo_with_prior_debug to prepend the shared
-    `debug["messages"]` transcript (Stage 1's research tool calls, Stage 2's
-    draft) ahead of it, the same mechanism every earlier stage of this same
-    compose already uses to keep one continuous conversation instead of each
-    stage replaying a fresh 2-message start. So this call already runs with
-    full memory of what the writer already found and wrote, provided `debug`
-    is the same dict object threaded through the whole compose (true for
-    every real caller — see `_compose_via_writer_tools_locked`).
+    ``on_round``, when the tool-enabled path fires, checkpoints compose_sessions
+    live the same way the research stage does (see chat_with_tools' own
+    docstring) -- without it, a revision pass that spends its whole
+    WRITER_REVISION_TOOL_MAX_ROUNDS budget looks identical to a hang from the
+    admin Sessions view (root-caused 2026-09-05: the grade/revise loop had NO
+    checkpoints at all, so a revision-heavy compose could sit past
+    COMPOSE_SESSION_STALE_MINUTES with its status frozen at "writing" and get
+    incorrectly reaped as stale mid-run even after reap_stale_compose_sessions
+    started keying off the last checkpoint instead of created_at).
+
+    This builds only its OWN short turn (gen_system + revise_user). When
+    `prior_override` is given (the normal case now, see
+    `_compact_revision_prior`), chat_with_tools seeds its OUTGOING request
+    with just that bounded prior instead of the full accumulated
+    `debug["messages"]` transcript (2026-09-06 cost fix — see
+    `_merged_convo_with_prior_debug`'s docstring); `debug["messages"]`
+    itself still accumulates this pass's real turns in full for the admin
+    Sessions view. `prior_override=None` falls back to the old full-merge
+    behavior (every earlier stage of this same compose still uses it
+    unchanged), provided `debug` is the same dict object threaded through
+    the whole compose (true for every real caller — see
+    `_compose_via_writer_tools_locked`).
 
     Used to also reject any revision that dropped more than ~25% of the word
     count (unless the draft was flagged too-long) on the theory that a
@@ -1955,6 +2038,8 @@ def _attempt_revision(
                 temperature=temperature,
                 require_tool=None,
                 max_rounds=WRITER_REVISION_TOOL_MAX_ROUNDS,
+                on_round=on_round,
+                prior_override=prior_override,
             )
             revised = _parse_json_object(raw)
             if revised is None:
@@ -1986,6 +2071,8 @@ def _attempt_revision_with_retry(
     tool_handlers: dict | None = None,
     trace: list[dict] | None = None,
     debug: dict | None = None,
+    on_round: Callable[[], None] | None = None,
+    prior_override: list[dict] | None = None,
 ) -> dict | None:
     """_attempt_revision, with one immediate retry on a TECHNICAL failure.
 
@@ -2022,6 +2109,8 @@ def _attempt_revision_with_retry(
         tool_handlers=tool_handlers,
         trace=trace,
         debug=debug,
+        on_round=on_round,
+        prior_override=prior_override,
     )
     if revised is None and seen_reasons and seen_reasons[-1] in _RETRYABLE_REVISION_FAILURES:
         revised = _attempt_revision(
@@ -2034,6 +2123,8 @@ def _attempt_revision_with_retry(
             tool_handlers=tool_handlers,
             trace=trace,
             debug=debug,
+            on_round=on_round,
+            prior_override=prior_override,
         )
     return revised
 
@@ -2053,8 +2144,22 @@ def _run_grade_revise_loop(
     max_revisions: int,
     revision_tool_schemas: list[dict] | None,
     revision_tool_handlers: dict | None,
+    checkpoint: Callable[..., None] | None = None,
 ) -> dict:
-    """The grade -> (maybe revise) -> re-grade loop itself, factored out of _review_and_revise (which just builds quality_llm, runs this, and merges quality_llm's usage) so that caller stays under the 150-line budget -- see _review_and_revise's own docstring for the algorithm this implements unchanged."""
+    """The grade -> (maybe revise) -> re-grade loop itself, factored out of _review_and_revise (which just builds quality_llm, runs this, and merges quality_llm's usage) so that caller stays under the 150-line budget -- see _review_and_revise's own docstring for the algorithm this implements unchanged.
+
+    ``checkpoint``, when given, is called with status="writing" once per
+    grade/revise pass (plus once per round of the revision tool loop itself,
+    via _attempt_revision_with_retry's ``on_round``). Before this
+    (root-caused 2026-09-05), the ONLY "writing" checkpoint fired once, right
+    before Stage 2 generation started -- the entire grade/revise loop after
+    that (up to WRITER_REVISION_MAX_PASSES full revision passes, each with
+    its own grading call and a bounded tool-calling budget) ran with zero
+    further checkpoints, so compose_sessions.duration_ms/status went stale
+    the moment generation finished, and a long revision looked identical to
+    a hung compose from the admin Sessions view -- the exact "the status
+    flag is bad" complaint this addresses.
+    """
     from app.core.config import LLM_TEMP_WRITE, WRITER_QUALITY_LLM_MIN_SCORE
     from app.modules.newspaper.article_quality_llm import quality_needs_revision
 
@@ -2102,8 +2207,18 @@ def _run_grade_revise_loop(
         if not body:
             return current
 
+        if checkpoint is not None:
+            checkpoint(
+                "writing",
+                detail=(
+                    f"grade/revise pass {revise_count} of {max_revisions}"
+                    if revise_count
+                    else "grading initial draft"
+                ),
+            )
+
         review = _grade_current_draft(
-            title, summary, body, quality_llm, is_special_edition=is_special_edition
+            title, summary, body, quality_llm, is_special_edition=is_special_edition, debug=debug
         )
         quality = review["quality"]
         _record_grade(
@@ -2168,6 +2283,13 @@ def _run_grade_revise_loop(
         )
         gen_system = system + _STAGE2_GENERATION_GUIDANCE
 
+        # Bounded prior context (2026-09-06 cost fix): the reviser's own
+        # outgoing request gets just the current draft standing in for the
+        # full accumulated research/generation transcript -- revise_user
+        # already restates the digest and the flagged issues above, so the
+        # draft is the only missing piece. See _compact_revision_prior.
+        revision_prior = _compact_revision_prior(current)
+
         # _attempt_revision_with_retry gives one immediate retry of this exact
         # call on a technical failure (JSON-parse or empty-body) -- see its
         # docstring. That retry doesn't touch revise_count below: it's
@@ -2184,6 +2306,8 @@ def _run_grade_revise_loop(
             tool_handlers=revision_tool_handlers,
             trace=trace,
             debug=debug,
+            on_round=(lambda: checkpoint("writing")) if checkpoint is not None else None,
+            prior_override=revision_prior,
         )
         if revised is None:
             return best_current
@@ -2210,6 +2334,7 @@ def _review_and_revise(
     revision_tool_schemas: list[dict] | None = None,
     revision_tool_handlers: dict | None = None,
     extra_usage: dict[str, int] | None = None,
+    checkpoint: Callable[..., None] | None = None,
 ) -> dict:
     """Stage 3+4 of two-stage compose: grade the draft, then revise if weak.
 
@@ -2236,6 +2361,11 @@ def _review_and_revise(
     final re-grade after the last revision), so a single merge at the end
     captures the whole loop's rubric spend, which otherwise never reaches the
     compose's own accounting (2026-08-28 audit; see _merge_usage).
+
+    `checkpoint`, if given, is forwarded to _run_grade_revise_loop -- see
+    that function's docstring for why this loop needed its own checkpoints
+    (2026-09-05) rather than relying on the single "writing" checkpoint fired
+    once before Stage 2 generation.
     """
     from app.core.config import WRITER_REVIEW_ENABLED, WRITER_REVISION_MAX_PASSES
 
@@ -2263,6 +2393,7 @@ def _review_and_revise(
             max_revisions=max(1, WRITER_REVISION_MAX_PASSES),
             revision_tool_schemas=revision_tool_schemas,
             revision_tool_handlers=revision_tool_handlers,
+            checkpoint=checkpoint,
         )
     finally:
         # Cumulative across every pass the loop ran (including the final
@@ -3009,6 +3140,7 @@ def _run_digest_gap_fill(
         research_context=stage1_user,
         provider=research_llm.provider,
         extra_usage=extra_usage,
+        debug=debug,
     )
 
 
@@ -3058,13 +3190,18 @@ _ENTITY_ENUMERATION_PROMPT = (
 
 
 def _run_entity_enumeration(
-    *, trace: list[dict], digest: str, extra_usage: dict[str, int] | None = None
+    *,
+    trace: list[dict],
+    digest: str,
+    extra_usage: dict[str, int] | None = None,
+    debug: dict | None = None,
 ) -> str:
     """Structured People/Places/Dates/Services/Numbers accounting, synthesized from the trace + digest already gathered. Same lightweight digest-tier client as _synthesize_research_digest -- this is synthesis over already-fetched material, not new research. Empty trace or any failure yields "" (caller treats that as no enumeration available, never a hard failure). `extra_usage`, if given, gets this ephemeral client's real spend merged in even on failure -- see _merge_usage."""
     raw_trace = _format_research_digest(trace)
     if not raw_trace.strip():
         return ""
     digest_client = get_llm_digest_client()
+    started_at_ms = _now_ms()
     try:
         from app.core.config import LLM_TEMP_RESEARCH
 
@@ -3088,6 +3225,7 @@ def _run_entity_enumeration(
         return ""
     finally:
         _merge_usage_from(extra_usage, digest_client)
+        _note_llm_call(debug, "entity_enumeration", started_at_ms, _now_ms())
 
 
 def _extract_enumeration_gaps(enumeration: str) -> str:
@@ -3175,12 +3313,17 @@ _NARRATIVE_OUTLINE_PROMPT = (
 
 
 def _run_narrative_outline(
-    *, digest: str, enumeration: str, extra_usage: dict[str, int] | None = None
+    *,
+    digest: str,
+    enumeration: str,
+    extra_usage: dict[str, int] | None = None,
+    debug: dict | None = None,
 ) -> str:
     """A concrete section-by-section plan for Stage 2 to write from, instead of synthesizing organization cold from a raw digest. Same lightweight digest-tier client as digest synthesis -- this is planning over already-gathered material, not new research. Empty on failure (caller treats a missing outline as "write from the digest alone," never a hard failure). `extra_usage`, if given, gets this ephemeral client's real spend merged in even on failure -- see _merge_usage."""
     if not digest.strip() and not enumeration.strip():
         return ""
     digest_client = get_llm_digest_client()
+    started_at_ms = _now_ms()
     try:
         from app.core.config import LLM_TEMP_RESEARCH
 
@@ -3203,6 +3346,7 @@ def _run_narrative_outline(
         return ""
     finally:
         _merge_usage_from(extra_usage, digest_client)
+        _note_llm_call(debug, "narrative_outline", started_at_ms, _now_ms())
 
 
 def _run_special_edition_deepening(
@@ -3224,7 +3368,9 @@ def _run_special_edition_deepening(
     if not SPECIAL_EDITION_OUTLINE_ENABLED:
         return digest, "", ""
 
-    enumeration = _run_entity_enumeration(trace=trace, digest=digest, extra_usage=extra_usage)
+    enumeration = _run_entity_enumeration(
+        trace=trace, digest=digest, extra_usage=extra_usage, debug=debug
+    )
     gaps = _extract_enumeration_gaps(enumeration) if enumeration else ""
     if gaps:
         _run_enumeration_gap_fill(
@@ -3243,15 +3389,30 @@ def _run_special_edition_deepening(
             research_context=stage1_user,
             provider=research_llm.provider,
             extra_usage=extra_usage,
+            debug=debug,
         )
     outline = _run_narrative_outline(
-        digest=digest, enumeration=enumeration, extra_usage=extra_usage
+        digest=digest, enumeration=enumeration, extra_usage=extra_usage, debug=debug
     )
     return digest, enumeration, outline
 
 
-def _append_stage2_debug_turn(debug: dict, digest: str, payload: dict) -> None:
-    """The warm pass runs outside the tool loop, so its turn isn't in the debug transcript — add it so Sessions shows the draft. Store the ACTUAL digest text (not a placeholder): it's the only place to audit whether the research→write handoff (small-model synthesis) preserved or lost/garbled facts from the raw trace — previously this turn was a stub and the digest was never visible anywhere, so a bad handoff was undiagnosable after the fact."""
+def _append_stage2_debug_turn(
+    debug: dict,
+    digest: str,
+    payload: dict,
+    *,
+    started_at_ms: int | None = None,
+    ended_at_ms: int | None = None,
+) -> None:
+    """The warm pass runs outside the tool loop, so its turn isn't in the debug transcript — add it so Sessions shows the draft. Store the ACTUAL digest text (not a placeholder): it's the only place to audit whether the research→write handoff (small-model synthesis) preserved or lost/garbled facts from the raw trace — previously this turn was a stub and the digest was never visible anywhere, so a bad handoff was undiagnosable after the fact.
+
+    ``started_at_ms``/``ended_at_ms``: the write call's wall-clock window
+    (measured around ``chat_json_object``, so it includes that call's own
+    corrective retry when one fires), stamped onto the assistant turn the
+    same way the tool loop stamps its rounds. The provider request path
+    strips these local keys before any replay (_strip_local_annotations).
+    """
     if not isinstance(debug.get("messages"), list):
         return
     debug["messages"].append(
@@ -3264,7 +3425,12 @@ def _append_stage2_debug_turn(debug: dict, digest: str, payload: dict) -> None:
             ),
         }
     )
-    debug["messages"].append({"role": "assistant", "content": json.dumps(payload)[:4000]})
+    assistant_turn: dict = {"role": "assistant", "content": json.dumps(payload)[:4000]}
+    if started_at_ms is not None:
+        assistant_turn["started_at_ms"] = started_at_ms
+    if ended_at_ms is not None:
+        assistant_turn["ended_at_ms"] = ended_at_ms
+    debug["messages"].append(assistant_turn)
 
 
 def _run_stage1_cold_research(
@@ -3379,6 +3545,7 @@ def _run_two_stage_compose(
         research_context=stage1_user,
         provider=research_llm.provider,
         extra_usage=extra_usage,
+        debug=debug,
     )
     digest = _run_digest_gap_fill(
         research_llm,
@@ -3421,6 +3588,7 @@ def _run_two_stage_compose(
         outline=outline,
     )
     gen_system = system + _STAGE2_GENERATION_GUIDANCE
+    write_started_at_ms = _now_ms()
     payload = llm.chat_json_object(
         [
             {"role": "system", "content": gen_system},
@@ -3428,7 +3596,13 @@ def _run_two_stage_compose(
         ],
         temperature=LLM_TEMP_WRITE,
     )
-    _append_stage2_debug_turn(debug, digest, payload)
+    _append_stage2_debug_turn(
+        debug,
+        digest,
+        payload,
+        started_at_ms=write_started_at_ms,
+        ended_at_ms=_now_ms(),
+    )
     # Stage 3+4 — deterministic grade, then one revision if weak. Revision
     # gets the same tool_schemas/handlers as research (minus review_draft,
     # same as stage 1) so a flagged issue that needs fresh data (an
@@ -3448,6 +3622,7 @@ def _run_two_stage_compose(
         revision_tool_schemas=research_schemas,
         revision_tool_handlers=research_handlers,
         extra_usage=extra_usage,
+        checkpoint=checkpoint,
     )
 
 

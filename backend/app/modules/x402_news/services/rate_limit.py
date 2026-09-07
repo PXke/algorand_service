@@ -1,9 +1,10 @@
 """Per-IP rate limits for the News Engine's free reads.
 
-Two counters share one hourly budget setting (x402_news_rate_limit_per_hour)
-but count separately: the free headline list, and the pre-gate article
-resolution on the paid article route (which reads the full article before
-any payment, so it needs its own cap on unpaid traffic).
+Three counters share one hourly budget setting (x402_news_rate_limit_per_hour)
+but count separately: the free headline list, the free article read (a full
+article body per hit, so it needs its own cap), and the free tag-discovery
+aggregate. Separate counters so exhausting one surface never locks a caller
+out of the others.
 """
 
 from __future__ import annotations
@@ -15,6 +16,7 @@ from app.core.request_headers import client_ip
 
 _LIST_KEY_PREFIX = "algorand:x402:news_rl:"
 _ARTICLE_KEY_PREFIX = "algorand:x402:news_article_rl:"
+_TAGS_KEY_PREFIX = "algorand:x402:news_tags_rl:"
 _WINDOW_SECONDS = 3600
 
 
@@ -47,9 +49,19 @@ def news_list_rate_limited(request: Request) -> bool:
 
 
 def news_article_rate_limited(request: Request) -> bool:
-    """True when this IP is over the hourly budget for pre-gate article resolution.
+    """True when this IP is over the hourly budget for the free article read.
 
-    Counted on every hit of the paid article route, paid or not: it is the
-    unpaid pre-gate read (full article plus view counters) that this bounds.
+    Counted on every hit of the article route: each hit serves a full
+    article body (plus a translations lookup), the heaviest free read here.
     """
     return _rate_limited(request, _ARTICLE_KEY_PREFIX)
+
+
+def news_tags_rate_limited(request: Request) -> bool:
+    """True when this IP is over the hourly budget for the free tag-discovery read.
+
+    The aggregate behind it is cached for 30 minutes (see
+    NewsEngineService.tag_stats), so this bounds request volume, not
+    recomputation.
+    """
+    return _rate_limited(request, _TAGS_KEY_PREFIX)

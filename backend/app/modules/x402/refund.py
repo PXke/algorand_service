@@ -19,6 +19,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from decimal import ROUND_CEILING, Decimal
 
 from algosdk import account, mnemonic
 from algosdk.transaction import AssetTransferTxn, wait_for_confirmation
@@ -26,7 +27,8 @@ from algosdk.v2client.algod import AlgodClient
 
 from app.core.config import settings
 from app.core.redis_client import get_redis
-from app.modules.x402.assets import AcceptedAsset, asset_for_asa_id
+from app.modules.x402.assets import USDC, AcceptedAsset, asset_for_asa_id
+from app.modules.x402.price_oracle import get_usd_rate
 
 logger = logging.getLogger(__name__)
 
@@ -79,19 +81,74 @@ def _daily_budget_key(asset_id: str) -> str:
     return f"{_DAILY_BUDGET_KEY_PREFIX}{asset_id}:{today}"
 
 
-def _reserve_daily_budget(*, asset_id: str, amount: int) -> bool:
-    """Atomically reserve `amount` against today's per-asset refund budget. True if reserved, False if it would exceed the budget or Redis is unreachable (fails CLOSED -- this guards money leaving the wallet, same reasoning as circuit_breaker.py).
+def _usd_atomic_equivalent(asset: AcceptedAsset, raw_atomic: int) -> int | None:
+    """Convert one refund's raw atomic amount to atomic USD-equivalent units (USDC's own 6 decimals) so the daily budget compares a genuinely comparable dollar exposure across every accepted asset.
+
+    Found-in-audit bug this exists to prevent from recurring (2026-09-06,
+    see x402_refund_daily_budget_usd_atomic's own comment in config.py): a
+    flat atomic-unit budget compared directly, with no normalization at
+    all, silently only worked because every asset accepted so far (USDC,
+    EURQ, USDQ) happens to be 6-decimal and ~1-USD-pegged. goBTC (8
+    decimals) is not even the same ORDER of exposure -- it is BTC-backed,
+    not a stablecoin, so decimals-only rescaling (assuming 1 atomic unit is
+    worth the same fraction of a dollar for every asset) would still be off
+    by goBTC's real market price. This is why that shape was rejected in
+    favor of routing every priced asset through price_oracle -- the same
+    per-asset normalization x402_grading/services/credibility.py already
+    does for settlement spend (`_normalize_to_usd_atomic`), reused here
+    rather than re-invented (CLAUDE.md section 3).
+
+    Returns None when `asset` needs a price and price_oracle has none
+    available right now -- fails CLOSED, same reasoning as the Redis
+    unreachable case right below: an unpriceable refund must not sail
+    through an unenforceable budget. Ceiling-rounds, unlike credibility.py's
+    floor (that sums SPEND upward being generous; this consumes a BUDGET,
+    so rounding what a refund "costs" against the ceiling DOWN would be the
+    wrong direction for a control that guards money leaving the wallet).
+    """
+    if raw_atomic <= 0:
+        return 0
+    if asset.coingecko_id is None:
+        if asset.decimals == USDC.decimals:
+            return raw_atomic
+        scale = Decimal(10) ** (USDC.decimals - asset.decimals)
+        return int((Decimal(raw_atomic) * scale).to_integral_value(rounding=ROUND_CEILING))
+    rate = get_usd_rate(asset.coingecko_id)
+    if rate is None:
+        return None
+    whole_units = Decimal(raw_atomic) / (Decimal(10) ** asset.decimals)
+    usd_atomic = whole_units * rate * (Decimal(10) ** USDC.decimals)
+    return int(usd_atomic.to_integral_value(rounding=ROUND_CEILING))
+
+
+def _reserve_daily_budget(*, asset: AcceptedAsset, asset_id: str, amount: int) -> bool:
+    """Atomically reserve `amount` (raw atomic, in `asset`'s own units) against today's per-asset refund budget. True if reserved, False if it would exceed the USD-equivalent budget, the asset can't be priced right now, or Redis is unreachable (fails CLOSED -- this guards money leaving the wallet, same reasoning as circuit_breaker.py).
+
+    The reservation itself is tracked in USD-equivalent atomic units (see
+    _usd_atomic_equivalent), not `amount`'s raw atomic units, so the Redis
+    counter and settings.x402_refund_daily_budget_usd_atomic are always
+    comparing the same unit regardless of which asset settled.
 
     Reserve-then-undo-on-failure, same pattern this codebase already uses
     for promo redemption caps: increment first (atomic), and if the NEW
     total is over budget, decrement back out rather than checking-then-
     incrementing, which would race under concurrent refunds.
     """
+    usd_atomic = _usd_atomic_equivalent(asset, amount)
+    if usd_atomic is None:
+        logger.error(
+            "x402 refund: no USD price available right now for asset_id=%s (%s) -- "
+            "failing CLOSED (refund skipped, daily budget cannot be enforced)",
+            asset_id,
+            asset.symbol,
+        )
+        return False
+
     key = _daily_budget_key(asset_id)
     try:
         client = get_redis()
-        new_total = int(client.incrby(key, amount))
-        if new_total == amount:  # first write to this key today
+        new_total = int(client.incrby(key, usd_atomic))
+        if new_total == usd_atomic:  # first write to this key today
             client.expire(key, _DAILY_BUDGET_KEY_TTL_SECONDS)
     except Exception:
         logger.error(
@@ -102,24 +159,24 @@ def _reserve_daily_budget(*, asset_id: str, amount: int) -> bool:
         )
         return False
 
-    if new_total > settings.x402_refund_daily_budget_atomic:
+    if new_total > settings.x402_refund_daily_budget_usd_atomic:
         try:
-            get_redis().decrby(key, amount)
+            get_redis().decrby(key, usd_atomic)
         except Exception:
             logger.error(
-                "x402 refund: reserved %d atomic of asset_id=%s over budget and could not "
-                "release the reservation -- today's counter for this asset is now "
-                "overstated by that amount until it expires",
-                amount,
+                "x402 refund: reserved %d USD-atomic-equivalent of asset_id=%s over budget "
+                "and could not release the reservation -- today's counter for this asset is "
+                "now overstated by that amount until it expires",
+                usd_atomic,
                 asset_id,
                 exc_info=True,
             )
         logger.error(
-            "x402 refund: daily budget exhausted for asset_id=%s (attempted total %d, "
-            "budget %d) -- refund skipped, not sent",
+            "x402 refund: daily budget exhausted for asset_id=%s (attempted total %d "
+            "USD-atomic-equivalent, budget %d) -- refund skipped, not sent",
             asset_id,
             new_total,
-            settings.x402_refund_daily_budget_atomic,
+            settings.x402_refund_daily_budget_usd_atomic,
         )
         return False
     return True
@@ -162,7 +219,7 @@ def _prepare_refund(
         )
         return RefundResult(status="skipped", error=f"unrecognized settled asset id {asset_id!r}")
 
-    if not _reserve_daily_budget(asset_id=asset_id, amount=amount):
+    if not _reserve_daily_budget(asset=asset, asset_id=asset_id, amount=amount):
         return RefundResult(status="skipped", error="daily refund budget exhausted")
 
     return amount, asset

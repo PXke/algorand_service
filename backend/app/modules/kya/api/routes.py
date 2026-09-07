@@ -28,7 +28,11 @@ from app.modules.kya.services.rate_limit import (
     enroll_wallet_rate_limited,
 )
 from app.modules.x402.discovery import describe_json_endpoint
-from app.modules.x402.paid_request import mark_fulfilled, require_paid_request
+from app.modules.x402.paid_request import (
+    challenge_if_unpaid,
+    mark_fulfilled,
+    require_paid_request,
+)
 from app.modules.x402.settlement import get_settlement_store
 from app.schemas import EnrollRequest, KycPayoutRetryRequest
 
@@ -161,23 +165,10 @@ def kyc_verify(request: Request) -> Response:
     malformed address is not an answer at all, it is a request that could never
     have matched anything.
     """
-    wallet = query_param(request.query_params.get("wallet", ""))
-    if not wallet:
-        return json_error_response(400, "invalid_request", "wallet query param required")
-    # algosdk's own validator, not a length check: it verifies the base32
-    # encoding and the trailing checksum too, so a 58-character string that
-    # could not possibly be anyone's address is rejected before the gate
-    # rather than after the payer has been charged for the inevitable miss.
-    if not is_valid_address(wallet):
-        return json_error_response(
-            400, "invalid_request", "wallet must be a valid Algorand address"
-        )
-
-    result = require_paid_request(
-        request,
-        price=settings.kyc_lookup_price,
-        resource="kyc-verify",
-        extensions=describe_json_endpoint(
+    offer = {
+        "price": settings.kyc_lookup_price,
+        "resource": "kyc-verify",
+        "extensions": describe_json_endpoint(
             input={"wallet": "ALGORAND_ADDRESS"},
             input_schema={
                 "properties": {"wallet": {"type": "string"}},
@@ -190,7 +181,27 @@ def kyc_verify(request: Request) -> Response:
                 "payout_status": "sent",
             },
         ),
-    )
+    }
+    # An unpaid request sees the offer before its query string is validated
+    # (see challenge_if_unpaid); with a payment attached, the wallet is still
+    # validated before the gate so a malformed request is never charged.
+    challenge = challenge_if_unpaid(request, **offer)
+    if challenge is not None:
+        return challenge
+
+    wallet = query_param(request.query_params.get("wallet", ""))
+    if not wallet:
+        return json_error_response(400, "invalid_request", "wallet query param required")
+    # algosdk's own validator, not a length check: it verifies the base32
+    # encoding and the trailing checksum too, so a 58-character string that
+    # could not possibly be anyone's address is rejected before the gate
+    # rather than after the payer has been charged for the inevitable miss.
+    if not is_valid_address(wallet):
+        return json_error_response(
+            400, "invalid_request", "wallet must be a valid Algorand address"
+        )
+
+    result = require_paid_request(request, **offer)
     if result.error:
         return result.error
 

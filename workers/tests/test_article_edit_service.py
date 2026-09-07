@@ -25,7 +25,18 @@ def _row() -> QueuedPublishRow:
 def test_run_article_edit_skips_cleanly_when_mistral_not_configured(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """No template fallback exists (owner decision 2026-07-14) — a Mistral- unconfigured edit attempt must return a clean skip status, matching the existing MistralError handling already in run_article_edit, not raise an uncaught exception or silently produce a template-authored edit."""
+    """No template fallback exists (owner decision 2026-07-14) — a writer-provider- unconfigured edit attempt must return a clean skip status, matching the existing LLMError handling already in run_article_edit, not raise an uncaught exception or silently produce a template-authored edit.
+
+    Simulated at the same seam test_article_composer.py's equivalent test
+    uses (llm_purpose_router's own DEEPSEEK_API_KEY), not a mocked
+    compose_scrape_article -- this exercises the REAL chain
+    (_compose_edit_fields -> compose_scrape_article -> _require_writer_provider
+    -> purpose_provider_configured), confirming the redundant, now-removed
+    mistral_configured() check in this file was never needed for this path to
+    fail correctly (2026-09-07 review: article_edit_service.py:53 duplicated
+    article_composer.py's own gate with the same dead-key bug).
+    """
+    import app.modules.ai.llm_purpose_router as purpose_router
     import app.modules.newspaper.article_edit_service as svc
 
     monkeypatch.setattr(
@@ -43,7 +54,7 @@ def test_run_article_edit_skips_cleanly_when_mistral_not_configured(
             source_url="https://example.com/",
         ),
     )
-    monkeypatch.setattr(svc, "mistral_configured", lambda: False)
+    monkeypatch.setattr(purpose_router, "DEEPSEEK_API_KEY", "")
 
     result = svc.run_article_edit(_row())
     assert result["status"] == "mistral_failed"
@@ -138,7 +149,6 @@ def test_edit_recomposes_fully_without_leaking_the_old_body(
     import app.modules.newspaper.article_edit_service as svc
 
     monkeypatch.setattr(svc, "get_article", lambda _article_id: _existing_article())
-    monkeypatch.setattr(svc, "mistral_configured", lambda: True)
     monkeypatch.setattr(svc, "_sanitize_body", lambda b: b)
     monkeypatch.setattr(svc, "save_article_version", lambda **_kw: 2)
     monkeypatch.setattr(svc, "derive_article_tags", lambda **_kw: ["algorand"])
@@ -190,7 +200,6 @@ def test_edit_merges_extra_tags_from_the_recompose(monkeypatch: pytest.MonkeyPat
     import app.modules.newspaper.article_edit_service as svc
 
     monkeypatch.setattr(svc, "get_article", lambda _article_id: _existing_article())
-    monkeypatch.setattr(svc, "mistral_configured", lambda: True)
     monkeypatch.setattr(svc, "_sanitize_body", lambda b: b)
     monkeypatch.setattr(svc, "save_article_version", lambda **_kw: 2)
     monkeypatch.setattr(svc, "derive_article_tags", lambda **_kw: ["algorand"])
@@ -252,7 +261,6 @@ def test_run_article_edit_sanitizes_body_before_storing(monkeypatch: pytest.Monk
     )
 
     monkeypatch.setattr(svc, "get_article", lambda _article_id: _existing_article())
-    monkeypatch.setattr(svc, "mistral_configured", lambda: True)
     monkeypatch.setattr(svc, "save_article_version", lambda **_kw: 2)
     monkeypatch.setattr(svc, "derive_article_tags", lambda **_kw: ["algorand"])
     monkeypatch.setattr(svc.index_article, "delay", lambda **_kw: None)
@@ -302,7 +310,6 @@ def test_edit_handles_writer_abort_cleanly(monkeypatch: pytest.MonkeyPatch) -> N
     from app.modules.ai.story_spike import StorySpikedError
 
     monkeypatch.setattr(svc, "get_article", lambda _article_id: _existing_article())
-    monkeypatch.setattr(svc, "mistral_configured", lambda: True)
     monkeypatch.setattr(
         "app.modules.newspaper.article_grader.prior_service_article_summary",
         lambda _service_id: "",

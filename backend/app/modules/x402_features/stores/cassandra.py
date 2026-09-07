@@ -200,7 +200,9 @@ class CassandraFeatureStore:
         partition. Projection and claims go first, the canonical row last, so
         a crash mid-way leaves the request gone from the public feed but still
         resolvable by id -- the safer half-done state. The vote counter and
-        audit log are kept (see the Protocol).
+        audit log are kept (see the Protocol). The status column lives on the
+        canonical row itself, so DELETE_REQUEST removes it too -- no separate
+        cleanup needed.
         """
         session = get_cassandra_session()
         existing = self.get(request_id)
@@ -213,3 +215,51 @@ class CassandraFeatureStore:
         session.execute(X402FeaturesStmts.DELETE_CLAIMS, (request_id,))
         session.execute(X402FeaturesStmts.DELETE_REQUEST, (request_id,))
         return True
+
+    def has_claimed(self, request_id: str, wallet: str) -> bool:
+        """Whether `wallet` has ever claimed this request, within the same bounded scan get_claim_summaries uses.
+
+        Reuses LIST_CLAIMS -- a partition-key equality read on request_id, no
+        ALLOW FILTERING -- rather than a new lookup table: claims are rare
+        (CLAIMS_SCAN_LIMIT, 100), so a bounded partition scan checked in
+        memory is cheap and needs no new schema. A wallet whose only claim is
+        older than the bound is not found -- the same documented degradation
+        get_claim_summaries' count already accepts past that bound.
+        """
+        session = get_cassandra_session()
+        rows = session.execute(X402FeaturesStmts.LIST_CLAIMS, (request_id, CLAIMS_SCAN_LIMIT))
+        return any((row.claimer or "") == wallet for row in rows)
+
+    def update_status(self, request_id: str, status: str) -> None:
+        """Set a request's lifecycle status on its canonical row.
+
+        A genuine UPDATE of an already-existing row, not a partial upsert of
+        a new one: the caller only ever calls this for a request id that
+        insert() has already fully written, so this cannot create the
+        phantom-row shape CLAUDE.md section 3 warns about (that risk is a
+        partial write creating a NEW row with the other columns left null;
+        this always targets a row that is already fully populated).
+        """
+        session = get_cassandra_session()
+        session.execute(X402FeaturesStmts.UPDATE_STATUS, (status, request_id))
+
+    def get_statuses(self, request_ids: list[str]) -> dict[str, str]:
+        """Return each request's lifecycle status via concurrent bounded point reads.
+
+        Same shape as get_vote_totals: one partition per request, read
+        concurrently rather than a multi-partition IN, results zipped in
+        input order. A null or missing status (no claim ever, or a
+        pre-migration row) is omitted; the caller treats a missing id as
+        domain.FEATURE_STATUS_PENDING.
+        """
+        if not request_ids:
+            return {}
+        results = execute_parallel_with_args(
+            X402FeaturesStmts.GET_STATUS, [(rid,) for rid in request_ids]
+        )
+        statuses: dict[str, str] = {}
+        for request_id, (_success, result) in zip(request_ids, results, strict=True):
+            row = result.one()
+            if row is not None and row.status:
+                statuses[request_id] = row.status
+        return statuses

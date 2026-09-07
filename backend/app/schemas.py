@@ -491,6 +491,11 @@ class X402BoardPlacementRequest(msgspec.Struct, kw_only=True):
     link: Annotated[str, Meta(min_length=8, max_length=2048)]
     name: Annotated[str, Meta(max_length=80)] = ""
     pitch: Annotated[str, Meta(max_length=280)] = ""
+    # One of x402_board.models.domain.BOARD_CATEGORIES; the closed enum is
+    # enforced by board_service.validate_category() BEFORE the payment gate,
+    # this bound only stops an oversized string reaching it. Omitted means
+    # "other" -- same shape as X402ListingRequest's own `category` field.
+    category: Annotated[str, Meta(max_length=32)] = "other"
 
 
 class X402BoardItem(msgspec.Struct, kw_only=True):
@@ -816,6 +821,52 @@ class GlossaryUpsertRequest(msgspec.Struct, kw_only=True):
     definition: Annotated[str, Meta(min_length=1, max_length=4000)]
     aliases: Annotated[list[str], Meta(max_length=16)] = field(default_factory=list)
     status: Literal["draft", "published"] = "draft"
+
+
+class EcosystemSubmitRequest(msgspec.Struct, kw_only=True):
+    """Request body for POST /ecosystem/submit — a free, anonymous registry-listing submission (design doc section 3.1)."""
+
+    name: Annotated[str, Meta(min_length=2, max_length=60)]
+    url: Annotated[str, Meta(min_length=8, max_length=2048)]
+    description: Annotated[str, Meta(min_length=20, max_length=200)]
+    category: Annotated[str, Meta(max_length=32)] = "other"
+    repo_url: Annotated[str, Meta(max_length=2048)] = ""
+    x402_url: Annotated[str, Meta(max_length=2048)] = ""
+    tags: Annotated[list[Annotated[str, Meta(max_length=40)]], Meta(max_length=5)] = field(
+        default_factory=list
+    )
+    # Optional, private, admin-only, never rendered (design doc section
+    # 3.1) -- the only way to answer a rejected submitter.
+    contact: Annotated[str, Meta(max_length=254)] = ""
+    # Honeypot: hidden in the UI, so a human never fills it — a non-empty
+    # value marks a bot and the submission is silently dropped, same
+    # mechanism as ContactMessageRequest.website.
+    website: Annotated[str, Meta(max_length=254)] = ""
+
+
+class EcosystemDecisionRequest(msgspec.Struct, kw_only=True):
+    """Request body for POST /admin/ecosystem/:slug/decision — approve or reject, with optional inline edits on approve (design doc section 3.3)."""
+
+    decision: Literal["approve", "reject"]
+    reason: Annotated[str, Meta(max_length=32)] = ""
+    name: Annotated[str, Meta(max_length=60)] | None = None
+    description: Annotated[str, Meta(max_length=200)] | None = None
+    category: Annotated[str, Meta(max_length=32)] | None = None
+    tags: Annotated[list[Annotated[str, Meta(max_length=40)]], Meta(max_length=5)] | None = None
+
+
+class EcosystemUpdateRequest(msgspec.Struct, kw_only=True):
+    """Request body for PUT /admin/ecosystem/:slug — free-form admin edit of any entry, regardless of status."""
+
+    name: Annotated[str, Meta(max_length=60)] | None = None
+    description: Annotated[str, Meta(max_length=200)] | None = None
+    category: Annotated[str, Meta(max_length=32)] | None = None
+    tags: Annotated[list[Annotated[str, Meta(max_length=40)]], Meta(max_length=5)] | None = None
+    stage: Annotated[str, Meta(max_length=16)] | None = None
+    open_source: bool | None = None
+    editor_pick: bool | None = None
+    repo_url: Annotated[str, Meta(max_length=2048)] | None = None
+    x402_url: Annotated[str, Meta(max_length=2048)] | None = None
 
 
 class DomainSetRequest(msgspec.Struct, kw_only=True):

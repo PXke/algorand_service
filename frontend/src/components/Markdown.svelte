@@ -586,20 +586,38 @@
   .md :global(.cite-summary::-webkit-details-marker) {
     display: none;
   }
-  .md :global(.cite-summary :is(h1, h2, h3, h4))::before {
-    content: '▸';
-    display: inline-block;
-    margin-inline-end: 12px;
-    font-size: 0.55em;
-    line-height: 1;
-    color: var(--muted);
-    vertical-align: 12%;
+  /* The disclosure mark is drawn with borders, not typed as a glyph: the
+     heading face has no ▸, so a typed one comes from whatever fallback font
+     the OS picks and lands at a different height on every platform. A
+     bordered triangle centred by flex sits in the same place everywhere,
+     and turns to point down when the block is open. */
+  .md :global(.cite-summary :is(h1, h2, h3, h4)) {
+    display: flex;
+    align-items: center;
+    gap: 10px;
   }
-  :global([dir='rtl']) .md :global(.cite-summary :is(h1, h2, h3, h4))::before {
-    content: '◂';
+  .md :global(.cite-summary :is(h1, h2, h3, h4))::before {
+    content: '';
+    flex-shrink: 0;
+    width: 0;
+    height: 0;
+    border-block: 5px solid transparent;
+    border-inline-start: 7px solid var(--muted);
+    transition: transform 0.15s ease;
+  }
+  .md :global(.cite-summary:hover :is(h1, h2, h3, h4))::before {
+    border-inline-start-color: var(--accent);
   }
   .md :global(details.cite-block[open] .cite-summary :is(h1, h2, h3, h4))::before {
-    content: '▾';
+    transform: rotate(90deg);
+  }
+  :global([dir='rtl']) .md :global(details.cite-block[open] .cite-summary :is(h1, h2, h3, h4))::before {
+    transform: rotate(-90deg);
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .md :global(.cite-summary :is(h1, h2, h3, h4))::before {
+      transition: none;
+    }
   }
   .md :global(.cite-summary:hover h2),
   .md :global(.cite-summary:hover h3) {

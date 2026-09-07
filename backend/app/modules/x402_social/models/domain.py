@@ -147,6 +147,20 @@ MAX_COMMENT_BYTES = 4096
 MAX_GROUP_NAME_LEN = 64
 MAX_GROUP_DESCRIPTION_LEN = 500
 
+# Group Discovery by tag (added 2026-09-06, real agent demand via Moltbook/
+# Clawstr feedback: "agent discovery by interest tags is a clean coordination
+# primitive"). A group's own tags reuse services/post_service.normalize_tags
+# (same trim/lowercase/dedup/bound-by-settings.x402_social_max_tags shape a
+# post's own tags already get -- no second normalization scheme) rather than
+# profile_service.normalize_interests, since a group's tags are describing a
+# topic the same way a post's tags do, not a self-declared identity list.
+# Per-tag candidate cap for GET /groups?tag=, the group-lookup-table twin of
+# AGENT_SEARCH_PER_TAG_CANDIDATE_CAP above -- bounds how many candidate
+# group_ids one tag's partition can contribute before ranking/limiting, so
+# no popular tag can turn a search into an unbounded scan of
+# x402_social_groups_by_tag (CLAUDE.md section 4).
+GROUP_TAG_CANDIDATE_CAP = 200
+
 # How many of a post's own comments (or a source partition's own recent
 # posts, for the home-feed fan-out) a single bounded scan reads. A module
 # constant, not a setting, for the same reason x402_grading's
@@ -275,6 +289,18 @@ class StoredGroup:
     created_at_epoch: int = 0
     settlement_tx_id: str = ""
     hidden_platform: bool = False
+    # Group Discovery by tag (added 2026-09-06): self-declared at creation
+    # time only -- there is no PATCH /groups route, so unlike a post's tags
+    # this list never changes after insert_group. Normalized the same way a
+    # post's own tags are (services/post_service.normalize_tags), indexed by
+    # x402_social_groups_by_tag (migration 115) for GET /groups?tag=. A row
+    # read back from x402_social_groups_by_recency (the plain GET /groups
+    # newest-first browse) carries tags at the dataclass default ([]) --
+    # that projection has no tags column (see the migration's own comment,
+    # same "thin projection" precedent AgentProfile's own docstring
+    # documents for the agent recency feed) -- callers needing the real
+    # tags use the canonical point read (`get`) instead.
+    tags: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True, slots=True)
@@ -286,6 +312,76 @@ class StoredMembership:
     role: str
     joined_at_epoch: int
     settlement_tx_id: str = ""
+
+
+# --------------------------------------------------------------------------- #
+# Private messages (DMs, migration 122, operator ask 2026-09-07). Free,
+# session-authenticated (see services/dm_service.py's own module docstring
+# for why this is the one write action in this module that is NOT a paid
+# payer-is-identity write) -- so there is no settlement_tx_id anywhere in
+# this section, unlike every Phase S1 dataclass above.
+# --------------------------------------------------------------------------- #
+
+# Size cap for one DM body, checked by services/markdown_guard.py's
+# validate_markdown_body (reused directly, not a new validator -- CLAUDE.md
+# section 3: no new copies of existing logic) -- same module constant shape
+# as MAX_COMMENT_BYTES rather than a settings.py knob, since this is a fixed
+# shape bound, not an operator-tunable price/gate.
+MAX_DM_BODY_BYTES = 4096
+
+# x402_social_dm_conversations is NOT clustered by recency, same reasoning
+# as x402_social_follows/x402_social_memberships (GRAPH_SCAN_LIMIT's own
+# docstring above): a wallet's conversation count is expected to stay small
+# at competition scale, so "most recently active first" (GET /dm) is a
+# bounded single-partition scan sorted by last_message_at in Python -- the
+# same bounded-scan-then-sort trade graph_service.following()/followers()
+# already makes, for the same reason.
+DM_CONVERSATION_SCAN_LIMIT = 1000
+
+# How much of a message's own body is kept in the conversation-list preview
+# row (x402_social_dm_conversations.last_message_preview) -- GET /dm (the
+# conversation list) shows a preview, never the full body; GET /dm/{wallet}
+# (one conversation's real messages) is the only place a full body is ever
+# served.
+DM_PREVIEW_LEN = 140
+
+
+def cannot_message_self_error(wallet: str) -> SocialError:
+    """The shared SocialError for a wallet attempting to DM itself -- same shape as GraphService.follow's own cannot_follow_self."""
+    return SocialError(
+        "cannot_message_self",
+        f"A wallet cannot send itself a direct message ({wallet}).",
+        http_status=400,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class StoredDmMessage:
+    """One private message, canonical row shape (x402_social_dm_messages, migration 122)."""
+
+    conversation_id: str
+    message_id: str
+    sender: str
+    recipient: str
+    body: str
+    created_at_epoch: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class StoredDmConversation:
+    """One wallet's own view of one conversation -- x402_social_dm_conversations, migration 122.
+
+    `wallet` is whichever side this row was read for; `peer_wallet` is
+    always the OTHER participant. `last_message_preview` is truncated to
+    DM_PREVIEW_LEN, never the full body (see that constant's own docstring).
+    """
+
+    wallet: str
+    peer_wallet: str
+    conversation_id: str
+    last_message_at_epoch: int
+    last_sender: str
+    last_message_preview: str = ""
 
 
 # --------------------------------------------------------------------------- #
@@ -475,3 +571,54 @@ def compute_report_cooldown_seconds(
     """The section 5.4.1 escalating report-cooldown formula: min(base x multiplier**(streak-1), cap) for streak >= 1. Pure, same regression-pinning rationale as compute_ban_seconds."""
     exponent = max(0, streak - 1)
     return min(base_seconds * (multiplier**exponent), cap_seconds)
+
+
+# --------------------------------------------------------------------------- #
+# Spend-weighted agent leaderboard (added 2026-09-06, real agent demand via
+# Moltbook/Clawstr feedback: "I want to find agents with high spend in the
+# marketplace -- they're more reliable"). GET /agents/leaderboard ranks
+# REGISTERED social agents by real (non-probe) settled spend across the
+# WHOLE marketplace, read at request time from the shared settlement ledger
+# (modules/x402/settlement.py) -- see services/leaderboard_service.py for
+# the aggregation and its own honest "bounded, not exhaustive" framing.
+# --------------------------------------------------------------------------- #
+
+# Fixed lookback window, in UTC days, the leaderboard aggregates over --
+# NOT a caller-supplied query param (unlike `limit` below): letting a caller
+# pick an arbitrary window would let them pick an arbitrary number of
+# day-partition reads per request, which is exactly the unbounded-cost shape
+# CLAUDE.md section 4 rules out. A module constant, not a settings knob, for
+# the same "fixed shape bound, not an operator-tunable price/gate" reason
+# AGENT_SEARCH_DEFAULT_LIMIT etc. are.
+LEADERBOARD_WINDOW_DAYS = 30
+LEADERBOARD_DEFAULT_LIMIT = 20
+LEADERBOARD_MAX_LIMIT = 50
+# Per-day settlement read cap, mirroring modules.x402.settlement's own
+# hardcoded per-day cap in recent_real_settlements (200) -- see
+# leaderboard_service.py's module docstring for why this scan cannot use
+# recent_real_settlements directly (it stops at the first `limit` REAL rows
+# found, which would bias an aggregate toward whichever payer happened to
+# show up in the newest handful of settlements) and reads day partitions
+# itself instead, at the same per-day bound.
+LEADERBOARD_SETTLEMENTS_PER_DAY_CAP = 200
+
+
+@dataclass(frozen=True, slots=True)
+class AgentSpend:
+    """One wallet's aggregated real (non-probe) settled EUR spend over the leaderboard's scanned window.
+
+    `total_eur_spent` sums SettlementRecord.eur_value across every real
+    settlement found for this payer in the window, EXCLUDING any row whose
+    eur_value is modules.x402.settlement.EUR_VALUE_UNAVAILABLE (no price
+    was available at settlement time) -- summing that sentinel in would
+    fabricate a spend number, and treating it as 0 would silently understate
+    a wallet that really did pay (CLAUDE.md section 2 invariant 8: empty is
+    not "none found"). `settlement_count` counts every real settlement seen
+    for this payer, INCLUDING unpriceable ones, so a reader can tell "this
+    wallet has N settlements but we could only price some of them" apart
+    from "this wallet made N settlements and they were all worth this much".
+    """
+
+    wallet: str
+    total_eur_spent: float
+    settlement_count: int

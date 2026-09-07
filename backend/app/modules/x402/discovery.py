@@ -30,11 +30,17 @@ def describe_json_endpoint(
 ) -> dict[str, Any]:
     """Declare a Bazaar discovery extension for a JSON endpoint.
 
-    `body_type="json"` for a POST/PUT/PATCH whose input is a request body
-    (the package otherwise builds a query-params extension by default, which
-    describes a body-taking route incorrectly -- see x402_directory's own
-    x402_list for why this matters). Leave it None for a GET/HEAD/DELETE
-    whose input is query params.
+    `body_type="json"` for EVERY POST/PUT/PATCH route, including one that
+    takes no body at all (a path-parameter-only action such as a vote,
+    follow or renew): the query-params declaration's schema only admits
+    `method` in GET/HEAD/DELETE, and the resource server injects the real
+    method at request time, so a body-method route declared without
+    body_type emits an extension that fails the facilitator's own
+    `validate_discovery_extension` and is silently never catalogued in the
+    Bazaar (found live 2026-09-05 on the feature-vote route). With
+    body_type="json" and no `input`, the declared example body is `{}`,
+    which validates. Leave it None only for a GET/HEAD/DELETE whose input is
+    query params.
     """
     return declare_discovery_extension(
         input=input,

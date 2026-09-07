@@ -24,8 +24,10 @@ from app.modules.x402_social.models.domain import (
     GROUP_ROLE_MEMBER,
     GROUP_ROLE_MODERATOR,
     GROUP_ROLE_OWNER,
+    GROUP_TAG_CANDIDATE_CAP,
     MAX_GROUP_DESCRIPTION_LEN,
     MAX_GROUP_NAME_LEN,
+    MAX_TAG_LENGTH,
     SocialError,
     StoredGroup,
     StoredMembership,
@@ -33,7 +35,7 @@ from app.modules.x402_social.models.domain import (
     not_registered_error,
 )
 from app.modules.x402_social.services.markdown_guard import reject_embedded_html
-from app.modules.x402_social.services.post_service import PostService
+from app.modules.x402_social.services.post_service import PostService, normalize_tags
 from app.modules.x402_social.stores.base import SocialStore
 from app.modules.x402_social.stores.factory import get_social_store
 
@@ -64,6 +66,25 @@ def normalize_group_name(raw: str) -> str:
 
 
 logger = logging.getLogger(__name__)
+
+
+def search_tag(raw: str) -> str:
+    """Validate and normalize the `?tag=` query filter for GET /groups, raising invalid_request if unusable.
+
+    Same trim-and-lowercase normalization post_service.normalize_tags
+    applies to a group's own stored tags (so a search for "DeFi" and one for
+    "defi" read the same x402_social_groups_by_tag partition), and the same
+    "validate the search filter, mirroring the storage-side bound" shape
+    x402_directory.services.listing_service.search_tag uses for its own
+    `?tag=` -- read as a style reference only, not imported (this module
+    never depends on x402_directory).
+    """
+    tag = raw.strip().lower()
+    if not tag or len(tag) > MAX_TAG_LENGTH:
+        raise SocialError(
+            "invalid_request", f"tag must be 1-{MAX_TAG_LENGTH} characters", http_status=400
+        )
+    return tag
 
 
 def group_id_for(name_norm: str) -> str:
@@ -116,6 +137,7 @@ class GroupService:
         name: str,
         description: str,
         settlement_tx_id: str,
+        tags: list[str] | None = None,
         now: datetime | None = None,
     ) -> StoredGroup:
         """Claim a group name and store the group, owner as the sole initial member.
@@ -125,20 +147,27 @@ class GroupService:
         section 2.6: "a name collision after paying is caller-fault").
 
         If the name claim WINS but a later step (insert_group,
-        upsert_membership) raises, this is OUR failure, not the caller's --
-        run_with_refund's generic-exception path will attempt a refund, same
-        as any other product-write failure. Without cleanup, the claimed
-        name would otherwise be permanently unusable by anyone: every future
-        attempt to claim it settles a real payment and gets refused as
-        group_name_taken even though nobody actually owns it (finding 3,
-        2026-security-audit). So on any exception past this point, this
-        method best-effort releases the name claim (never masking the
-        original exception -- a failed release is logged and the original
-        exception still propagates) before re-raising.
+        upsert_membership, the tag-lookup writes below) raises, this is OUR
+        failure, not the caller's -- run_with_refund's generic-exception path
+        will attempt a refund, same as any other product-write failure.
+        Without cleanup, the claimed name would otherwise be permanently
+        unusable by anyone: every future attempt to claim it settles a real
+        payment and gets refused as group_name_taken even though nobody
+        actually owns it (finding 3, 2026-security-audit). So on any
+        exception past this point, this method best-effort releases the name
+        claim (never masking the original exception -- a failed release is
+        logged and the original exception still propagates) before
+        re-raising.
 
         Raises SocialError("not_registered", ..., 403) if `owner` has no
         registered profile (finding 4, 2026-security-audit) -- checked
         first, before the name-claim LWT is ever attempted.
+
+        `tags` (Group Discovery by tag, added 2026-09-06) is normalized
+        here (defense in depth -- the route already normalizes it pre-gate
+        via the same post_service.normalize_tags a post's own tags go
+        through, so a malformed tag list is a free 400) and is
+        write-once: there is no PATCH /groups to change it later.
         """
         if self._is_registered is None or not self._is_registered(owner):
             raise not_registered_error()
@@ -146,6 +175,7 @@ class GroupService:
         name_norm = clean_name.lower()
         clean_description = description.strip()[:MAX_GROUP_DESCRIPTION_LEN]
         reject_embedded_html(clean_description, field_name="description")
+        clean_tags = normalize_tags(list(tags or []))
         group_id = group_id_for(name_norm)
         if not self.store.try_claim_group_name(name_norm=name_norm, group_id=group_id):
             raise SocialError(
@@ -163,6 +193,7 @@ class GroupService:
             owner=owner,
             created_at_epoch=epoch,
             settlement_tx_id=settlement_tx_id,
+            tags=clean_tags,
         )
         try:
             self.store.insert_group(group)
@@ -175,6 +206,8 @@ class GroupService:
                     settlement_tx_id=settlement_tx_id,
                 )
             )
+            for tag in clean_tags:
+                self.store.upsert_group_tag(tag=tag, group_id=group_id, created_at_epoch=epoch)
         except Exception:
             try:
                 self.store.release_group_name(name_norm=name_norm, group_id=group_id)
@@ -208,10 +241,46 @@ class GroupService:
         doc section 5.3 step 4: hidden from GET /groups (and trending),
         never from the point read (`get`, above) or an existing member's
         own group feed.
+
+        This reads the thin recency projection (StoredGroup.tags's own
+        docstring) -- every returned group's `tags` is at the dataclass
+        default (`[]`), same "the plain browse feed is a thin projection"
+        trade-off AgentProfile's own recency read already accepts. A caller
+        that needs a group's real tags uses `get` or `list_by_tag`.
         """
         clamped = max(1, min(limit, settings.x402_social_max_results))
         groups = self.store.list_groups_recent(limit=clamped)
         return [g for g in groups if not g.hidden_platform]
+
+    def list_by_tag(self, tag: str, *, limit: int) -> list[StoredGroup]:
+        """Return groups carrying the (already normalized) tag, newest-first, clamped to x402_social_max_results -- Group Discovery by tag (added 2026-09-06).
+
+        Reads up to GROUP_TAG_CANDIDATE_CAP (group_id, created_at_epoch)
+        candidates from the tag lookup, ranks by created_at_epoch descending
+        (the lookup table has no clustering order of its own -- see the
+        migration's own comment), then point-reads each of the top `limit`
+        group_ids' canonical row via `get` -- always the fresh row, so a
+        later hidden_platform change is never stale here the way a
+        denormalized copy could be. A group_id whose canonical read races a
+        concurrent hard-delete and comes back None is simply skipped (same
+        "the ranking was already computed from the lookup table, which may
+        run slightly ahead of the canonical row" acceptance
+        ProfileService.search_by_interests documents for the identical
+        shape), and a `hidden_platform` group is filtered out here too, same
+        as `list_recent`.
+        """
+        candidates = self.store.list_groups_by_tag(tag, limit=GROUP_TAG_CANDIDATE_CAP)
+        ordered = sorted(candidates, key=lambda pair: (-pair[1], pair[0]))
+        clamped = max(1, min(limit, settings.x402_social_max_results))
+        results: list[StoredGroup] = []
+        for group_id, _created_at in ordered:
+            group = self.get(group_id)
+            if group is None or group.hidden_platform:
+                continue
+            results.append(group)
+            if len(results) >= clamped:
+                break
+        return results
 
     def get_membership(self, group_id: str, wallet: str) -> StoredMembership | None:
         """Return one wallet's membership in one group, or None if they are not a member."""

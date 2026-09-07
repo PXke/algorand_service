@@ -14,10 +14,12 @@ from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any, Never
 
+import httpx
 import pytest
 
 pytest.importorskip("x402")
 
+from algorand_shared.x402_statements import PROBE_QUEUE_NEVER_PROBED
 from x402.mechanisms.avm.constants import ALGORAND_TESTNET_CAIP2
 from x402.schemas.payments import PaymentRequirements
 from x402.schemas.responses import SupportedKind, SupportedResponse
@@ -38,9 +40,16 @@ from app.modules.x402.settlement import InMemorySettlementStore, SettlementRecor
 from app.modules.x402_directory.api import routes as directory_routes
 from app.modules.x402_directory.models.domain import (
     LISTING_CATEGORIES,
+    SOURCE_AUTO_DISCOVERED,
+    SOURCE_PAID,
     DirectoryError,
     StoredListing,
     StoredProbe,
+)
+from app.modules.x402_directory.services.discovery_import import (
+    DISCOVERY_SOURCE_LABEL,
+    fetch_facilitator_resources,
+    import_discovered_resources,
 )
 from app.modules.x402_directory.services.listing_service import (
     MAX_SCHEMA_JSON_BYTES,
@@ -150,6 +159,12 @@ def _request(
         body=body,
         url=SimpleNamespace(scheme="http", host="localhost", path=path),
     )
+
+
+@pytest.fixture(autouse=True)
+def _already_paid(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Skip the pre-parse 402 for header-less requests: every route test here models a request that already carries a payment (the gate is stubbed, or run against the offline facilitator), so the unpaid challenge is out of scope. Its ordering has its own tests in tests/test_x402_unpaid_challenge.py."""
+    monkeypatch.setattr(directory_routes, "challenge_if_unpaid", lambda *_a, **_kw: None)
 
 
 @pytest.fixture
@@ -2590,9 +2605,9 @@ def test_renewing_an_unlisted_url_is_a_free_404(
 def test_renew_402_declares_a_json_body_discovery_extension_and_states_the_rule(
     store: InMemoryListingStore, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The renew offer reaches the gate with a body-shaped Bazaar declaration, the listing price and the ownership rule in its description."""
-    monkeypatch.setattr(settings, "x402_listing_price", "$0.10")
-    monkeypatch.setattr(settings, "x402_listing_term_days", 30)
+    """The boost offer reaches the gate with a body-shaped Bazaar declaration, the boost price and the ownership rule in its description."""
+    monkeypatch.setattr(settings, "x402_listing_boost_price", "$0.10")
+    monkeypatch.setattr(settings, "x402_listing_boost_days", 30)
     service = ListingService(store)
     _listed(store, "https://api.example.com/q")
     monkeypatch.setattr(directory_routes, "listing_service", service)
@@ -2607,17 +2622,24 @@ def test_renew_402_declares_a_json_body_discovery_extension_and_states_the_rule(
         directory_routes.x402_renew(_renew_request("https://api.example.com/q"))
 
     assert captured["price"] == "$0.10"
-    assert captured["resource"] == "x402-directory-renew"
-    assert "30 more days" in captured["description"]
+    assert captured["resource"] == "x402-directory-boost"
+    assert "for 30 days" in captured["description"]
     assert "Only the wallet that listed" in captured["description"]
     assert "body" in json.dumps(captured["extensions"]["bazaar"])
 
 
-def test_renew_by_the_owner_extends_from_the_current_term_end_and_keeps_created_at(
+def test_renew_by_the_owner_boosts_from_now_and_never_touches_term_end_or_created_at(
     store: InMemoryListingStore, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """An early renewal adds a full term on top of what is left; created_at, content and the badge are untouched, the txid is replaced."""
+    """An early boost adds a full boost window on top of what is left; term_end, created_at, content and the badge are untouched, the txid is replaced.
+
+    Regression coverage for the 2026-09-06 repurposing: renew() used to
+    extend term_end_epoch (survival, now probe-fed); it now stacks onto
+    boosted_until_epoch (search-ranking priority) and must never move
+    term_end_epoch, which is unaffected by any payment since this change.
+    """
     monkeypatch.setattr(settings, "x402_listing_term_days", 30)
+    monkeypatch.setattr(settings, "x402_listing_boost_days", 7)
     service = ListingService(store)
     base = datetime(2026, 8, 1, tzinfo=UTC)
     original = service.create(
@@ -2634,14 +2656,16 @@ def test_renew_by_the_owner_extends_from_the_current_term_end_and_keeps_created_
     )
     store.upsert(replace(original, verified_wallet="AGENT1", verified_at_epoch=7))
 
+    renew_at = base + timedelta(days=10)
     renewed = service.renew(
         normalized_url="https://api.example.com/q",
         payer="AGENT1",
         settlement_tx_id="TX2",
-        now=base + timedelta(days=10),
+        now=renew_at,
     )
 
-    assert renewed.term_end_epoch == int((base + timedelta(days=60)).timestamp())
+    assert renewed.boosted_until_epoch == int((renew_at + timedelta(days=7)).timestamp())
+    assert renewed.term_end_epoch == original.term_end_epoch
     assert renewed.created_at_epoch == original.created_at_epoch
     assert renewed.settlement_tx_id == "TX2"
     assert renewed.payer == "AGENT1"
@@ -2649,13 +2673,56 @@ def test_renew_by_the_owner_extends_from_the_current_term_end_and_keeps_created_
     assert renewed.verified_at_epoch == 7
     assert (renewed.description, renewed.tags, renewed.category) == ("mine", ["fx"], "finance")
     assert store.get(original.url_hash) == renewed
-    # Projections carry the new term: the tag and category rows serve it live at day 59.
-    late = base + timedelta(days=59)
+    # Projections carry the new boost: the tag and category rows serve it
+    # live for the rest of the (unaffected) original term.
+    late = base + timedelta(days=20)
     assert [i.settlement_tx_id for i in service.search(limit=50, tag="fx", now=late)] == ["TX2"]
     assert [i.settlement_tx_id for i in service.search(limit=50, category="finance", now=late)] == [
         "TX2"
     ]
-    assert service.search(limit=50, now=late)[0].term_end_epoch == renewed.term_end_epoch
+    assert service.search(limit=50, now=late)[0].boosted_until_epoch == renewed.boosted_until_epoch
+
+
+def test_a_boosted_listing_sorts_before_a_newer_non_boosted_one_in_search(
+    store: InMemoryListingStore,
+) -> None:
+    """search()'s paid tier is boosted-first, newest-first within each group -- a boost can override recency but never mixes with the auto-discovered tier or probe_leaderboard()."""
+    service = ListingService(store)
+    base = datetime(2026, 8, 1, tzinfo=UTC)
+    older = service.create(
+        normalized_url="https://api.example.com/older",
+        price="$0.01",
+        description="older",
+        assets=[],
+        tags=["fx"],
+        schema_json="",
+        settlement_tx_id="TX-OLD",
+        payer="AGENT1",
+        now=base,
+    )
+    newer = service.create(
+        normalized_url="https://api.example.com/newer",
+        price="$0.01",
+        description="newer",
+        assets=[],
+        tags=["fx"],
+        schema_json="",
+        settlement_tx_id="TX-NEW",
+        payer="AGENT2",
+        now=base + timedelta(days=1),
+    )
+    # Newer is unboosted and would otherwise sort first (newest-first).
+    boosted_older = service.renew(
+        normalized_url=older.url,
+        payer="AGENT1",
+        settlement_tx_id="TX-BOOST",
+        now=base + timedelta(days=2),
+    )
+    assert boosted_older.boosted_until_epoch > 0
+
+    now = base + timedelta(days=3)
+    assert [i.url for i in service.search(limit=10, now=now)] == [older.url, newer.url]
+    assert [i.url for i in service.search(limit=10, tag="fx", now=now)] == [older.url, newer.url]
 
 
 def test_renew_of_a_live_listing_by_another_wallet_is_refused_and_changes_nothing(
@@ -2729,7 +2796,9 @@ def test_renew_of_an_expired_or_unowned_listing_by_another_wallet_is_refused_wit
     assert excinfo.value.code == "renew_requires_relist"
     assert store.get(original.url_hash) == unowned
 
-    # The owner itself can still renew after expiry: fresh term from now, badge kept.
+    # The owner itself can still boost after expiry: fresh boost window from
+    # now, term_end untouched (still the original, already-lapsed value --
+    # boosting an expired listing does not resurrect it), badge kept.
     store.upsert(badged)
     renewed = service.renew(
         normalized_url="https://api.example.com/q",
@@ -2737,10 +2806,56 @@ def test_renew_of_an_expired_or_unowned_listing_by_another_wallet_is_refused_wit
         settlement_tx_id="TX4",
         now=later,
     )
-    assert renewed.term_end_epoch == int((later + timedelta(days=30)).timestamp())
+    assert renewed.boosted_until_epoch == int(
+        (later + timedelta(days=settings.x402_listing_boost_days)).timestamp()
+    )
+    assert renewed.term_end_epoch == original.term_end_epoch
     assert renewed.created_at_epoch == original.created_at_epoch
     assert renewed.is_verified
     assert renewed.settlement_tx_id == "TX4"
+
+
+def test_renew_by_an_unattributable_payer_cannot_boost_an_unowned_listing(
+    store: InMemoryListingStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An empty (unattributable) payer must not match an unowned listing's own empty payer -- two blanks are not proof of ownership (finding #11, 2026-09-06 adversarial review).
+
+    Regression: `existing.payer != payer` was False whenever BOTH sides were
+    "", so a settled payment that could not be attributed to any wallet was
+    treated as if it belonged to the SAME owner as an already-unowned
+    listing (an auto-discovered stub, or one whose payer was never set) and
+    was allowed straight into the boost path. It must instead hit the same
+    renew_requires_relist refusal any other non-owner gets, exactly like
+    x402_board's BoardService.renew() (`not attributed or attributed !=
+    placement.payer`) already enforces for the equivalent case.
+    """
+    monkeypatch.setattr(settings, "x402_listing_term_days", 30)
+    service = ListingService(store)
+    base = datetime(2026, 9, 6, tzinfo=UTC)
+    unowned = StoredListing(
+        url_hash=url_hash("https://api.example.com/unowned"),
+        url="https://api.example.com/unowned",
+        price="",
+        description="an auto-discovered stub",
+        schema_json="",
+        settlement_tx_id="",
+        term_end_epoch=int((base + timedelta(days=30)).timestamp()),
+        created_at_epoch=int(base.timestamp()),
+        payer="",
+    )
+    store.upsert(unowned)
+
+    with pytest.raises(DirectoryError) as excinfo:
+        service.renew(
+            normalized_url="https://api.example.com/unowned",
+            payer="",
+            settlement_tx_id="TX-UNATTRIBUTED",
+            now=base,
+        )
+    assert excinfo.value.code == "renew_requires_relist"
+    assert excinfo.value.http_status == 409
+    # Payment settled but nothing about the listing changed.
+    assert store.get(unowned.url_hash) == unowned
 
 
 @pytest.mark.usefixtures("fake_redis")
@@ -2888,31 +3003,46 @@ def test_cassandra_store_writes_the_badge_columns_on_every_listing_insert(
     )
 
     cass.upsert(listing)
-    inserts = [(s, p) for s, p in executed if s.startswith("INSERT")]
+    # x402_probe_queue's seed INSERT (migration 118) carries no badge columns
+    # at all -- it is asserted on separately below, not swept into this list.
+    inserts = [
+        (s, p) for s, p in executed if s.startswith("INSERT") and "x402_probe_queue" not in s
+    ]
     assert len(inserts) == 4  # canonical, recency, tag fx, category:other
     for stmt, params in inserts:
         assert "verified_wallet, verified_at" in stmt
         assert stmt.count("?") == len(params)
-        # Badge params sit before the trailing reimburses/contact pair (104).
-        assert params[-4:-2] == ("AGENT1", now)
-        assert params[-2:] == (False, "")
+        # Badge params sit before the trailing reimburses/contact/source/
+        # discovered_from/boosted_until sextuple (104, 113's auto-discovery
+        # columns, then 114's boost column).
+        assert params[-7:-5] == ("AGENT1", now)
+        assert params[-5:-3] == (False, "")
+        assert params[-3:-1] == ("paid", "")
+        assert params[-1] is None  # not boosted (boosted_until_epoch == 0)
+    queue_seed = next(p for s, p in executed if "x402_probe_queue" in s)
+    assert queue_seed[1] == PROBE_QUEUE_NEVER_PROBED
 
     executed.clear()
     assert cass.insert_if_absent(replace(listing, verified_wallet="", verified_at_epoch=0)) is True
-    inserts = [(s, p) for s, p in executed if s.startswith("INSERT")]
+    inserts = [
+        (s, p) for s, p in executed if s.startswith("INSERT") and "x402_probe_queue" not in s
+    ]
     assert "IF NOT EXISTS" in inserts[0][0]
     for stmt, params in inserts:
         assert "verified_wallet, verified_at" in stmt
-        assert params[-4:-2] == ("", None)
-        assert params[-2:] == (False, "")
+        assert params[-7:-5] == ("", None)
+        assert params[-5:-3] == (False, "")
+        assert params[-3:-1] == ("paid", "")
+        assert params[-1] is None
 
 
 @pytest.mark.usefixtures("fake_redis")
 def test_renew_route_stores_marks_fulfilled_and_serves_receipt_headers_on_refusal(
     store: InMemoryListingStore, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A settled renewal is stored then marked fulfilled; a refused one goes through run_with_refund too, but DirectoryError's PlatformError exemption (2026-09-02) means it is still the direct 403 with payment kept, never a refund, and is NOT marked fulfilled."""
+    """A settled boost is stored then marked fulfilled; a refused one goes through run_with_refund too, but DirectoryError's PlatformError exemption (2026-09-02) means it is still the direct 403 with payment kept, never a refund, and is NOT marked fulfilled."""
     monkeypatch.setattr(settings, "x402_listing_term_days", 30)
+    monkeypatch.setattr(settings, "x402_listing_boost_days", 7)
     service = ListingService(store)
     original = _listed(store, "https://api.example.com/q", payer="P" * 58)
     monkeypatch.setattr(directory_routes, "listing_service", service)
@@ -2932,10 +3062,14 @@ def test_renew_route_stores_marks_fulfilled_and_serves_receipt_headers_on_refusa
     assert response.headers["PAYMENT-RESPONSE"] == "ok"
     body = json.loads(response.description)
     assert body["listing"]["settlement_tx_id"] == "TX123"
-    assert body["listing"]["term_end_epoch"] == original.term_end_epoch + 30 * 86400
+    # term_end is unaffected by a boost -- the route does not pass `now`
+    # through to renew(), so this only checks equality, not arithmetic.
+    assert body["listing"]["term_end_epoch"] == original.term_end_epoch
     assert body["listing"]["created_at_epoch"] == original.created_at_epoch
-    assert body["term_days"] == 30
-    assert fulfilled == [("TX123", "x402-directory-renew")]
+    now_epoch = int(datetime.now(tz=UTC).timestamp())
+    assert abs(body["listing"]["boosted_until_epoch"] - (now_epoch + 7 * 86400)) < 5
+    assert body["boost_days"] == 7
+    assert fulfilled == [("TX123", "x402-directory-boost")]
 
     # Now the listing belongs to someone else: the same settled payer is refused.
     store.upsert(replace(store.get(original.url_hash), payer="AGENT-OTHER"))
@@ -2943,7 +3077,7 @@ def test_renew_route_stores_marks_fulfilled_and_serves_receipt_headers_on_refusa
     assert refused.status_code == 403
     assert json.loads(refused.description)["error"]["code"] == "listing_owned_by_another_payer"
     assert refused.headers["PAYMENT-RESPONSE"] == "ok"
-    assert fulfilled == [("TX123", "x402-directory-renew")]
+    assert fulfilled == [("TX123", "x402-directory-boost")]
     assert store.get(original.url_hash).payer == "AGENT-OTHER"
 
 
@@ -3124,7 +3258,7 @@ def test_an_overlong_contact_never_reaches_the_payment_gate_via_the_route(
 def test_renew_does_not_change_reimburses_or_contact(
     store: InMemoryListingStore,
 ) -> None:
-    """Renewal buys time only -- reimburses/contact follow every other descriptive field (price, description, tags, category): unchanged by renew, only settable via list/relist."""
+    """A boost buys search priority only -- reimburses/contact follow every other descriptive field (price, description, tags, category): unchanged by renew(), only settable via list/relist."""
     service = ListingService(store)
     base = datetime(2026, 8, 1, tzinfo=UTC)
     service.create(
@@ -3260,3 +3394,547 @@ def test_list_and_renew_never_forward_promo_params(
 
     assert "promo_code" not in captured
     assert "promo_wallet" not in captured
+
+
+# --------------------------------------------------------------------------- #
+# Auto-discovered ("unclaimed") listing import (2026-09-06)
+# --------------------------------------------------------------------------- #
+_DISCOVERED_URL = "https://onestepchess.xyz/api/v1/moves"
+
+
+def _facilitator_resource(
+    *,
+    url: str = _DISCOVERED_URL,
+    method: str = "POST",
+    description: str = "Submit one legal move.",
+    amount: str = "10000",
+    asset: str = "31566704",
+    decimals: int | None = 6,
+    name: str | None = "USD Coin",
+) -> dict:
+    """One item shaped like a real GoPlausible `discovery/resources` entry."""
+    extra: dict = {}
+    if decimals is not None:
+        extra["decimals"] = decimals
+    if name is not None:
+        extra["name"] = name
+    return {
+        "resourceUrl": url,
+        "method": method,
+        "description": description,
+        "merchantId": "SOME_MERCHANT_ID",
+        "accepts": [{"scheme": "exact", "amount": amount, "asset": asset, "extra": extra}],
+    }
+
+
+def test_import_creates_an_auto_discovered_listing_never_a_paid_one(
+    store: InMemoryListingStore,
+) -> None:
+    """A brand-new url from the feed becomes source=auto_discovered, unowned, with no settlement -- never mistaken for a paid listing."""
+    result = import_discovered_resources([_facilitator_resource()], store=store)
+
+    assert (result.scanned, result.created, result.refreshed) == (1, 1, 0)
+    listing = store.get(url_hash(normalize_url(_DISCOVERED_URL)))
+    assert listing is not None
+    assert listing.source == SOURCE_AUTO_DISCOVERED
+    assert listing.is_auto_discovered is True
+    assert listing.discovered_from == DISCOVERY_SOURCE_LABEL
+    assert listing.payer == ""
+    assert listing.settlement_tx_id == ""
+    assert listing.description == "[POST] Submit one legal move."
+    assert listing.price == "~0.01 USD Coin"
+
+
+def test_import_never_overwrites_a_real_paid_listing(store: InMemoryListingStore) -> None:
+    """A url already listed by a real payer is skipped outright, whatever the facilitator now reports about it -- an already-public catalog entry is never grounds to overwrite something someone paid us to list."""
+    service = ListingService(store)
+    service.create(
+        normalized_url=_DISCOVERED_URL,
+        price="$5.00",
+        description="the real, paid listing",
+        assets=[],
+        tags=["chess"],
+        schema_json="",
+        settlement_tx_id="TX1",
+        payer="AGENT1",
+    )
+
+    result = import_discovered_resources([_facilitator_resource()], store=store)
+
+    assert (result.created, result.refreshed, result.skipped_existing_paid) == (0, 0, 1)
+    listing = store.get(url_hash(_DISCOVERED_URL))
+    assert listing is not None
+    assert listing.source == SOURCE_PAID
+    assert listing.payer == "AGENT1"
+    assert listing.description == "the real, paid listing"
+
+
+def test_import_refreshes_an_existing_auto_discovered_listing_in_place(
+    store: InMemoryListingStore,
+) -> None:
+    """A second import of the same url refreshes price/description/term_end but preserves created_at -- a re-import must not jump the stub to the front of the free feed."""
+    now = datetime(2026, 9, 1, tzinfo=UTC)
+    first = import_discovered_resources(
+        [_facilitator_resource(description="old copy")], store=store, now=now
+    )
+    assert (first.created, first.refreshed) == (1, 0)
+    original = store.get(url_hash(_DISCOVERED_URL))
+    assert original is not None
+
+    later = now + timedelta(days=5)
+    second = import_discovered_resources(
+        [_facilitator_resource(description="updated copy")], store=store, now=later
+    )
+
+    assert (second.created, second.refreshed) == (0, 1)
+    refreshed = store.get(url_hash(_DISCOVERED_URL))
+    assert refreshed is not None
+    assert refreshed.description == "[POST] updated copy"
+    assert refreshed.created_at_epoch == original.created_at_epoch
+    assert refreshed.term_end_epoch > original.term_end_epoch
+
+
+def test_import_skips_a_resource_with_an_unusable_url(store: InMemoryListingStore) -> None:
+    """One malformed url in a feed of many must not abort the whole import."""
+    result = import_discovered_resources(
+        [{"resourceUrl": "not-a-url", "description": "bad"}, _facilitator_resource()],
+        store=store,
+    )
+
+    assert result.scanned == 2
+    assert result.skipped_invalid == 1
+    assert result.created == 1
+
+
+def test_import_falls_back_to_a_raw_price_string_without_decimals(
+    store: InMemoryListingStore,
+) -> None:
+    """A resource whose `extra` carries no decimals still gets an informational (non-payment) price string, never an empty one."""
+    result = import_discovered_resources(
+        [_facilitator_resource(decimals=None, name=None, amount="500", asset="12345")],
+        store=store,
+    )
+
+    assert result.created == 1
+    listing = store.get(url_hash(_DISCOVERED_URL))
+    assert listing is not None
+    assert listing.price == "500 (asset 12345)"
+
+
+def test_a_real_payer_can_claim_a_previously_auto_discovered_listing(
+    store: InMemoryListingStore,
+) -> None:
+    """Relisting a url that was only an auto-discovered stub works through the ORDINARY create() ownership rule (an empty-payer row reads as unowned) and yields a real paid listing that leaves the free feed."""
+    import_discovered_resources([_facilitator_resource()], store=store)
+    assert store.get(url_hash(_DISCOVERED_URL)).source == SOURCE_AUTO_DISCOVERED  # type: ignore[union-attr]
+
+    claimed = ListingService(store).create(
+        normalized_url=_DISCOVERED_URL,
+        price="$0.01",
+        description="I actually run this endpoint",
+        assets=[],
+        tags=["chess"],
+        schema_json="",
+        settlement_tx_id="REAL_TX",
+        payer="REAL_AGENT",
+    )
+
+    assert claimed.source == SOURCE_PAID
+    assert claimed.payer == "REAL_AGENT"
+    stored = store.get(url_hash(_DISCOVERED_URL))
+    assert stored is not None
+    assert stored.source == SOURCE_PAID
+    assert stored.payer == "REAL_AGENT"
+    assert store.list_auto_discovered(limit=50) == []
+
+
+@pytest.mark.usefixtures("fake_redis")
+def test_search_serves_paid_listings_before_auto_discovered_ones(
+    store: InMemoryListingStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An auto-discovered stub never outranks, or is interleaved by recency with, a real paid listing -- it only fills room a paid listing left empty."""
+    monkeypatch.setattr(directory_routes, "listing_service", ListingService(store))
+    now = datetime.now(tz=UTC)
+    # The auto-discovered import happens FIRST but is timestamped OLDER --
+    # if the two feeds were merged by recency alone the paid listing (newer)
+    # would still sort first; make the regression harder to miss by also
+    # giving the import an OLDER created_at than the paid listing, so a
+    # naive "just merge and sort by created_at" implementation would still
+    # rank paid first here by luck. The real guarantee is structural (see
+    # ListingService.search()'s docstring), not just this specific ordering.
+    import_discovered_resources(
+        [_facilitator_resource(url="https://old-but-free.example.com/x")],
+        store=store,
+        now=now - timedelta(days=1),
+    )
+    ListingService(store).create(
+        normalized_url="https://real-paid.example.com/x",
+        price="$0.01",
+        description="paid, listed after the import",
+        assets=[],
+        tags=[],
+        schema_json="",
+        settlement_tx_id="TX1",
+        payer="AGENT1",
+        now=now,
+    )
+
+    result = directory_routes.x402_search(_request(method="GET", path="/api/v1/x402/search"))
+
+    sources = [item["source"] for item in result["items"]]
+    assert sources[0] == "paid"
+    assert "auto_discovered" in sources
+    assert result["items"][0]["url"] == "https://real-paid.example.com/x"
+
+
+@pytest.mark.usefixtures("fake_redis")
+def test_search_fills_only_remaining_room_with_auto_discovered_listings(
+    store: InMemoryListingStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When paid listings alone already fill the limit, no auto-discovered stub is returned at all."""
+    monkeypatch.setattr(settings, "x402_search_max_results", 1)
+    monkeypatch.setattr(directory_routes, "listing_service", ListingService(store))
+    import_discovered_resources([_facilitator_resource()], store=store)
+    ListingService(store).create(
+        normalized_url="https://real-paid.example.com/x",
+        price="$0.01",
+        description="the only paid listing",
+        assets=[],
+        tags=[],
+        schema_json="",
+        settlement_tx_id="TX1",
+        payer="AGENT1",
+    )
+
+    result = directory_routes.x402_search(_request(method="GET", path="/api/v1/x402/search"))
+
+    assert [item["source"] for item in result["items"]] == ["paid"]
+
+
+@pytest.mark.usefixtures("fake_redis")
+def test_tag_and_category_search_never_return_an_auto_discovered_listing(
+    store: InMemoryListingStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An auto-discovered stub has no tags/category of its own and must never surface in a filtered search."""
+    monkeypatch.setattr(directory_routes, "listing_service", ListingService(store))
+    import_discovered_resources([_facilitator_resource()], store=store)
+    ListingService(store).create(
+        normalized_url="https://real-paid.example.com/x",
+        price="$0.01",
+        description="paid, tagged",
+        assets=[],
+        tags=["fx"],
+        schema_json="",
+        settlement_tx_id="TX1",
+        payer="AGENT1",
+    )
+
+    tag_result = directory_routes.x402_search(
+        _request(method="GET", path="/api/v1/x402/search", query={"tag": "fx"})
+    )
+    category_result = directory_routes.x402_search(
+        _request(method="GET", path="/api/v1/x402/search", query={"category": "other"})
+    )
+
+    assert [item["url"] for item in tag_result["items"]] == ["https://real-paid.example.com/x"]
+    assert all(item["source"] == "paid" for item in category_result["items"])
+
+
+@pytest.mark.usefixtures("fake_redis")
+def test_search_response_always_carries_source_and_discovered_from(
+    store: InMemoryListingStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every search result names its source on the wire -- a real listing "paid"/"", never omitted or shape-identical to an auto-discovered one."""
+    monkeypatch.setattr(directory_routes, "listing_service", ListingService(store))
+    ListingService(store).create(
+        normalized_url="https://real-paid.example.com/x",
+        price="$0.01",
+        description="paid",
+        assets=[],
+        tags=[],
+        schema_json="",
+        settlement_tx_id="TX1",
+        payer="AGENT1",
+    )
+    import_discovered_resources([_facilitator_resource()], store=store)
+
+    result = directory_routes.x402_search(_request(method="GET", path="/api/v1/x402/search"))
+
+    by_url = {item["url"]: item for item in result["items"]}
+    assert by_url["https://real-paid.example.com/x"]["source"] == "paid"
+    assert by_url["https://real-paid.example.com/x"]["discovered_from"] == ""
+    assert by_url[_DISCOVERED_URL]["source"] == "auto_discovered"
+    assert by_url[_DISCOVERED_URL]["discovered_from"] == DISCOVERY_SOURCE_LABEL
+
+
+def test_fetch_facilitator_resources_paginates_until_the_reported_total(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fetch keeps requesting pages (network/offset) until pagination.total is reached, and reports it."""
+    from app.modules.x402_directory.services import discovery_import as discovery_import_module
+
+    monkeypatch.setattr(discovery_import_module, "_PAGE_SIZE", 2)
+    seen_offsets: list[int] = []
+    seen_networks: list[str] = []
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        offset = int(request.url.params["offset"])
+        seen_offsets.append(offset)
+        seen_networks.append(request.url.params["network"])
+        remaining = max(0, 5 - offset)
+        page = [
+            _facilitator_resource(url=f"https://api{offset + i}.example.com/x")
+            for i in range(min(2, remaining))
+        ]
+        return httpx.Response(
+            200,
+            json={"items": page, "pagination": {"limit": 2, "offset": offset, "total": 5}},
+        )
+
+    result = fetch_facilitator_resources(transport=httpx.MockTransport(_handler))
+
+    assert seen_offsets == [0, 2, 4]
+    assert all(net == settings.x402_network for net in seen_networks)
+    assert result.error == ""
+    assert result.total_reported == 5
+    assert len(result.resources) == 5
+
+
+def test_fetch_facilitator_resources_degrades_on_http_error() -> None:
+    """A facilitator-side failure never raises into the admin route -- it returns whatever was collected plus a non-empty error."""
+
+    def _handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(503)
+
+    result = fetch_facilitator_resources(transport=httpx.MockTransport(_handler))
+
+    assert result.resources == []
+    assert result.error != ""
+
+
+def test_fetch_facilitator_resources_handles_a_missing_items_array() -> None:
+    """A response missing the expected `items` array is a clean, reported failure, not a crash or a silent empty success."""
+
+    def _handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"pagination": {"total": 0}})
+
+    result = fetch_facilitator_resources(transport=httpx.MockTransport(_handler))
+
+    assert result.resources == []
+    assert result.error != ""
+
+
+def test_admin_import_discovered_requires_admin_wallet(
+    store: InMemoryListingStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No authorized admin session -> refused before any fetch is even attempted."""
+    from app.core.http_errors import json_error_response
+
+    monkeypatch.setattr(directory_routes, "listing_service", ListingService(store))
+    monkeypatch.setattr(
+        directory_routes,
+        "require_admin_wallet",
+        lambda _request: json_error_response(403, "forbidden", "not an admin wallet"),
+    )
+
+    def _must_not_fetch() -> None:
+        raise AssertionError("must not fetch the facilitator without an authorized admin")
+
+    monkeypatch.setattr(directory_routes, "fetch_facilitator_resources", _must_not_fetch)
+
+    response = directory_routes.x402_admin_import_discovered_listings(
+        _request(method="POST", path="/api/v1/admin/x402/directory/import-discovered")
+    )
+
+    assert response.status_code == 403
+
+
+def test_admin_import_discovered_writes_listings_and_reports_counts(
+    store: InMemoryListingStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An authorized admin trigger fetches, imports, and reports both fetch and import outcomes -- never a bare 200 with no numbers."""
+    from app.modules.x402_directory.services.discovery_import import FacilitatorFetchResult
+
+    monkeypatch.setattr(directory_routes, "listing_service", ListingService(store))
+    monkeypatch.setattr(directory_routes, "require_admin_wallet", lambda _request: None)
+    fake_fetch = FacilitatorFetchResult(
+        resources=[_facilitator_resource()], total_reported=1, error=""
+    )
+    monkeypatch.setattr(directory_routes, "fetch_facilitator_resources", lambda: fake_fetch)
+
+    response = directory_routes.x402_admin_import_discovered_listings(
+        _request(method="POST", path="/api/v1/admin/x402/directory/import-discovered")
+    )
+
+    assert response["fetch"]["total_reported_by_facilitator"] == 1
+    assert response["fetch"]["error"] == ""
+    assert response["import"]["created"] == 1
+    listing = store.get(url_hash(_DISCOVERED_URL))
+    assert listing is not None
+    assert listing.source == SOURCE_AUTO_DISCOVERED
+
+
+def _fake_cassandra_listing_row(item: StoredListing) -> SimpleNamespace:
+    """A SimpleNamespace shaped like a driver row for `item`, covering every column _row_to_listing reads."""
+    return SimpleNamespace(
+        url_hash=item.url_hash,
+        url=item.url,
+        price=item.price,
+        assets=list(item.assets),
+        description=item.description,
+        schema_json=item.schema_json,
+        tags=list(item.tags),
+        term_end=datetime.fromtimestamp(item.term_end_epoch, tz=UTC),
+        settlement_tx_id=item.settlement_tx_id,
+        created_at=datetime.fromtimestamp(item.created_at_epoch, tz=UTC),
+        payer=item.payer,
+        verified_wallet=item.verified_wallet,
+        verified_at=(
+            datetime.fromtimestamp(item.verified_at_epoch, tz=UTC)
+            if item.verified_at_epoch
+            else None
+        ),
+        category=item.category,
+        reimburses=item.reimburses,
+        contact=item.contact,
+        source=item.source,
+        discovered_from=item.discovered_from,
+    )
+
+
+def test_cassandra_store_writes_an_auto_discovered_listing_only_to_its_own_feed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An auto-discovered upsert writes the canonical row and the dedicated auto-discovered feed only -- never x402_listings_by_recency/by_tag, which stay paid-only."""
+    from app.modules.x402_directory.stores import cassandra as cassandra_store
+
+    now = datetime(2026, 9, 6, tzinfo=UTC)
+    listing = StoredListing(
+        url_hash="h",
+        url=_DISCOVERED_URL,
+        price="~0.01 USD Coin",
+        description="[POST] Submit a move",
+        schema_json="",
+        settlement_tx_id="",
+        term_end_epoch=int((now + timedelta(days=30)).timestamp()),
+        created_at_epoch=int(now.timestamp()),
+        payer="",
+        source=SOURCE_AUTO_DISCOVERED,
+        discovered_from=DISCOVERY_SOURCE_LABEL,
+    )
+    executed: list[tuple[str, tuple]] = []
+
+    class _Session:
+        def execute(self, stmt: str, params: tuple) -> SimpleNamespace:
+            executed.append((stmt, params))
+            if stmt.startswith("SELECT"):
+                return SimpleNamespace(one=lambda: None)
+            return SimpleNamespace(one=lambda: None, was_applied=True)
+
+    monkeypatch.setattr("app.core.cassandra.prepare_cached", lambda cql: cql)
+    monkeypatch.setattr(cassandra_store, "get_cassandra_session", lambda: _Session())
+    cass = cassandra_store.CassandraListingStore()
+
+    cass.upsert(listing)
+
+    inserts = [(s, p) for s, p in executed if s.startswith("INSERT")]
+    assert len(inserts) == 2  # canonical x402_listings + the auto-discovered feed
+    assert any("x402_listings_auto_discovered_by_recency" in s for s, _ in inserts)
+    assert not any("x402_listings_by_recency" in s for s, _ in inserts)
+    assert not any("x402_listings_by_tag" in s for s, _ in inserts)
+
+
+def test_cassandra_store_claim_deletes_the_stub_from_the_auto_discovered_feed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Relisting a previously auto-discovered url as a real payer deletes the stub's row from the auto-discovered feed and writes fresh rows into the paid projections instead."""
+    from app.modules.x402_directory.stores import cassandra as cassandra_store
+
+    stub_created = datetime(2026, 9, 1, tzinfo=UTC)
+    stub = StoredListing(
+        url_hash="h",
+        url=_DISCOVERED_URL,
+        price="",
+        description="",
+        schema_json="",
+        settlement_tx_id="",
+        term_end_epoch=int((stub_created + timedelta(days=30)).timestamp()),
+        created_at_epoch=int(stub_created.timestamp()),
+        payer="",
+        source=SOURCE_AUTO_DISCOVERED,
+        discovered_from=DISCOVERY_SOURCE_LABEL,
+    )
+    executed: list[tuple[str, tuple]] = []
+
+    class _Session:
+        def execute(self, stmt: str, params: tuple) -> SimpleNamespace:
+            executed.append((stmt, params))
+            if stmt.startswith("SELECT"):
+                return SimpleNamespace(one=lambda: _fake_cassandra_listing_row(stub))
+            return SimpleNamespace(one=lambda: None, was_applied=True)
+
+    monkeypatch.setattr("app.core.cassandra.prepare_cached", lambda cql: cql)
+    monkeypatch.setattr(cassandra_store, "get_cassandra_session", lambda: _Session())
+    cass = cassandra_store.CassandraListingStore()
+
+    claimed = replace(
+        stub,
+        price="$0.01",
+        description="the real thing",
+        payer="REAL_AGENT",
+        settlement_tx_id="TX1",
+        created_at_epoch=int((stub_created + timedelta(days=5)).timestamp()),
+        source=SOURCE_PAID,
+        discovered_from="",
+    )
+
+    cass.upsert(claimed)
+
+    deletes = [(s, p) for s, p in executed if s.startswith("DELETE")]
+    assert any("x402_listings_auto_discovered_by_recency" in s for s, _ in deletes)
+    inserts = [(s, p) for s, p in executed if s.startswith("INSERT")]
+    assert any("x402_listings_by_recency" in s and "auto_discovered" not in s for s, _ in inserts)
+    assert not any("x402_listings_auto_discovered_by_recency" in s for s, _ in inserts)
+
+
+def test_cassandra_store_delete_uses_the_auto_discovered_feed_for_a_stub(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Admin-deleting an auto-discovered listing removes it from ITS feed, never issuing a (harmless but wrong) delete against the paid recency feed."""
+    from app.modules.x402_directory.stores import cassandra as cassandra_store
+
+    now = datetime(2026, 9, 6, tzinfo=UTC)
+    stub = StoredListing(
+        url_hash="h",
+        url=_DISCOVERED_URL,
+        price="",
+        description="",
+        schema_json="",
+        settlement_tx_id="",
+        term_end_epoch=int((now + timedelta(days=30)).timestamp()),
+        created_at_epoch=int(now.timestamp()),
+        payer="",
+        source=SOURCE_AUTO_DISCOVERED,
+        discovered_from=DISCOVERY_SOURCE_LABEL,
+    )
+    executed: list[tuple[str, tuple]] = []
+
+    class _Session:
+        def execute(self, stmt: str, params: tuple) -> SimpleNamespace:
+            executed.append((stmt, params))
+            if stmt.startswith("SELECT"):
+                return SimpleNamespace(one=lambda: _fake_cassandra_listing_row(stub))
+            return SimpleNamespace(one=lambda: None, was_applied=True)
+
+    monkeypatch.setattr("app.core.cassandra.prepare_cached", lambda cql: cql)
+    monkeypatch.setattr(cassandra_store, "get_cassandra_session", lambda: _Session())
+    cass = cassandra_store.CassandraListingStore()
+
+    assert cass.delete("h") is True
+
+    deletes = [(s, p) for s, p in executed if s.startswith("DELETE")]
+    assert any("x402_listings_auto_discovered_by_recency" in s for s, _ in deletes)
+    assert not any(
+        "x402_listings_by_recency" in s and "auto_discovered" not in s for s, _ in deletes
+    )
+    assert not any("x402_listings_by_tag" in s for s, _ in deletes)

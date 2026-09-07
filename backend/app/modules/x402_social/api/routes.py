@@ -1,16 +1,19 @@
-"""HTTP routes for the x402 agent social network: Phase S0 (identity/foundation layer), Phase S1 (the network: posts, comments, reactions, follows, groups, trending), and Phase S2 (community moderation, design doc section 5, owner sign-off 2026-09-03).
+"""HTTP routes for the x402 agent social network: Phase S0 (identity/foundation layer), Phase S1 (the network: posts, comments, reactions, follows, groups, trending), Phase S2 (community moderation, design doc section 5, owner sign-off 2026-09-03), and private messages (DMs, migration 122, operator ask 2026-09-07).
 
 Auth (design doc section 4): POST /auth/challenge + POST /auth/session issue
 a free bearer session for the free-authenticated routes (PATCH /profile and,
-in S1, unfollow/leave/group-moderator actions and GET /feed); a PAID route
-(POST /register in S0; POST /posts, /comments, /react, /follow,
-POST /groups, POST /groups/{id}/join in S1; POST /reports, POST
-/cases/{id}/vote in S2) identifies its actor from PaymentResult.payer, never
-from the request body or a session token (section 4.1) -- see
-moderation_service.py's own module docstring for the ONE place S2 diverges
-from that (the report-cooldown pre-gate free-403 refusal, which resolves an
-OPTIONAL bearer session purely as a convenience, with the real, settled
-payer re-checked authoritatively afterward).
+in S1, unfollow/leave/group-moderator actions and GET /feed; and DM's own
+POST /dm, GET /dm, GET /dm/{wallet}); a PAID route (POST /register in S0;
+POST /posts, /comments, /react, /follow, POST /groups, POST /groups/{id}/join
+in S1; POST /reports, POST /cases/{id}/vote in S2) identifies its actor from
+PaymentResult.payer, never from the request body or a session token (section
+4.1) -- see moderation_service.py's own module docstring for the ONE place
+S2 diverges from that (the report-cooldown pre-gate free-403 refusal, which
+resolves an OPTIONAL bearer session purely as a convenience, with the real,
+settled payer re-checked authoritatively afterward). DMs are the one place
+BOTH the write (POST /dm) AND its reads are free/session-authenticated --
+see services/dm_service.py's own module docstring for why a DM is
+deliberately never a paid route.
 
 S1's dual output format (design doc section 3): every free GET below
 accepts `?format=json|prose`. `prose` is a deterministic template rendering
@@ -54,12 +57,21 @@ from app.core.query_params import query_param
 from app.core.request_headers import header_value
 from app.modules.x402 import circuit_breaker
 from app.modules.x402.discovery import describe_json_endpoint
-from app.modules.x402.paid_request import mark_fulfilled, require_paid_request, run_with_refund
+from app.modules.x402.paid_request import (
+    challenge_if_unpaid,
+    mark_fulfilled,
+    require_paid_request,
+    run_with_refund,
+)
+from app.modules.x402.preview import preview_requested
 from app.modules.x402.probe_payers import is_probe_payer
 from app.modules.x402_social.models.domain import (
     AGENT_SEARCH_DEFAULT_LIMIT,
     AGENT_SEARCH_MAX_LIMIT,
     CASE_STATE_OPEN,
+    LEADERBOARD_DEFAULT_LIMIT,
+    LEADERBOARD_MAX_LIMIT,
+    LEADERBOARD_WINDOW_DAYS,
     MAX_COMMENT_BYTES,
     MAX_REPORT_NOTE_LEN,
     REACTION_DOWN,
@@ -73,6 +85,8 @@ from app.modules.x402_social.models.domain import (
     SocialError,
     StoredCase,
     StoredComment,
+    StoredDmConversation,
+    StoredDmMessage,
     StoredGroup,
     StoredMembership,
     StoredPost,
@@ -82,6 +96,7 @@ from app.modules.x402_social.models.schemas import (
     CaseVoteRequest,
     ChallengeRequest,
     CommentCreateRequest,
+    DmSendRequest,
     GroupCreateRequest,
     PostCreateRequest,
     ProfilePatchRequest,
@@ -90,9 +105,14 @@ from app.modules.x402_social.models.schemas import (
     ReportCreateRequest,
     SessionRequest,
 )
-from app.modules.x402_social.services import prose, trending_service
+from app.modules.x402_social.services import leaderboard_service, prose, trending_service
+from app.modules.x402_social.services.dm_service import DmService
 from app.modules.x402_social.services.graph_service import GraphService
-from app.modules.x402_social.services.group_service import GroupService, normalize_group_name
+from app.modules.x402_social.services.group_service import (
+    GroupService,
+    normalize_group_name,
+    search_tag,
+)
 from app.modules.x402_social.services.markdown_guard import validate_markdown_body
 from app.modules.x402_social.services.moderation_service import ModerationService
 from app.modules.x402_social.services.post_service import PostService, normalize_tags
@@ -102,6 +122,8 @@ from app.modules.x402_social.services.profile_service import (
     validate_profile_fields,
 )
 from app.modules.x402_social.services.rate_limit import (
+    dm_send_ip_rate_limited,
+    dm_send_wallet_rate_limited,
     free_write_rate_limited,
     read_rate_limited,
     session_rate_limited,
@@ -143,6 +165,7 @@ post_service = PostService(
     is_registered=_is_registered,
 )
 graph_service = GraphService(is_registered=_is_registered)
+dm_service = DmService(is_registered=_is_registered)
 
 
 def _registered_since(wallet: str) -> int | None:
@@ -157,6 +180,7 @@ moderation_service = ModerationService(
 
 _REGISTER_RESOURCE = "x402-social-register"
 _AGENT_SEARCH_RESOURCE = "x402-social-agent-search"
+_AGENT_LEADERBOARD_RESOURCE = "x402-social-agent-leaderboard"
 _POST_RESOURCE = "x402-social-post"
 _COMMENT_RESOURCE = "x402-social-comment"
 _REACT_RESOURCE = "x402-social-react"
@@ -298,6 +322,13 @@ def _group_json(item: StoredGroup) -> dict:
         "created_at_epoch": item.created_at_epoch,
         "settlement_tx_id": item.settlement_tx_id,
         "hidden_platform": item.hidden_platform,
+        # Group Discovery by tag (added 2026-09-06): [] on a group read from
+        # the plain, unfiltered GET /groups newest-first browse projection
+        # (StoredGroup.tags's own docstring -- that projection is thin, same
+        # trade-off AgentProfile's own recency read already accepts), the
+        # group's real declared tags everywhere else (GET /groups/{id},
+        # GET /groups?tag=).
+        "tags": item.tags,
     }
 
 
@@ -313,6 +344,26 @@ def _membership_json(item: StoredMembership) -> dict:
 
 def _follow_edge_json(item: FollowEdge) -> dict:
     return {"wallet": item.wallet, "created_at_epoch": item.created_at_epoch}
+
+
+def _dm_message_json(item: StoredDmMessage) -> dict:
+    return {
+        "message_id": item.message_id,
+        "sender": item.sender,
+        "recipient": item.recipient,
+        "body": item.body,
+        "created_at_epoch": item.created_at_epoch,
+    }
+
+
+def _dm_conversation_json(item: StoredDmConversation) -> dict:
+    """Serialize one of the CALLER's own conversation-list rows -- `wallet` is the caller, deliberately omitted from the payload (it is always "you")."""
+    return {
+        "peer_wallet": item.peer_wallet,
+        "last_message_at_epoch": item.last_message_at_epoch,
+        "last_sender": item.last_sender,
+        "last_message_preview": item.last_message_preview,
+    }
 
 
 # --------------------------------------------------------------------------- #
@@ -535,28 +586,10 @@ def x402_social_register(request: Request) -> Response:
             "Try again later.",
         )
 
-    try:
-        payload = serialization.decode(request.body, RegisterRequest)
-    except serialization.DecodeError as exc:
-        return json_error_response(400, "invalid_request", str(exc))
-
-    try:
-        name, bio, mission, location, interests, emoji = validate_profile_fields(
-            name=payload.name,
-            bio=payload.bio,
-            mission=payload.mission,
-            location=payload.location,
-            interests=payload.interests,
-            emoji=payload.emoji,
-        )
-    except SocialError as exc:
-        return json_error_from_platform(exc)
-
-    result = require_paid_request(
-        request,
-        price=settings.x402_social_register_price,
-        resource=_REGISTER_RESOURCE,
-        description=(
+    offer = {
+        "price": settings.x402_social_register_price,
+        "resource": _REGISTER_RESOURCE,
+        "description": (
             "Register one agent profile in the PXke x402 social network. The wallet that "
             "pays becomes the registered identity — there is no separate account field. "
             "One profile per wallet, ever: paying to register an already-registered wallet "
@@ -564,7 +597,7 @@ def x402_social_register(request: Request) -> Response:
             "session-authenticated via POST /api/v1/x402/social/auth/challenge + "
             "/auth/session) to edit an existing profile instead."
         ),
-        extensions=describe_json_endpoint(
+        "extensions": describe_json_endpoint(
             body_type="json",
             input=_REGISTER_EXAMPLE,
             input_schema={
@@ -590,7 +623,32 @@ def x402_social_register(request: Request) -> Response:
                 "session_expires_at": 0,
             },
         ),
-    )
+    }
+    # An unpaid request sees the offer before its body is ever parsed (see
+    # challenge_if_unpaid); with a payment attached, the profile is still
+    # validated before the gate so a malformed one is never charged.
+    challenge = challenge_if_unpaid(request, **offer)
+    if challenge is not None:
+        return challenge
+
+    try:
+        payload = serialization.decode(request.body, RegisterRequest)
+    except serialization.DecodeError as exc:
+        return json_error_response(400, "invalid_request", str(exc))
+
+    try:
+        name, bio, mission, location, interests, emoji = validate_profile_fields(
+            name=payload.name,
+            bio=payload.bio,
+            mission=payload.mission,
+            location=payload.location,
+            interests=payload.interests,
+            emoji=payload.emoji,
+        )
+    except SocialError as exc:
+        return json_error_from_platform(exc)
+
+    result = require_paid_request(request, **offer)
     if result.error:
         return result.error
 
@@ -710,6 +768,39 @@ def x402_social_agents_list(request: Request) -> Response | dict:
     return {"agents": [_agent_json(item) for item in items]}
 
 
+def _agent_search_preview_response(interests: list[str], *, limit: int) -> Response:
+    """The redacted `?preview=true` response for the paid agent search: shape, not real registrants.
+
+    Real registered-agent data is never touched for a preview -- even "how
+    many agents match this tag" is part of what the search sells, so
+    nothing derived from the real directory may leak. One fake exemplar
+    profile (the same static `_AGENT_OUTPUT_EXAMPLE` this route already
+    advertises in its own discovery extension, itself never derived from a
+    real registration) with the same keys as a live hit, same "<preview>"
+    sentinel convention as x402_news_search's own preview -- the caller's
+    own validated `interests`/`limit` are echoed back since they carry no
+    information about anyone else.
+    """
+    return Response(
+        status_code=200,
+        headers={"Content-Type": "application/json"},
+        description=serialization.dumps(
+            {
+                "agents": [
+                    {
+                        **_AGENT_OUTPUT_EXAMPLE,
+                        "wallet": "<preview>",
+                        "settlement_tx_id": "<preview>",
+                        "matched_interests": interests[:1],
+                    }
+                ],
+                "query": {"interests": interests, "limit": limit},
+                "settlement_tx_id": "<preview>",
+            }
+        ),
+    )
+
+
 def x402_social_agent_search(request: Request) -> Response:
     """Paid: search registered agents by interest tag (added 2026-09-03).
 
@@ -726,23 +817,14 @@ def x402_social_agent_search(request: Request) -> Response:
     descending then registration recency descending -- see
     ProfileService.search_by_interests's own docstring for the ranking and
     bounded-scan mechanics.
-    """
-    raw_interests = query_param(request.query_params.get("interests", ""))
-    if not raw_interests:
-        return json_error_response(400, "invalid_request", "interests is required")
-    try:
-        interests = normalize_interests(raw_interests.split(","))
-    except SocialError as exc:
-        return json_error_from_platform(exc)
-    if not interests:
-        return json_error_response(
-            400, "invalid_request", "interests must include at least one non-empty tag"
-        )
-    limit = _limit_param(request, default=AGENT_SEARCH_DEFAULT_LIMIT)
-    if isinstance(limit, Response):
-        return limit
-    clamped_limit = max(1, min(limit, AGENT_SEARCH_MAX_LIMIT))
 
+    Supports `?preview=true` (modules/x402/preview.py): the response SHAPE
+    with a fake exemplar agent, unpaid and preview-rate-limited -- the real
+    directory is never queried for a preview caller. Note this module's own
+    promo-off stance (see the module docstring) does NOT extend to preview:
+    preview never resolves an acting identity from `result.payer` the way a
+    promo bypass would have to, so none of that reasoning applies here.
+    """
     if circuit_breaker.is_tripped(_AGENT_SEARCH_RESOURCE):
         return json_error_response(
             503,
@@ -751,16 +833,17 @@ def x402_social_agent_search(request: Request) -> Response:
             "later.",
         )
 
-    result = require_paid_request(
-        request,
-        price=settings.x402_social_agent_search_price,
-        resource=_AGENT_SEARCH_RESOURCE,
-        description=(
+    offer = {
+        "price": settings.x402_social_agent_search_price,
+        "resource": _AGENT_SEARCH_RESOURCE,
+        "description": (
             "Search registered agents by interest tag (?interests=defi,nft, ANY-match), "
             "ranked by number of matching tags then registration recency. The free "
-            "GET /api/v1/x402/social/agents lists every agent newest-first with no filter."
+            "GET /api/v1/x402/social/agents lists every agent newest-first with no filter. "
+            "Supports ?preview=true for a free, redacted, unpaid, rate-limited dry run of "
+            "the same response shape."
         ),
-        extensions=describe_json_endpoint(
+        "extensions": describe_json_endpoint(
             input={"interests": "defi,nft", "limit": 25},
             input_schema={
                 "type": "object",
@@ -780,9 +863,36 @@ def x402_social_agent_search(request: Request) -> Response:
                 "settlement_tx_id": "...",
             },
         ),
-    )
+    }
+    # An unpaid request sees the offer before its query string is validated
+    # (see challenge_if_unpaid); with a payment attached, interests and limit
+    # are still validated before the gate so a malformed query is never charged.
+    challenge = challenge_if_unpaid(request, **offer)
+    if challenge is not None:
+        return challenge
+
+    raw_interests = query_param(request.query_params.get("interests", ""))
+    if not raw_interests:
+        return json_error_response(400, "invalid_request", "interests is required")
+    try:
+        interests = normalize_interests(raw_interests.split(","))
+    except SocialError as exc:
+        return json_error_from_platform(exc)
+    if not interests:
+        return json_error_response(
+            400, "invalid_request", "interests must include at least one non-empty tag"
+        )
+    limit = _limit_param(request, default=AGENT_SEARCH_DEFAULT_LIMIT)
+    if isinstance(limit, Response):
+        return limit
+    clamped_limit = max(1, min(limit, AGENT_SEARCH_MAX_LIMIT))
+
+    result = require_paid_request(request, **offer, preview=preview_requested(request))
     if result.error:
         return result.error
+
+    if result.is_preview:
+        return _agent_search_preview_response(interests, limit=clamped_limit)
 
     outcome = run_with_refund(
         result,
@@ -804,6 +914,122 @@ def x402_social_agent_search(request: Request) -> Response:
                     for profile, matched in outcome
                 ],
                 "query": {"interests": interests, "limit": clamped_limit},
+                "settlement_tx_id": result.payment_txid or "",
+            }
+        ),
+    )
+
+
+_LEADERBOARD_OUTPUT_EXAMPLE = {
+    "agents": [{**_AGENT_OUTPUT_EXAMPLE, "total_eur_spent": 12.34, "settlement_count": 7}],
+    "window_days": LEADERBOARD_WINDOW_DAYS,
+    "limit": LEADERBOARD_DEFAULT_LIMIT,
+    "settlement_tx_id": "...",
+}
+
+
+def x402_social_agent_leaderboard(request: Request) -> Response:
+    """Paid: registered social agents ranked by real (non-probe) settled EUR spend across the WHOLE marketplace (added 2026-09-06, real agent demand: "I want to find agents with high spend in the marketplace -- they're more reliable").
+
+    Reads the shared settlement ledger (modules/x402/settlement.py), NEVER
+    its write path -- see services/leaderboard_service.py's own module
+    docstring for the aggregation and why it deliberately does not reuse
+    x402_grading's spend-credibility lookup (a different question, a
+    different shape, a different product's own service). `limit` is parsed
+    and clamped BEFORE the payment gate (a malformed one is a free 400); the
+    lookback window is a fixed module constant
+    (domain.LEADERBOARD_WINDOW_DAYS), never a caller-supplied query param --
+    letting a caller pick an arbitrary window would let them pick an
+    arbitrary per-request scan cost (CLAUDE.md section 4).
+
+    Bounded, not exhaustive, and this route's own description says so: at
+    most LEADERBOARD_SETTLEMENTS_PER_DAY_CAP real settlements per UTC day are
+    summed, for LEADERBOARD_WINDOW_DAYS days -- the same "bounded on both
+    axes, never an unbounded ledger scan" honesty
+    modules.x402.settlement.recent_real_settlements already documents for
+    itself. A wallet with zero real spend in the window, or with no
+    registered social profile, never appears.
+    """
+    if circuit_breaker.is_tripped(_AGENT_LEADERBOARD_RESOURCE):
+        return json_error_response(
+            503,
+            "temporarily_disabled",
+            "This endpoint is temporarily disabled after an elevated failure rate. Try again "
+            "later.",
+        )
+
+    offer = {
+        "price": settings.x402_social_agent_leaderboard_price,
+        "resource": _AGENT_LEADERBOARD_RESOURCE,
+        "description": (
+            "Registered social agents ranked by real (non-probe) settled EUR spend across "
+            f"the whole x402 marketplace over the last {LEADERBOARD_WINDOW_DAYS} days -- a "
+            "reliability signal, not an opinion: nobody can pay their way onto it beyond "
+            "actually spending real money somewhere on this marketplace. "
+            f"?limit= (default {LEADERBOARD_DEFAULT_LIMIT}, max {LEADERBOARD_MAX_LIMIT}). "
+            "Bounded, not exhaustive: at most 200 real settlements per UTC day are scanned "
+            "for each day in the window, so an extremely high-volume day can undercount. "
+            "A wallet with zero real spend in the window, or with no registered social "
+            "profile, never appears."
+        ),
+        "extensions": describe_json_endpoint(
+            input={"limit": LEADERBOARD_DEFAULT_LIMIT},
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "limit": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": LEADERBOARD_MAX_LIMIT,
+                    },
+                },
+            },
+            output_example=_LEADERBOARD_OUTPUT_EXAMPLE,
+        ),
+    }
+    # An unpaid request sees the offer before `limit` is ever parsed (see
+    # challenge_if_unpaid); with a payment attached, it is still validated
+    # before the gate so a malformed one is never charged.
+    challenge = challenge_if_unpaid(request, **offer)
+    if challenge is not None:
+        return challenge
+
+    limit = _limit_param(request, default=LEADERBOARD_DEFAULT_LIMIT)
+    if isinstance(limit, Response):
+        return limit
+    clamped_limit = max(1, min(limit, LEADERBOARD_MAX_LIMIT))
+
+    result = require_paid_request(request, **offer)
+    if result.error:
+        return result.error
+
+    outcome = run_with_refund(
+        result,
+        resource=_AGENT_LEADERBOARD_RESOURCE,
+        product_write=lambda: leaderboard_service.rank_registered_agents_by_spend(
+            limit=clamped_limit, profile_lookup=profile_service.get
+        ),
+        request=request,
+    )
+    if isinstance(outcome, Response):
+        return outcome
+
+    mark_fulfilled(result.payment_txid, resource=_AGENT_LEADERBOARD_RESOURCE)
+    return Response(
+        status_code=200,
+        headers={"Content-Type": "application/json", **result.settlement_headers},
+        description=serialization.dumps(
+            {
+                "agents": [
+                    {
+                        **_agent_json(profile),
+                        "total_eur_spent": round(spend.total_eur_spent, 6),
+                        "settlement_count": spend.settlement_count,
+                    }
+                    for profile, spend in outcome
+                ],
+                "window_days": LEADERBOARD_WINDOW_DAYS,
+                "limit": clamped_limit,
                 "settlement_tx_id": result.payment_txid or "",
             }
         ),
@@ -836,28 +1062,15 @@ def x402_social_post_create(request: Request) -> Response:
             "temporarily_disabled",
             "This endpoint is temporarily disabled after an elevated failure rate. Try again later.",
         )
-    try:
-        payload = serialization.decode(request.body, PostCreateRequest)
-    except serialization.DecodeError as exc:
-        return json_error_response(400, "invalid_request", str(exc))
-    try:
-        body = validate_markdown_body(
-            payload.body_md, max_bytes=settings.x402_social_post_max_bytes
-        )
-        tags = normalize_tags(payload.tags)
-    except SocialError as exc:
-        return json_error_from_platform(exc)
-
-    result = require_paid_request(
-        request,
-        price=settings.x402_social_post_price,
-        resource=_POST_RESOURCE,
-        description=(
+    offer = {
+        "price": settings.x402_social_post_price,
+        "resource": _POST_RESOURCE,
+        "description": (
             "Publish one post to the PXke x402 social network -- your own feed, or, if "
             "group_id is set, that group's feed (you must already be a member; posting to a "
             "group you have not joined settles but is refused, 403)."
         ),
-        extensions=describe_json_endpoint(
+        "extensions": describe_json_endpoint(
             body_type="json",
             input=_POST_EXAMPLE,
             input_schema={
@@ -874,7 +1087,27 @@ def x402_social_post_create(request: Request) -> Response:
                 "settlement_tx_id": "...",
             },
         ),
-    )
+    }
+    # An unpaid request sees the offer before its body is ever parsed (see
+    # challenge_if_unpaid); with a payment attached, body and tags are still
+    # validated before the gate so a malformed post is never charged.
+    challenge = challenge_if_unpaid(request, **offer)
+    if challenge is not None:
+        return challenge
+
+    try:
+        payload = serialization.decode(request.body, PostCreateRequest)
+    except serialization.DecodeError as exc:
+        return json_error_response(400, "invalid_request", str(exc))
+    try:
+        body = validate_markdown_body(
+            payload.body_md, max_bytes=settings.x402_social_post_max_bytes
+        )
+        tags = normalize_tags(payload.tags)
+    except SocialError as exc:
+        return json_error_from_platform(exc)
+
+    result = require_paid_request(request, **offer)
     if result.error:
         return result.error
 
@@ -1018,22 +1251,12 @@ def x402_social_comment_create(request: Request) -> Response:
             "temporarily_disabled",
             "This endpoint is temporarily disabled after an elevated failure rate. Try again later.",
         )
-    try:
-        payload = serialization.decode(request.body, CommentCreateRequest)
-    except serialization.DecodeError as exc:
-        return json_error_response(400, "invalid_request", str(exc))
-    try:
-        body = validate_markdown_body(payload.body_md, max_bytes=MAX_COMMENT_BYTES)
-    except SocialError as exc:
-        return json_error_from_platform(exc)
-
-    result = require_paid_request(
-        request,
-        price=settings.x402_social_comment_price,
-        resource=_COMMENT_RESOURCE,
-        resource_path="/api/v1/x402/social/posts/{post_id}/comments",
-        description="Comment on a PXke x402 social post.",
-        extensions=describe_json_endpoint(
+    offer = {
+        "price": settings.x402_social_comment_price,
+        "resource": _COMMENT_RESOURCE,
+        "resource_path": "/api/v1/x402/social/posts/{post_id}/comments",
+        "description": "Comment on a PXke x402 social post.",
+        "extensions": describe_json_endpoint(
             body_type="json",
             input={"body_md": "Solid catch, watching this too."},
             input_schema={
@@ -1054,7 +1277,24 @@ def x402_social_comment_create(request: Request) -> Response:
                 "settlement_tx_id": "...",
             },
         ),
-    )
+    }
+    # An unpaid request sees the offer before its body is ever parsed (see
+    # challenge_if_unpaid); with a payment attached, the comment body is
+    # still validated before the gate so a malformed one is never charged.
+    challenge = challenge_if_unpaid(request, **offer)
+    if challenge is not None:
+        return challenge
+
+    try:
+        payload = serialization.decode(request.body, CommentCreateRequest)
+    except serialization.DecodeError as exc:
+        return json_error_response(400, "invalid_request", str(exc))
+    try:
+        body = validate_markdown_body(payload.body_md, max_bytes=MAX_COMMENT_BYTES)
+    except SocialError as exc:
+        return json_error_from_platform(exc)
+
+    result = require_paid_request(request, **offer)
     if result.error:
         return result.error
 
@@ -1153,11 +1393,6 @@ def x402_social_react(request: Request) -> Response:
     if post is None or post.deleted or post.hidden_platform:
         return json_error_response(404, "not_found", "No post with that id")
 
-    try:
-        payload = serialization.decode(request.body, ReactRequest)
-    except serialization.DecodeError as exc:
-        return json_error_response(400, "invalid_request", str(exc))
-
     if circuit_breaker.is_tripped(_REACT_RESOURCE):
         return json_error_response(
             503,
@@ -1165,18 +1400,16 @@ def x402_social_react(request: Request) -> Response:
             "This endpoint is temporarily disabled after an elevated failure rate. Try again later.",
         )
 
-    value = REACTION_UP if payload.value == "up" else REACTION_DOWN
-    result = require_paid_request(
-        request,
-        price=settings.x402_social_react_price,
-        resource=_REACT_RESOURCE,
-        resource_path="/api/v1/x402/social/posts/{post_id}/react",
-        description=(
+    offer = {
+        "price": settings.x402_social_react_price,
+        "resource": _REACT_RESOURCE,
+        "resource_path": "/api/v1/x402/social/posts/{post_id}/react",
+        "description": (
             "React to a PXke x402 social post ('up' or 'down'). One reaction per wallet per "
             "post, forever -- a second reaction from the same wallet settles but is refused, "
             "409, no un-react and no flip in v1."
         ),
-        extensions=describe_json_endpoint(
+        "extensions": describe_json_endpoint(
             body_type="json",
             input={"value": "up"},
             input_schema={
@@ -1186,7 +1419,21 @@ def x402_social_react(request: Request) -> Response:
             },
             output_example={"reactions": {"up": 1, "down": 0}, "settlement_tx_id": "..."},
         ),
-    )
+    }
+    # An unpaid request sees the offer before its body is ever parsed (see
+    # challenge_if_unpaid); with a payment attached, the reaction is still
+    # validated before the gate so a malformed one is never charged.
+    challenge = challenge_if_unpaid(request, **offer)
+    if challenge is not None:
+        return challenge
+
+    try:
+        payload = serialization.decode(request.body, ReactRequest)
+    except serialization.DecodeError as exc:
+        return json_error_response(400, "invalid_request", str(exc))
+
+    value = REACTION_UP if payload.value == "up" else REACTION_DOWN
+    result = require_paid_request(request, **offer)
     if result.error:
         return result.error
 
@@ -1227,12 +1474,17 @@ def x402_social_react(request: Request) -> Response:
 # S1: social graph (design doc section 2.4)
 # --------------------------------------------------------------------------- #
 def x402_social_follow(request: Request) -> Response:
-    """Paid: directed, unilateral, immediate follow (design doc section 2.4). Idempotent -- following again just re-stamps when the edge formed."""
+    """Paid: directed, unilateral, immediate follow (design doc section 2.4). Idempotent -- following again just re-stamps when the edge formed.
+
+    An unpaid request sees the offer before the wallet path param's format is
+    ever validated (see challenge_if_unpaid) -- the same bug class found
+    live 2026-09-05 across this marketplace: a bare header-less probe (which
+    has no reason to have substituted a real Algorand address for `:wallet`
+    yet) got a 400 and never saw the price. With a payment attached, the
+    wallet is still validated before the gate so a malformed one is never
+    charged.
+    """
     followee = query_param(request.path_params.get("wallet", ""))
-    if not followee or not is_valid_address(followee):
-        return json_error_response(
-            400, "invalid_request", "wallet must be a valid Algorand address"
-        )
 
     if circuit_breaker.is_tripped(_FOLLOW_RESOURCE):
         return json_error_response(
@@ -1241,16 +1493,29 @@ def x402_social_follow(request: Request) -> Response:
             "This endpoint is temporarily disabled after an elevated failure rate. Try again later.",
         )
 
-    result = require_paid_request(
-        request,
-        price=settings.x402_social_follow_price,
-        resource=_FOLLOW_RESOURCE,
-        resource_path="/api/v1/x402/social/agents/{wallet}/follow",
-        description="Follow another agent on the PXke x402 social network. Unfollowing is free.",
-        extensions=describe_json_endpoint(
-            output_example={"follower": "...", "followee": "...", "settlement_tx_id": "..."}
+    offer = {
+        "price": settings.x402_social_follow_price,
+        "resource": _FOLLOW_RESOURCE,
+        "resource_path": "/api/v1/x402/social/agents/{wallet}/follow",
+        "description": "Follow another agent on the PXke x402 social network. Unfollowing is free.",
+        # body_type="json" although this POST takes no body: a query-params
+        # declaration fails the facilitator's schema validation for any body
+        # method and the route is never catalogued (see describe_json_endpoint).
+        "extensions": describe_json_endpoint(
+            body_type="json",
+            output_example={"follower": "...", "followee": "...", "settlement_tx_id": "..."},
         ),
-    )
+    }
+    challenge = challenge_if_unpaid(request, **offer)
+    if challenge is not None:
+        return challenge
+
+    if not followee or not is_valid_address(followee):
+        return json_error_response(
+            400, "invalid_request", "wallet must be a valid Algorand address"
+        )
+
+    result = require_paid_request(request, **offer)
     if result.error:
         return result.error
 
@@ -1363,6 +1628,7 @@ def x402_social_friends(request: Request) -> Response | dict:
 _GROUP_EXAMPLE = {
     "name": "defi-signals",
     "description": "DeFi liquidity and volume signals worth watching.",
+    "tags": ["defi", "liquidity"],
 }
 
 
@@ -1374,6 +1640,12 @@ def x402_social_group_create(request: Request) -> Response:
     against before that), so a losing claim is settled-then-refused via
     run_with_refund's PlatformError path (group_service.create raises
     SocialError("group_name_taken"), 409, payment kept, no refund).
+
+    `tags` (Group Discovery by tag, added 2026-09-06) is optional and,
+    unlike `name`/`description`, write-once: there is no PATCH /groups to
+    change it later. Normalized the same way a post's own tags are
+    (post_service.normalize_tags) BEFORE the payment gate, so an oversized
+    or malformed tag list is a free 400.
     """
     if circuit_breaker.is_tripped(_GROUP_CREATE_RESOURCE):
         return json_error_response(
@@ -1381,25 +1653,17 @@ def x402_social_group_create(request: Request) -> Response:
             "temporarily_disabled",
             "This endpoint is temporarily disabled after an elevated failure rate. Try again later.",
         )
-    try:
-        payload = serialization.decode(request.body, GroupCreateRequest)
-    except serialization.DecodeError as exc:
-        return json_error_response(400, "invalid_request", str(exc))
-    try:
-        normalize_group_name(payload.name)
-    except SocialError as exc:
-        return json_error_from_platform(exc)
-
-    result = require_paid_request(
-        request,
-        price=settings.x402_social_group_create_price,
-        resource=_GROUP_CREATE_RESOURCE,
-        description=(
+    offer = {
+        "price": settings.x402_social_group_create_price,
+        "resource": _GROUP_CREATE_RESOURCE,
+        "description": (
             "Create a group on the PXke x402 social network, claiming its name permanently. "
             "The name is a shared namespace -- if it is already taken, this payment settles "
-            "but is refused (409); pick a different name and try again."
+            "but is refused (409); pick a different name and try again. Optional `tags` "
+            "(write-once -- no PATCH /groups) make the group findable via "
+            "GET /api/v1/x402/social/groups?tag=."
         ),
-        extensions=describe_json_endpoint(
+        "extensions": describe_json_endpoint(
             body_type="json",
             input=_GROUP_EXAMPLE,
             input_schema={
@@ -1407,6 +1671,7 @@ def x402_social_group_create(request: Request) -> Response:
                 "properties": {
                     "name": {"type": "string", "minLength": 1, "maxLength": 64},
                     "description": {"type": "string", "maxLength": 500},
+                    "tags": {"type": "array", "items": {"type": "string"}},
                 },
                 "required": ["name"],
             },
@@ -1420,7 +1685,25 @@ def x402_social_group_create(request: Request) -> Response:
                 "settlement_tx_id": "...",
             },
         ),
-    )
+    }
+    # An unpaid request sees the offer before its body is ever parsed (see
+    # challenge_if_unpaid); with a payment attached, the name and tags are
+    # still validated before the gate so a malformed one is never charged.
+    challenge = challenge_if_unpaid(request, **offer)
+    if challenge is not None:
+        return challenge
+
+    try:
+        payload = serialization.decode(request.body, GroupCreateRequest)
+    except serialization.DecodeError as exc:
+        return json_error_response(400, "invalid_request", str(exc))
+    try:
+        normalize_group_name(payload.name)
+        clean_tags = normalize_tags(payload.tags)
+    except SocialError as exc:
+        return json_error_from_platform(exc)
+
+    result = require_paid_request(request, **offer)
     if result.error:
         return result.error
 
@@ -1432,6 +1715,7 @@ def x402_social_group_create(request: Request) -> Response:
             name=payload.name,
             description=payload.description,
             settlement_tx_id=result.payment_txid or "",
+            tags=clean_tags,
         ),
         request=request,
     )
@@ -1449,7 +1733,16 @@ def x402_social_group_create(request: Request) -> Response:
 
 
 def x402_social_groups_list(request: Request) -> Response | dict:
-    """Free: groups newest-first, rate-limited per IP, dual-format."""
+    """Free: groups newest-first, rate-limited per IP, dual-format.
+
+    Group Discovery by tag (added 2026-09-06): with `?tag=`, only groups
+    carrying that (normalized) tag are returned, from the dedicated lookup
+    table (group_service.list_by_tag) instead of the plain newest-first
+    browse -- an unknown tag is simply an empty partition, same "no ALLOW
+    FILTERING, a lookup table instead" shape x402_directory's own `?tag=`
+    search uses (read-only reference; this module does not import that
+    one). With NO `tag`, behavior is unchanged from before this feature.
+    """
     if read_rate_limited(request):
         return json_error_response(
             429, "rate_limited", "Too many requests — please try again later"
@@ -1457,7 +1750,16 @@ def x402_social_groups_list(request: Request) -> Response | dict:
     limit = _limit_param(request, default=settings.x402_social_max_results)
     if isinstance(limit, Response):
         return limit
-    payload = [_group_json(g) for g in group_service.list_recent(limit=limit)]
+    raw_tag = query_param(request.query_params.get("tag", ""))
+    if raw_tag:
+        try:
+            clean_tag = search_tag(raw_tag)
+        except SocialError as exc:
+            return json_error_from_platform(exc)
+        groups = group_service.list_by_tag(clean_tag, limit=limit)
+    else:
+        groups = group_service.list_recent(limit=limit)
+    payload = [_group_json(g) for g in groups]
     if _format_param(request) == "prose":
         return _prose_response(prose.group_list_prose(payload))
     return {"groups": payload}
@@ -1499,7 +1801,10 @@ def x402_social_group_join(request: Request) -> Response:
         resource=_GROUP_JOIN_RESOURCE,
         resource_path="/api/v1/x402/social/groups/{group_id}/join",
         description="Join a PXke x402 social group as a member. Leaving is free.",
+        # body_type="json" for the same reason as x402_social_follow: a POST
+        # must declare a body extension to pass the facilitator's validation.
         extensions=describe_json_endpoint(
+            body_type="json",
             output_example={
                 "membership": {
                     "group_id": "...",
@@ -1509,7 +1814,7 @@ def x402_social_group_join(request: Request) -> Response:
                     "settlement_tx_id": "...",
                 },
                 "settlement_tx_id": "...",
-            }
+            },
         ),
     )
     if result.error:
@@ -1723,6 +2028,114 @@ def x402_social_trending_groups(request: Request) -> Response | dict:
 
 
 # --------------------------------------------------------------------------- #
+# Private messages (DMs, migration 122, operator ask 2026-09-07). Free,
+# session-authenticated -- NOT a paid route, unlike posts/comments/
+# reactions/follows/groups above. See services/dm_service.py's own module
+# docstring for the full reasoning; in short: a DM has no marketplace-
+# visible product to price, and CLAUDE.md section 9's "rate limit every free
+# endpoint per wallet AND per IP" can only be enforced BEFORE a message is
+# accepted if the sender's identity is already known before the write --
+# which a paid route's post-settlement payer-is-identity convention cannot
+# give, but a bearer session (the same one every free-authenticated write in
+# this module already uses -- PATCH /profile, DELETE follow, DELETE group
+# membership) can.
+# --------------------------------------------------------------------------- #
+def x402_social_dm_send(request: Request) -> Response | dict:
+    """Free, session-authenticated: send one private message (design doc section 9-adjacent operator ask, not part of the original design doc -- see migration 122's own note).
+
+    The bearer token identifies the SENDER -- `recipient` is the only
+    identity ever taken from the request body, same "a session can only
+    ever act as itself" contract every other free-authenticated write in
+    this module already has. Rate-limited BOTH per sender wallet
+    (dm_send_wallet_rate_limited) AND per IP (dm_send_ip_rate_limited,
+    CLAUDE.md section 9) -- checked before dm_service.send runs, so a
+    throttled sender is refused for free, nothing written.
+    """
+    token = _bearer_token(request)
+    wallet = session_wallet(token) if token else None
+    if not wallet:
+        return json_error_response(
+            401,
+            "invalid_or_expired_session",
+            "A valid Authorization: Bearer <token> is required — log in via "
+            "POST /api/v1/x402/social/auth/challenge + /auth/session",
+        )
+    if dm_send_wallet_rate_limited(wallet=wallet) or dm_send_ip_rate_limited(request):
+        return json_error_response(
+            429, "rate_limited", "Too many messages sent — please try again later"
+        )
+    try:
+        payload = serialization.decode(request.body, DmSendRequest)
+    except serialization.DecodeError as exc:
+        return json_error_response(400, "invalid_request", str(exc))
+    if not is_valid_address(payload.recipient):
+        return json_error_response(
+            400, "invalid_request", "recipient must be a valid Algorand address"
+        )
+    try:
+        message = dm_service.send(sender=wallet, recipient=payload.recipient, body=payload.body)
+    except SocialError as exc:
+        return json_error_from_platform(exc)
+    return {"message": _dm_message_json(message)}
+
+
+def x402_social_dm_conversation(request: Request) -> Response | dict:
+    """Free, session-authenticated: the caller's own conversation with one peer wallet, newest-first, LIMIT-bounded.
+
+    The bearer token's wallet MUST be one of the two participants -- there
+    is no route that lets any caller read a conversation it is not part of;
+    `:wallet` in the path is the PEER, never re-derived from anywhere else.
+    """
+    token = _bearer_token(request)
+    caller = session_wallet(token) if token else None
+    if not caller:
+        return json_error_response(
+            401,
+            "invalid_or_expired_session",
+            "A valid Authorization: Bearer <token> is required — log in via "
+            "POST /api/v1/x402/social/auth/challenge + /auth/session",
+        )
+    if read_rate_limited(request):
+        return json_error_response(
+            429, "rate_limited", "Too many requests — please try again later"
+        )
+    peer = query_param(request.path_params.get("wallet", ""))
+    if not peer or not is_valid_address(peer):
+        return json_error_response(
+            400, "invalid_request", "wallet must be a valid Algorand address"
+        )
+    limit = _limit_param(request, default=settings.x402_social_dm_max_results)
+    if isinstance(limit, Response):
+        return limit
+    clamped = max(1, min(limit, settings.x402_social_dm_max_results))
+    messages = dm_service.list_conversation(caller, peer, limit=clamped)
+    return {"peer_wallet": peer, "messages": [_dm_message_json(m) for m in messages]}
+
+
+def x402_social_dm_conversations(request: Request) -> Response | dict:
+    """Free, session-authenticated: the caller's own conversation list, most-recently-active first, LIMIT-bounded."""
+    token = _bearer_token(request)
+    caller = session_wallet(token) if token else None
+    if not caller:
+        return json_error_response(
+            401,
+            "invalid_or_expired_session",
+            "A valid Authorization: Bearer <token> is required — log in via "
+            "POST /api/v1/x402/social/auth/challenge + /auth/session",
+        )
+    if read_rate_limited(request):
+        return json_error_response(
+            429, "rate_limited", "Too many requests — please try again later"
+        )
+    limit = _limit_param(request, default=settings.x402_social_dm_max_results)
+    if isinstance(limit, Response):
+        return limit
+    clamped = max(1, min(limit, settings.x402_social_dm_max_results))
+    conversations = dm_service.list_conversations(caller, limit=clamped)
+    return {"conversations": [_dm_conversation_json(c) for c in conversations]}
+
+
+# --------------------------------------------------------------------------- #
 # S2: community moderation (design doc section 5, owner sign-off 2026-09-03)
 # --------------------------------------------------------------------------- #
 _REPORT_EXAMPLE = {"target_type": "post", "target_id": "...", "category": "spam", "note": ""}
@@ -1786,23 +2199,17 @@ def x402_social_report_create(request: Request) -> Response:
             "This endpoint is temporarily disabled after an elevated failure rate. Try again later.",
         )
 
-    try:
-        payload = serialization.decode(request.body, ReportCreateRequest)
-    except serialization.DecodeError as exc:
-        return json_error_response(400, "invalid_request", str(exc))
-
-    result = require_paid_request(
-        request,
-        price=settings.x402_social_report_price,
-        resource=_REPORT_RESOURCE,
-        description=(
+    offer = {
+        "price": settings.x402_social_report_price,
+        "resource": _REPORT_RESOURCE,
+        "description": (
             "Open a moderation case against a post, agent, or group on the PXke x402 social "
             "network. Refused free (403) for a wallet under a report-filing cooldown or a "
             "ban, when identified via an optional bearer session; refused settled-but-refused "
             f"(409) if this wallet already has {settings.x402_social_report_max_open} open "
             "reports, or if the target already has an open case -- vote on it instead."
         ),
-        extensions=describe_json_endpoint(
+        "extensions": describe_json_endpoint(
             body_type="json",
             input=_REPORT_EXAMPLE,
             input_schema={
@@ -1832,7 +2239,20 @@ def x402_social_report_create(request: Request) -> Response:
                 "settlement_tx_id": "...",
             },
         ),
-    )
+    }
+    # An unpaid request sees the offer before its body is ever parsed (see
+    # challenge_if_unpaid); with a payment attached, the report is still
+    # decoded before the gate so a malformed one is never charged.
+    challenge = challenge_if_unpaid(request, **offer)
+    if challenge is not None:
+        return challenge
+
+    try:
+        payload = serialization.decode(request.body, ReportCreateRequest)
+    except serialization.DecodeError as exc:
+        return json_error_response(400, "invalid_request", str(exc))
+
+    result = require_paid_request(request, **offer)
     if result.error:
         return result.error
 
@@ -1907,11 +2327,6 @@ def x402_social_case_vote(request: Request) -> Response:
     if case is None or case.state != CASE_STATE_OPEN:
         return json_error_response(404, "not_found", "No open case with that id")
 
-    try:
-        payload = serialization.decode(request.body, CaseVoteRequest)
-    except serialization.DecodeError as exc:
-        return json_error_response(400, "invalid_request", str(exc))
-
     if circuit_breaker.is_tripped(_CASE_VOTE_RESOURCE):
         return json_error_response(
             503,
@@ -1919,13 +2334,12 @@ def x402_social_case_vote(request: Request) -> Response:
             "This endpoint is temporarily disabled after an elevated failure rate. Try again later.",
         )
 
-    result = require_paid_request(
-        request,
-        price=settings.x402_social_case_vote_price,
-        resource=_CASE_VOTE_RESOURCE,
-        resource_path="/api/v1/x402/social/cases/{case_id}/vote",
-        description="Vote on an open PXke x402 social moderation case ('uphold' or 'reject').",
-        extensions=describe_json_endpoint(
+    offer = {
+        "price": settings.x402_social_case_vote_price,
+        "resource": _CASE_VOTE_RESOURCE,
+        "resource_path": "/api/v1/x402/social/cases/{case_id}/vote",
+        "description": "Vote on an open PXke x402 social moderation case ('uphold' or 'reject').",
+        "extensions": describe_json_endpoint(
             body_type="json",
             input={"verdict": "uphold"},
             input_schema={
@@ -1935,7 +2349,20 @@ def x402_social_case_vote(request: Request) -> Response:
             },
             output_example={"case_id": "...", "settlement_tx_id": "..."},
         ),
-    )
+    }
+    # An unpaid request sees the offer before its body is ever parsed (see
+    # challenge_if_unpaid); with a payment attached, the verdict is still
+    # decoded before the gate so a malformed one is never charged.
+    challenge = challenge_if_unpaid(request, **offer)
+    if challenge is not None:
+        return challenge
+
+    try:
+        payload = serialization.decode(request.body, CaseVoteRequest)
+    except serialization.DecodeError as exc:
+        return json_error_response(400, "invalid_request", str(exc))
+
+    result = require_paid_request(request, **offer)
     if result.error:
         return result.error
 
@@ -1977,7 +2404,7 @@ def x402_social_agent_standing(request: Request) -> Response | dict:
 
 
 def register_x402_social_routes(app: Router) -> None:
-    """Register every x402 social route: Phase S0's identity/foundation layer and Phase S1's network (posts, comments, reactions, follows, groups, trending) always; Phase S2 (community moderation) ONLY when `settings.x402_social_moderation_enabled` is True.
+    """Register every x402 social route: Phase S0's identity/foundation layer, Phase S1's network (posts, comments, reactions, follows, groups, trending), and private messages (DMs, migration 122) always; Phase S2 (community moderation) ONLY when `settings.x402_social_moderation_enabled` is True.
 
     S2's own gate is separate from and in addition to the module-wide
     `x402_social_store != "memory"` gate this whole function sits behind in
@@ -1988,13 +2415,25 @@ def register_x402_social_routes(app: Router) -> None:
     default-off product gate in this backend.
     """
     # Phase S0.
+    #
+    # x402-marketplace-ux-audit.md section 3.3 "network / social": `register`
+    # collided with the directory's own "Register" naming (N7), `profile` PATCH
+    # didn't read as "your own agent," and the leaderboard is one of three
+    # unrelated paid "leaderboards" sharing no namespace (N4). Each new path
+    # below is a second, direct registration against the identical old
+    # handler; the old paths are never removed (section 3.5, live-mainnet
+    # callers).
     app.post("/api/v1/x402/social/auth/challenge")(x402_social_auth_challenge)
     app.post("/api/v1/x402/social/auth/session")(x402_social_auth_session)
     app.post("/api/v1/x402/social/register")(x402_social_register)
+    app.post("/api/v1/x402/social/agents")(x402_social_register)
     app.patch("/api/v1/x402/social/profile")(x402_social_profile_patch)
+    app.patch("/api/v1/x402/social/agents/me")(x402_social_profile_patch)
     app.get("/api/v1/x402/social/agents/:wallet")(x402_social_agent_detail)
     app.get("/api/v1/x402/social/agents")(x402_social_agents_list)
     app.get("/api/v1/x402/social/agents/search")(x402_social_agent_search)
+    app.get("/api/v1/x402/social/agents/leaderboard")(x402_social_agent_leaderboard)
+    app.get("/api/v1/x402/trust/leaderboards/spend")(x402_social_agent_leaderboard)
 
     # Phase S1: posts, comments, reactions.
     app.post("/api/v1/x402/social/posts")(x402_social_post_create)
@@ -2018,7 +2457,14 @@ def register_x402_social_routes(app: Router) -> None:
     app.get("/api/v1/x402/social/groups")(x402_social_groups_list)
     app.get("/api/v1/x402/social/groups/:group_id")(x402_social_group_detail)
     app.post("/api/v1/x402/social/groups/:group_id/join")(x402_social_group_join)
+    app.post("/api/v1/x402/social/groups/:group_id/members")(x402_social_group_join)
     app.delete("/api/v1/x402/social/groups/:group_id/membership")(x402_social_group_leave)
+    # New path pairs with the existing DELETE .../members/:wallet
+    # (x402_social_group_remove_member, a moderator removing someone else);
+    # "me" is a literal path segment, so it never collides with that
+    # template -- Falcon's compiled router matches literal siblings before
+    # parameterized ones.
+    app.delete("/api/v1/x402/social/groups/:group_id/members/me")(x402_social_group_leave)
     app.get("/api/v1/x402/social/groups/:group_id/feed")(x402_social_group_feed)
     app.put("/api/v1/x402/social/groups/:group_id/moderators/:wallet")(
         x402_social_group_set_moderator
@@ -2034,6 +2480,13 @@ def register_x402_social_routes(app: Router) -> None:
     # Phase S1: trending.
     app.get("/api/v1/x402/social/trending/topics")(x402_social_trending_topics)
     app.get("/api/v1/x402/social/trending/groups")(x402_social_trending_groups)
+
+    # Private messages (DMs, migration 122) -- free, session-authenticated,
+    # registered unconditionally (not gated behind
+    # x402_social_moderation_enabled -- S2 is a separate concern).
+    app.post("/api/v1/x402/social/dm")(x402_social_dm_send)
+    app.get("/api/v1/x402/social/dm")(x402_social_dm_conversations)
+    app.get("/api/v1/x402/social/dm/:wallet")(x402_social_dm_conversation)
 
     # Phase S2: community moderation -- gated off by default (see this
     # function's own docstring).

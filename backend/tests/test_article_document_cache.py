@@ -124,6 +124,71 @@ def test_article_document_cache_miss_for_404_is_not_cached_forever(
     assert resp2.status_code == 404
 
 
+def _localized_req(lang: str, article_id: str) -> Request:
+    return Request(
+        method="GET",
+        headers={},
+        query_params=QueryParams({}),  # type: ignore[arg-type]
+        path_params={"lang": lang, "article_id": article_id},
+    )
+
+
+@pytest.mark.usefixtures("_fake_cache_redis")
+def test_untranslated_locale_url_renders_as_the_english_document(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """/ru/news/articles/<slug> for an article with NO Russian translation must not be an indexable, self-canonical duplicate of the English article.
+
+    get_article falls back to the English text for a missing translation, so
+    the document is rendered AS English: canonical points at the bare English
+    URL, og:locale/content-language/<html lang> say English, and the hreflang
+    set (which never listed ru) stays consistent with the canonical. Only the
+    SPA's dedup marker keeps the browser's real /ru/ path. Live 2026-09-05:
+    every one of these served `<html lang="ru">` + English text + canonical
+    https://algorand.pxke.me/ru/... with no noindex.
+    """
+    calls: list[str] = []
+    detail = _article()
+    _wire(monkeypatch, detail, calls)
+    monkeypatch.setattr(seo_routes.news, "translation_langs_for", lambda _id: ["fr"])
+
+    resp = seo_routes.article_localized(_localized_req("ru", detail.slug))  # type: ignore[arg-type]
+
+    assert resp.status_code == 200
+    doc = resp.description
+    assert 'rel="canonical" href="https://algorand.pxke.me/news/articles/' in doc
+    assert 'property="og:url" content="https://algorand.pxke.me/news/articles/' in doc
+    # The /ru/ path appears exactly once: the SPA dedup marker (asserted
+    # below) -- never in canonical, og:url, hreflang or the translation picker.
+    assert doc.count("/ru/news/articles/") == 1
+    assert '<html lang="en"' in doc
+    assert 'property="og:locale" content="en_US"' in doc
+    assert 'http-equiv="content-language" content="en"' in doc
+    assert 'hreflang="fr"' in doc
+    assert 'hreflang="ru"' not in doc
+    # The SPA dedup marker still names the path the browser is actually at.
+    assert 'pxke_ssr_pv","/ru/news/articles/' in doc
+
+
+@pytest.mark.usefixtures("_fake_cache_redis")
+def test_translated_locale_url_still_renders_in_that_locale(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Control for the test above: a locale that DOES have a translation keeps its own canonical/lang."""
+    calls: list[str] = []
+    detail = _article()
+    _wire(monkeypatch, detail, calls)
+    monkeypatch.setattr(seo_routes.news, "translation_langs_for", lambda _id: ["fr"])
+
+    resp = seo_routes.article_localized(_localized_req("fr", detail.slug))  # type: ignore[arg-type]
+
+    assert resp.status_code == 200
+    doc = resp.description
+    assert 'rel="canonical" href="https://algorand.pxke.me/fr/news/articles/' in doc
+    assert '<html lang="fr"' in doc
+    assert 'property="og:locale" content="fr_FR"' in doc
+
+
 def test_article_document_cache_expires_after_ttl(
     monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest
 ) -> None:

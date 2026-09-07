@@ -226,12 +226,23 @@ class NewsService:
         index directly, and only a bounded per-tag sample of article ids is
         used to sum view counts (view-count reads themselves are unchanged --
         still the existing bulk counter lookup).
+
+        get_views_bulk fans out one Cassandra point-lookup per id it's given
+        (its own docstring says callers must keep that list small) -- an
+        article carrying N tags previously appeared N times in the id list
+        fed to it here, since every tag's sample is unioned without
+        deduplication. At this corpus's real tag/article ratio (~2-4 tags per
+        story, 200+ live tags) that turned a "small window" into several
+        hundred duplicate concurrent point-reads on every tag_stats() cache
+        miss. Deduplicating first sends each article's id through exactly
+        once; the per-tag sum below still re-reads the shared views_by_id
+        dict once per (tag, article_id) pair, which is free.
         """
         from app.modules.news.stores.view_counts import get_views_bulk
 
         summaries = self._store.tag_summary()
-        all_ids = [aid for summary in summaries for aid in summary.article_ids]
-        views_by_id = get_views_bulk(all_ids) if all_ids else {}
+        all_ids = {aid for summary in summaries for aid in summary.article_ids}
+        views_by_id = get_views_bulk(list(all_ids)) if all_ids else {}
         tags = [
             {
                 "tag": summary.tag,

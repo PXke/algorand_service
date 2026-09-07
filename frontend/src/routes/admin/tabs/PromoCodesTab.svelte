@@ -1,6 +1,7 @@
 <script lang="ts">
   import type { AdminApi } from '../../../lib/api/admin'
   import { x402Api, type X402CatalogRoute } from '../../../lib/api/x402'
+  import { routePriceText } from '../../../lib/x402/catalog'
   import { LatestOnly } from '../../../lib/asyncGuard'
 
   let {
@@ -78,7 +79,10 @@
   }
 
   function resourceLabel(r: X402CatalogRoute): string {
-    const price = r.price_usd != null ? ` · $${r.price_usd}` : ''
+    // Prefers the server-computed price_display over the raw price_usd
+    // concatenation (shared helper, see lib/x402/catalog.ts).
+    const text = routePriceText(r)
+    const price = text ? ` · ${text}` : ''
     return `${r.method} ${r.path}${price} — ${r.resource}`
   }
 

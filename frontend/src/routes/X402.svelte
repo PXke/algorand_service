@@ -8,27 +8,34 @@
     x402Api,
     X402_PATHS,
     X402_CATALOG_URL,
+    X402_WELLKNOWN_URL,
+    X402_OPENAPI_URL,
     X402_CATEGORIES,
+    type X402Catalog,
     type X402Listing,
     type X402Placement,
     type X402FeatureRequest,
     type X402GradedEndpoint,
-    type X402NewsItem,
   } from '../lib/api/x402'
+  import { marketplaceMechanicProducts } from '../lib/x402/catalog'
   import { formatDispatchStamp } from '../lib/liveClock'
   import PageMeta from '../components/PageMeta.svelte'
   import { SITE_TAGLINE } from '../lib/seo'
   import { isHttp } from '../lib/sanitizeHtml'
+  import X402RegisterForm from '../components/x402/X402RegisterForm.svelte'
+  import X402PageNav from '../components/x402/X402PageNav.svelte'
+  import X402ProductCatalog from '../components/x402/X402ProductCatalog.svelte'
 
-  type X402Tab = 'directory' | 'board' | 'requests' | 'grades' | 'news'
+  type X402Tab = 'directory' | 'board' | 'requests' | 'grades' | 'register'
 
   let { tab }: { tab: X402Tab } = $props()
 
+  let catalog: X402Catalog | null = $state(null)
+  let catalogFailed = $state(false)
   let listings: X402Listing[] = $state([])
   let placements: X402Placement[] = $state([])
   let requests: X402FeatureRequest[] = $state([])
   let graded: X402GradedEndpoint[] = $state([])
-  let newsItems: X402NewsItem[] = $state([])
   let loading = $state(true)
   let error = $state<string | null>(null)
   let tag = $state('')
@@ -37,14 +44,14 @@
   // typing a tag does not fire one request per keystroke.
   let tagQuery = $state('')
 
-  const TABS: X402Tab[] = ['directory', 'board', 'requests', 'grades', 'news']
+  const TABS: X402Tab[] = ['directory', 'board', 'requests', 'grades', 'register']
 
   const tabLabel: Record<X402Tab, string> = {
     directory: 'x402TabDirectory',
     board: 'x402TabBoard',
     requests: 'x402TabRequests',
     grades: 'x402TabGrades',
-    news: 'x402TabNews',
+    register: 'x402TabRegister',
   }
 
   const apiBase = $derived(config.apiBaseUrl.replace(/\/$/, '') || window.location.origin)
@@ -53,26 +60,20 @@
     { key: 'x402TabBoard', url: `${apiBase}${X402_PATHS.board}` },
     { key: 'x402TabRequests', url: `${apiBase}${X402_PATHS.features}` },
     { key: 'x402TabGrades', url: `${apiBase}${X402_PATHS.grades}` },
-    { key: 'x402TabNews', url: `${apiBase}${X402_PATHS.news}` },
   ])
   const curlExample = $derived(
     `curl -X POST ${apiBase}${X402_PATHS.features} -H 'Content-Type: application/json' -d '{"title": "...", "description": "..."}'`,
   )
 
-  const pricing = $derived([
-    { what: t($messages, 'x402PriceListLabel'), price: t($messages, 'x402PriceListValue') },
-    { what: t($messages, 'x402PriceBoardLabel'), price: t($messages, 'x402PriceBoardValue') },
-    { what: t($messages, 'x402PriceRequestLabel'), price: t($messages, 'x402PriceRequestValue') },
-    { what: t($messages, 'x402PriceVoteLabel'), price: t($messages, 'x402PriceVoteValue') },
-    { what: t($messages, 'x402PriceDemandLabel'), price: t($messages, 'x402PriceDemandValue') },
-    { what: t($messages, 'x402PriceGradeLabel'), price: t($messages, 'x402PriceGradeValue') },
-    { what: t($messages, 'x402PriceScoreLabel'), price: t($messages, 'x402PriceScoreValue') },
-    { what: t($messages, 'x402PriceArticleLabel'), price: t($messages, 'x402PriceArticleValue') },
-    {
-      what: t($messages, 'x402PriceNewsSearchLabel'),
-      price: t($messages, 'x402PriceNewsSearchValue'),
-    },
-  ])
+  // Only the marketplace-mechanic products (catalog/directory/board/features/
+  // grading) -- PXke's own direct-utility products live on the Our Endpoints
+  // page instead. See lib/x402/catalog.ts.
+  const mechanicProducts = $derived(marketplaceMechanicProducts(catalog))
+
+  function go(href: string, e: MouseEvent) {
+    e.preventDefault()
+    navigate(href)
+  }
 
   const count = $derived.by(() => {
     switch (tab) {
@@ -84,8 +85,8 @@
         return requests.length
       case 'grades':
         return graded.length
-      case 'news':
-        return newsItems.length
+      case 'register':
+        return 0
     }
   })
 
@@ -104,6 +105,13 @@
     const which = tab
     const q = tagQuery
     const cat = category
+    // The register tab has no list to fetch -- it manages its own catalog
+    // read and free "already listed?" check internally.
+    if (which === 'register') {
+      loading = false
+      error = null
+      return
+    }
     const ac = new AbortController()
     loading = true
     error = null
@@ -113,8 +121,7 @@
         if (which === 'directory') listings = await x402Api.search(q, cat, opts)
         else if (which === 'board') placements = await x402Api.board(opts)
         else if (which === 'requests') requests = await x402Api.features(opts)
-        else if (which === 'grades') graded = await x402Api.grades(opts)
-        else newsItems = await x402Api.news(opts)
+        else graded = await x402Api.grades(opts)
         if (ac.signal.aborted) return
         loading = false
       } catch (e) {
@@ -124,6 +131,24 @@
             ? e.userMessage
             : untrack(() => t($messages, 'errorGeneric'))
         loading = false
+      }
+    })()
+    return () => ac.abort()
+  })
+
+  // The catalog is tab-independent, so it is fetched once (no reactive
+  // dependencies) with its own abort guard; a failure only degrades the
+  // product list, never the tab views.
+  $effect(() => {
+    const ac = new AbortController()
+    void (async () => {
+      try {
+        const doc = await x402Api.catalog({ signal: ac.signal })
+        if (ac.signal.aborted) return
+        catalog = doc
+      } catch {
+        if (ac.signal.aborted) return
+        catalogFailed = true
       }
     })()
     return () => ac.abort()
@@ -145,11 +170,6 @@
   function shortAddr(a: string): string {
     return a.length > 12 ? `${a.slice(0, 6)}…${a.slice(-4)}` : a
   }
-
-  function go(href: string, e: MouseEvent) {
-    e.preventDefault()
-    navigate(href)
-  }
 </script>
 
 <PageMeta
@@ -159,6 +179,8 @@
 />
 
 <div class="page stack x402">
+  <X402PageNav active="marketplace" />
+
   <header>
     <span class="accent-slug"></span>
     <p class="kicker">{t($messages, 'x402Kicker')}</p>
@@ -166,17 +188,28 @@
     <p class="lead muted">{t($messages, 'x402Lead')}</p>
   </header>
 
+  <section class="about-cta">
+    <p class="about-body">{t($messages, 'x402AboutBody')}</p>
+    <div class="cta-row">
+      <a class="btn btn-primary" href="/x402/register" onclick={(e) => go('/x402/register', e)}>
+        {t($messages, 'x402CtaListLabel')}
+      </a>
+      <a class="btn" href="/x402/board" onclick={(e) => go('/x402/board', e)}>
+        {t($messages, 'x402CtaBoardLabel')}
+      </a>
+    </div>
+  </section>
+
   <section class="intro">
     <div class="pricing">
       <h2>{t($messages, 'x402PricingHeading')}</h2>
-      <dl>
-        {#each pricing as row (row.what)}
-          <div class="price-row">
-            <dt>{row.what}</dt>
-            <dd>{row.price}</dd>
-          </div>
-        {/each}
-      </dl>
+      {#if catalogFailed}
+        <p class="muted cat-note">{t($messages, 'x402CatalogUnavailable')}</p>
+      {:else if !catalog}
+        <p class="muted cat-note">{t($messages, 'loading')}</p>
+      {:else}
+        <X402ProductCatalog products={mechanicProducts} {catalog} />
+      {/if}
     </div>
 
     <aside class="agents" aria-label={t($messages, 'x402ForAgentsHeading')}>
@@ -192,7 +225,9 @@
       </ul>
       <p class="curl-label">{t($messages, 'x402CatalogLabel')}</p>
       <p class="muted">{t($messages, 'x402CatalogBody')}</p>
-      <pre class="curl"><code>GET {X402_CATALOG_URL}</code></pre>
+      <pre class="curl"><code>GET {X402_CATALOG_URL}
+GET {X402_WELLKNOWN_URL}
+GET {X402_OPENAPI_URL}</code></pre>
       <p class="curl-label">{t($messages, 'x402ForAgentsCurlLabel')}</p>
       <pre class="curl"><code>{curlExample}</code></pre>
     </aside>
@@ -236,7 +271,9 @@
     </div>
   {/if}
 
-  {#if loading}
+  {#if tab === 'register'}
+    <X402RegisterForm />
+  {:else if loading}
     <p class="muted">{t($messages, 'loading')}</p>
   {:else if error}
     <p class="err">{error}</p>
@@ -348,7 +385,7 @@
           </li>
         {/each}
       </ul>
-    {:else if tab === 'grades'}
+    {:else}
       <ul class="rows">
         {#each graded as item, i (`${item.url}-${i}`)}
           <li class="row">
@@ -368,33 +405,6 @@
                 >
               {/if}
               <span class="stamp">{t($messages, 'x402ScorePaidHint')}</span>
-            </p>
-          </li>
-        {/each}
-      </ul>
-    {:else}
-      <ul class="rows">
-        {#each newsItems as item, i (`${item.article_id}-${i}`)}
-          <li class="row">
-            <div class="row-head">
-              {#if isHttp(item.url)}
-                <a class="name" href={item.url} target="_blank" rel="noopener noreferrer nofollow"
-                  >{item.title}</a
-                >
-              {:else}
-                <span class="name">{item.title}</span>
-              {/if}
-            </div>
-            {#if item.summary}
-              <p class="desc">{item.summary}</p>
-            {/if}
-            <p class="meta">
-              {#each item.tags ?? [] as tg (tg)}
-                <span class="badge">#{tg}</span>
-              {/each}
-              {#if stamp(item.published_at_epoch)}
-                <span class="stamp">{stamp(item.published_at_epoch)}</span>
-              {/if}
             </p>
           </li>
         {/each}
@@ -442,28 +452,34 @@
     background: var(--accent);
     vertical-align: 6%;
   }
-  .pricing dl {
+  .cat-note {
     margin: 10px 0 0;
-  }
-  .price-row {
-    display: flex;
-    justify-content: space-between;
-    gap: 16px;
-    padding: 7px 0;
-    border-bottom: 1px solid var(--border);
     font-family: var(--font-serif);
     font-size: 0.95rem;
   }
-  .price-row dt {
-    margin: 0;
+  .about-cta {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 14px;
+    padding: 14px 16px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-card);
+    background: var(--accent-soft);
   }
-  .price-row dd {
+  .about-body {
     margin: 0;
-    font-family: var(--font-mono);
-    font-size: 12px;
-    font-variant-numeric: tabular-nums;
-    color: var(--accent);
-    white-space: nowrap;
+    max-width: 42rem;
+    font-family: var(--font-serif);
+    font-size: 0.95rem;
+    line-height: 1.5;
+  }
+  .cta-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    flex-shrink: 0;
   }
   .agents {
     padding: 14px 16px;

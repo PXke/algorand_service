@@ -60,6 +60,51 @@ def test_resolve_artifact_returns_status_on_the_happy_path(
     assert calls == [("art-2", qdt.COMPOSED)]
 
 
+def test_resolve_after_compose_retries_when_soft_time_limit_lands_before_resolve_runs() -> None:
+    """Regression test (2026-09-07 review): the gap between a compose returning (already paid for, possibly already published) and `resolve` being called at all -- distinct from `_resolve_artifact`'s own already-tested retry for an interrupt DURING its write above.
+
+    Before this fix, `_process_review_row`/`_publish_standard_row` called
+    `resolve(row, outcome)` in straight-line code with no protection for
+    this gap: an interrupt landing here left the queue row's bookkeeping
+    never attempted, so the next drain run saw it as still pending and
+    could compose (and republish) the same row a second time.
+    """
+    calls = 0
+
+    def _flaky_resolve(_row: object, _outcome: dict) -> str:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise SoftTimeLimitExceeded
+        return "published"
+
+    with pytest.raises(SoftTimeLimitExceeded):
+        qdt._resolve_after_compose(
+            _flaky_resolve, SimpleNamespace(queue_id="q-1"), {"status": "published"}
+        )
+
+    # Retried exactly once, and the retry actually ran resolve -- not a silent no-op --
+    # before the interrupt is allowed to propagate.
+    assert calls == 2
+
+
+def test_resolve_after_compose_returns_status_on_the_happy_path() -> None:
+    """Unchanged normal-path behaviour: no interrupt, one resolve call, status returned."""
+    calls = 0
+
+    def _resolve(_row: object, _outcome: dict) -> str:
+        nonlocal calls
+        calls += 1
+        return "published"
+
+    status = qdt._resolve_after_compose(
+        _resolve, SimpleNamespace(queue_id="q-2"), {"status": "published"}
+    )
+
+    assert status == "published"
+    assert calls == 1
+
+
 def test_drain_to_compose_is_single_flight_locked(monkeypatch: pytest.MonkeyPatch) -> None:
     """(3) A concurrent drain_to_compose invocation must not race the first run.
 

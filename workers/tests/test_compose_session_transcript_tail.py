@@ -117,6 +117,106 @@ def test_initial_source_material_turn_gets_a_generous_cap(
     assert source_material in user_turn["content"]  # not truncated away
 
 
+def test_oversized_transcript_keeps_the_opening_system_user_pair(
+    fake_cassandra_session: MagicMock,
+) -> None:
+    """Regression pin (2026-09-05): the front-drop eviction must start AFTER the opening system+user pair. The plain pop(0) used before evicted exactly those two messages first on any long session -- deleting the compose's actual prompt (the primary grounding evidence the Messina fix gives a 20k cap) and making stored transcripts open cold at an assistant turn."""
+    source_material = "y" * 10_000
+    messages: list[dict] = [
+        {"role": "system", "content": "system prompt"},
+        {
+            "role": "user",
+            "content": f"Write the article now from the material below.\n{source_material}",
+        },
+    ]
+    messages += [{"role": "tool", "name": "search_web", "content": "x" * 2000} for _ in range(100)]
+    messages.append({"role": "tool", "name": "review_draft", "content": '{"grade": 10.0}'})
+    debug = {"messages": messages}
+
+    record_compose_session(
+        debug=debug,
+        trace=[],
+        service_id="svc",
+        source_url="https://example.com/",
+        model="deepseek-v4-flash",
+        final_output="{}",
+        status="ok",
+    )
+
+    call = fake_cassandra_session.execute.call_args
+    raw = call.args[1][10]
+    assert len(raw) <= 120_000
+    stored_messages = json.loads(raw)
+    assert stored_messages[0]["role"] == "system"
+    assert stored_messages[1]["role"] == "user"
+    assert source_material in stored_messages[1]["content"]  # the opening frame survives
+    names = [m.get("name") for m in stored_messages if m.get("name")]
+    assert "review_draft" in names  # the tail still survives too
+    assert len(stored_messages) < 103  # middle research rounds were what got evicted
+
+
+def test_per_call_timing_annotations_are_persisted(fake_cassandra_session: MagicMock) -> None:
+    """started_at_ms/ended_at_ms stamped at the LLM request/response boundary (tool-loop rounds, the stage-2 write) must survive into the stored transcript -- the whole point is recording when each call actually ran instead of inferring the timeline from log gaps (2026-09-05, owner ask)."""
+    messages = [
+        {"role": "system", "content": "system prompt"},
+        {"role": "user", "content": "Write the article now from the material below."},
+        {
+            "role": "assistant",
+            "content": "researching",
+            "started_at_ms": 1_757_000_000_000,
+            "ended_at_ms": 1_757_000_042_000,
+        },
+    ]
+    debug = {"messages": messages}
+
+    record_compose_session(
+        debug=debug,
+        trace=[],
+        service_id="svc",
+        source_url="https://example.com/",
+        model="deepseek-v4-flash",
+        final_output="{}",
+        status="ok",
+    )
+
+    call = fake_cassandra_session.execute.call_args
+    stored_messages = json.loads(call.args[1][10])
+    assistant = next(m for m in stored_messages if m["role"] == "assistant")
+    assert assistant["started_at_ms"] == 1_757_000_000_000
+    assert assistant["ended_at_ms"] == 1_757_000_042_000
+
+
+def test_llm_call_log_rides_as_one_trailing_entry(fake_cassandra_session: MagicMock) -> None:
+    """Ephemeral LLM calls with no message of their own (digest synthesis, rubric grading, ...) are persisted as ONE trailing llm_call_log entry built from debug["llm_calls"] -- appended only to the STORED array, never to debug["messages"], so it can never be replayed into a later revision-pass API request."""
+    debug = {
+        "messages": [{"role": "assistant", "content": "draft"}],
+        "llm_calls": [
+            {
+                "purpose": "digest_synthesis",
+                "started_at_ms": 1_757_000_100_000,
+                "ended_at_ms": 1_757_000_160_000,
+            }
+        ],
+    }
+
+    record_compose_session(
+        debug=debug,
+        trace=[],
+        service_id="svc",
+        source_url="https://example.com/",
+        model="deepseek-v4-flash",
+        final_output="{}",
+        status="ok",
+    )
+
+    call = fake_cassandra_session.execute.call_args
+    stored_messages = json.loads(call.args[1][10])
+    assert stored_messages[-1]["role"] == "llm_call_log"
+    assert "digest_synthesis" in stored_messages[-1]["content"]
+    # the live debug transcript itself was NOT polluted with a synthetic turn
+    assert [m["role"] for m in debug["messages"]] == ["assistant"]
+
+
 def test_other_user_turns_keep_the_short_cap(fake_cassandra_session: MagicMock) -> None:
     """A user turn that ISN'T the initial source-material prompt (e.g. a mid-loop nudge) still gets the tight 1500-char cap -- the generous cap is scoped to the one message shape that actually needs it."""
     messages = [

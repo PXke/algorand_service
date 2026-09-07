@@ -39,7 +39,7 @@
 />
 
 <div class="page stack">
-  <header>
+  <header class="page-head">
     <span class="accent-slug"></span>
     <h1>{t($messages, 'suggestionsTitle')}</h1>
     <p class="lead muted">{t($messages, 'suggestionsSubtitle')}</p>
@@ -64,16 +64,8 @@
 </div>
 
 <style>
-  h1 {
-    margin: 8px 0 0;
-    font-size: clamp(28px, 4vw, 34px);
-  }
   h3 {
     margin: 0;
-  }
-  .lead {
-    margin: 8px 0 0;
-    max-width: 42rem;
   }
   .err {
     color: var(--danger);

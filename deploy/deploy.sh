@@ -24,6 +24,20 @@ ROOT_USER="${ROOT_USER:-root}"
 TARGET_PATH="${TARGET_PATH:-/srv/algorand-platform}"
 SITE_DOMAIN="${SITE_DOMAIN:-}"
 API_DOMAIN="${API_DOMAIN:-}"
+# Exported (not just assigned): package.sh's _maybe_build_marketplace_frontend/
+# _maybe_build_registry_frontend gate their builds on these, and package.sh
+# runs as a separate process (`"$SCRIPT_DIR/package.sh"` below) -- a plain
+# assignment here is invisible there. Found 2026-09-07: both builds silently
+# skipped ("X402_SITE_DOMAIN unset") on a real deploy despite deploy.conf
+# setting them, because only deploy.sh's own in-process render() calls (which
+# don't need export, same shell) picked up the right values -- nginx/CORS
+# ended up correct by luck (already-built dist-marketplace/dist-registry on
+# disk from a manual build earlier that night got staged anyway, since
+# _assemble_stage's staging check is file-existence-based, not env-based) but
+# a source change with no manual pre-build would have shipped stale frontend
+# content with no error.
+export X402_SITE_DOMAIN="${X402_SITE_DOMAIN:-}"
+export REGISTRY_SITE_DOMAIN="${REGISTRY_SITE_DOMAIN:-}"
 CERTBOT_EMAIL="${CERTBOT_EMAIL:-}"
 APP_PORT="${APP_PORT:-9080}"
 DEPLOY_CQL_TIER="${DEPLOY_CQL_TIER:-all}"
@@ -100,6 +114,8 @@ render() { # render <file> — substitute deployment placeholders to stdout
       -e "s|@TARGET_HOST@|${TARGET_HOST}|g" \
       -e "s|@SITE_DOMAIN@|${SITE_DOMAIN}|g" \
       -e "s|@API_DOMAIN@|${API_DOMAIN}|g" \
+      -e "s|@X402_SITE_DOMAIN@|${X402_SITE_DOMAIN}|g" \
+      -e "s|@REGISTRY_SITE_DOMAIN@|${REGISTRY_SITE_DOMAIN}|g" \
       -e "s|@APP_PORT@|${APP_PORT}|g" \
       "$1"
 }

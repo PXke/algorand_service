@@ -7,6 +7,7 @@ get_redis seam (same pattern as test_x402_preview.py/test_x402_promo.py).
 
 from __future__ import annotations
 
+from decimal import Decimal
 from typing import Never
 
 import pytest
@@ -19,7 +20,7 @@ from app.core.config import settings
 from app.core.http import Response
 from app.modules.x402 import circuit_breaker
 from app.modules.x402 import refund as refund_module
-from app.modules.x402.assets import EURQ, USDC
+from app.modules.x402.assets import EURQ, GOBTC, USDC
 from app.modules.x402.guard import PaymentResult
 from app.modules.x402.paid_request import run_with_refund
 from app.modules.x402.refund import send_refund
@@ -412,7 +413,7 @@ def test_daily_budget_exhausted_skips_the_refund_without_sending_anything(
     """Found-in-audit fix (2026-09-02): a marketplace-wide per-asset daily ceiling -- past it, send_refund skips (no funds move) instead of sending unboundedly."""
     priv, _ = account.generate_account()
     monkeypatch.setattr(settings, "x402_refund_mnemonic", mnemonic.from_private_key(priv))
-    monkeypatch.setattr(settings, "x402_refund_daily_budget_atomic", 1_000_000)
+    monkeypatch.setattr(settings, "x402_refund_daily_budget_usd_atomic", 1_000_000)
     _patch_breaker_redis(monkeypatch, _FakeRedis())
     sent: list = []
     monkeypatch.setattr(refund_module, "_algod_client", lambda: _FakeAlgodClient(sent))
@@ -442,7 +443,11 @@ def test_daily_budget_is_per_asset_not_shared(monkeypatch: pytest.MonkeyPatch) -
     priv, _ = account.generate_account()
     monkeypatch.setattr(settings, "x402_refund_mnemonic", mnemonic.from_private_key(priv))
     monkeypatch.setattr(settings, "x402_network", ALGORAND_MAINNET_CAIP2)
-    monkeypatch.setattr(settings, "x402_refund_daily_budget_atomic", 1_000_000)
+    monkeypatch.setattr(settings, "x402_refund_daily_budget_usd_atomic", 1_000_000)
+    # EURQ is priced via price_oracle (it has a coingecko_id, unlike USDC) --
+    # pin its rate to exactly 1.0 so this test's assertions stay about
+    # per-asset budget isolation, not price normalization math.
+    monkeypatch.setattr(refund_module, "get_usd_rate", lambda _coingecko_id: Decimal("1.0"))
     _patch_breaker_redis(monkeypatch, _FakeRedis())
     sent: list = []
     monkeypatch.setattr(refund_module, "_algod_client", lambda: _FakeAlgodClient(sent))
@@ -461,6 +466,122 @@ def test_daily_budget_is_per_asset_not_shared(monkeypatch: pytest.MonkeyPatch) -
 
     assert exhausted.status == "skipped"
     assert other_asset.status == "sent"
+
+
+def test_goBTC_and_usdc_refunds_of_equal_real_value_consume_equal_budget_fraction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression for the 2026-09-06 incident: goBTC (8 decimals, BTC-priced) must consume the SAME fraction of its OWN daily budget as USDC (6 decimals, ~$1) does of ITS OWN, for genuinely equivalent real-world value -- not a fraction 100x-1000x smaller, which is what happened with the old flat-atomic-number budget.
+
+    The budget stays tracked PER ASSET (test_daily_budget_is_per_asset_not_shared
+    above), so this proves the fraction-of-budget-consumed is comparable
+    per asset, by driving each asset's own $1.00 budget to exhaustion with
+    two genuinely-$0.50 refunds and checking a third is refused either way.
+    goBTC is pinned to $50,000/BTC: $0.50 of goBTC is 0.00001 BTC = 1_000
+    atomic units (8 decimals); $0.50 of USDC is 500_000 atomic units (6
+    decimals) directly, since USDC needs no oracle. Nothing here
+    special-cases goBTC by name, only by its .decimals/.coingecko_id, so
+    this generalizes to a future asset with yet another decimals value.
+    """
+    priv, _ = account.generate_account()
+    monkeypatch.setattr(settings, "x402_refund_mnemonic", mnemonic.from_private_key(priv))
+    monkeypatch.setattr(settings, "x402_network", ALGORAND_MAINNET_CAIP2)
+    monkeypatch.setattr(settings, "x402_refund_daily_budget_usd_atomic", 1_000_000)  # $1.00
+    monkeypatch.setattr(
+        refund_module,
+        "get_usd_rate",
+        lambda coingecko_id: Decimal("50000") if coingecko_id == GOBTC.coingecko_id else None,
+    )
+    _patch_breaker_redis(monkeypatch, _FakeRedis())
+    sent: list = []
+    monkeypatch.setattr(refund_module, "_algod_client", lambda: _FakeAlgodClient(sent))
+    monkeypatch.setattr(
+        refund_module, "wait_for_confirmation", lambda *_a, **_k: {"confirmed-round": 5}
+    )
+    gobtc_mainnet_asa_id = str(GOBTC.asa_id_for(ALGORAND_MAINNET_CAIP2))
+    usdc_mainnet_asa_id = str(USDC.asa_id_for(ALGORAND_MAINNET_CAIP2))
+
+    gobtc_first_half = send_refund(  # $0.50 of goBTC -- 50% of its $1.00 budget
+        receiver=RECEIVER, amount_atomic="1000", asset_id=gobtc_mainnet_asa_id
+    )
+    gobtc_second_half = send_refund(  # the other 50% -- exhausts goBTC's budget
+        receiver=RECEIVER, amount_atomic="1000", asset_id=gobtc_mainnet_asa_id
+    )
+    gobtc_third = send_refund(  # goBTC's own budget is now fully consumed
+        receiver=RECEIVER, amount_atomic="1", asset_id=gobtc_mainnet_asa_id
+    )
+    usdc_first_half = send_refund(  # $0.50 of USDC -- 50% of ITS $1.00 budget
+        receiver=RECEIVER, amount_atomic="500000", asset_id=usdc_mainnet_asa_id
+    )
+    usdc_second_half = send_refund(  # the other 50% -- exhausts USDC's budget
+        receiver=RECEIVER, amount_atomic="500000", asset_id=usdc_mainnet_asa_id
+    )
+    usdc_third = send_refund(  # USDC's own budget is now fully consumed too
+        receiver=RECEIVER, amount_atomic="1", asset_id=usdc_mainnet_asa_id
+    )
+
+    assert [r.status for r in (gobtc_first_half, gobtc_second_half)] == ["sent", "sent"]
+    assert gobtc_third.status == "skipped"
+    assert [r.status for r in (usdc_first_half, usdc_second_half)] == ["sent", "sent"]
+    assert usdc_third.status == "skipped"
+
+
+def test_gobtc_refund_of_the_old_flat_atomic_budget_number_would_have_blown_the_real_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Direct regression on the incident: under the OLD code, sending the full 100_000_000-atomic budget number in goBTC (1.0 whole goBTC) was allowed -- worth ~$50,000 here, not the intended ~$100. The fix must refuse that same 1.0 goBTC refund as WAY over budget while still allowing a genuinely ~$100-equivalent goBTC refund through."""
+    priv, _ = account.generate_account()
+    monkeypatch.setattr(settings, "x402_refund_mnemonic", mnemonic.from_private_key(priv))
+    monkeypatch.setattr(settings, "x402_network", ALGORAND_MAINNET_CAIP2)
+    # Use the real default budget: $100/day, unchanged in atomic terms.
+    assert settings.x402_refund_daily_budget_usd_atomic == 100_000_000
+    monkeypatch.setattr(
+        refund_module,
+        "get_usd_rate",
+        lambda coingecko_id: Decimal("50000") if coingecko_id == GOBTC.coingecko_id else None,
+    )
+    _patch_breaker_redis(monkeypatch, _FakeRedis())
+    sent: list = []
+    monkeypatch.setattr(refund_module, "_algod_client", lambda: _FakeAlgodClient(sent))
+    monkeypatch.setattr(
+        refund_module, "wait_for_confirmation", lambda *_a, **_k: {"confirmed-round": 5}
+    )
+    gobtc_mainnet_asa_id = str(GOBTC.asa_id_for(ALGORAND_MAINNET_CAIP2))
+
+    # The exact atomic number the OLD buggy config used as its (asset-blind)
+    # budget: 100_000_000 atomic of an 8-decimal asset is 1.0 whole goBTC,
+    # worth ~$50,000 at the pinned rate -- 500x the intended ~$100 ceiling.
+    one_whole_gobtc = send_refund(
+        receiver=RECEIVER, amount_atomic="100000000", asset_id=gobtc_mainnet_asa_id
+    )
+    # A genuinely ~$100-equivalent goBTC refund (0.002 BTC @ $50,000) must
+    # still go through on a fresh day's budget.
+    monkeypatch.setattr(refund_module, "_daily_budget_key", lambda asset_id: f"fresh:{asset_id}")
+    genuinely_100_dollars = send_refund(
+        receiver=RECEIVER, amount_atomic="200000", asset_id=gobtc_mainnet_asa_id
+    )
+
+    assert one_whole_gobtc.status == "skipped"
+    assert one_whole_gobtc.error == "daily refund budget exhausted"
+    assert genuinely_100_dollars.status == "sent"
+    assert len(sent) == 1  # only the genuinely-$100 refund was ever broadcast
+
+
+def test_daily_budget_check_fails_closed_when_gobtc_price_is_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A priced (non-USDC) asset with no available rate right now must skip the refund, not sail through the budget check unenforced -- fails CLOSED, same reasoning as an unreachable Redis."""
+    priv, _ = account.generate_account()
+    monkeypatch.setattr(settings, "x402_refund_mnemonic", mnemonic.from_private_key(priv))
+    monkeypatch.setattr(settings, "x402_network", ALGORAND_MAINNET_CAIP2)
+    monkeypatch.setattr(refund_module, "get_usd_rate", lambda _coingecko_id: None)
+    _patch_breaker_redis(monkeypatch, _FakeRedis())
+    gobtc_mainnet_asa_id = str(GOBTC.asa_id_for(ALGORAND_MAINNET_CAIP2))
+
+    result = send_refund(receiver=RECEIVER, amount_atomic="1000", asset_id=gobtc_mainnet_asa_id)
+
+    assert result.status == "skipped"
+    assert result.error == "daily refund budget exhausted"
 
 
 def test_breaker_fails_closed_on_redis_outage(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -20,7 +20,13 @@ from app.core.http_errors import json_error_response
 from app.modules.x402 import circuit_breaker
 from app.modules.x402.discovery import describe_json_endpoint
 from app.modules.x402.guard import PaymentResult
-from app.modules.x402.paid_request import mark_fulfilled, require_paid_request, run_with_refund
+from app.modules.x402.paid_request import (
+    challenge_if_unpaid,
+    mark_fulfilled,
+    require_paid_request,
+    run_with_refund,
+)
+from app.modules.x402.preview import preview_requested
 from app.modules.x402.promo import promo_request_params
 from app.modules.x402_scan.services.concurrency import (
     ConcurrencyLimitError,
@@ -72,6 +78,48 @@ _OUTPUT_EXAMPLE = {
     },
 }
 
+# The redacted `?preview=true` response (modules/x402/preview.py): a FIXED,
+# clearly-fake report, never a real scan. Unlike x402_uptime_check's preview
+# (a real reachability check is cheap and safe to run for free) a real scan
+# here means a real outbound fetch of a caller-supplied URL PLUS a full
+# sandbox run -- exactly what the paid path already needs its own rate
+# limit and bounded concurrency slot for (see scan_rate_limited and
+# acquire_scan_slot above), so it is not something to also hand out
+# unauthenticated on every preview request. So this mirrors x402_news_search's own preview:
+# the sandbox is never invoked at all, and every value is the same "<preview>"
+# / neutral sentinel every other preview route uses -- in particular
+# clean/malicious are None rather than True/False, so nothing here can ever
+# be read as an actual verdict about a real target.
+_PREVIEW_OUTPUT = {
+    "source_url": "<preview>",
+    "download_bytes": 0,
+    "schema_version": _OUTPUT_EXAMPLE["schema_version"],
+    "status": "preview",
+    "one_line_summary": "Preview only -- no file was fetched or scanned. Pay to run a real scan.",
+    "target": {
+        "label": "<preview>",
+        "size_bytes": 0,
+        "type": "<preview>",
+        "entropy_bits_per_byte": 0.0,
+        "indicators": {"urls": [], "ipv4_addresses": []},
+    },
+    "clamav": {"engine": "<preview>", "exit_code": 0, "infected_files": [], "clean": None},
+    "archive": None,
+    "yara": {"matched_rules": 0},
+    "fuzzy_hash": {"ssdeep_hash": "<preview>", "comparison_corpus": None, "note": "<preview>"},
+    "risk": {"score": -1.0, "verdict": "<preview>", "malicious": None, "caution_notes": []},
+    "settlement_tx_id": "<preview>",
+}
+
+
+def _scan_preview_response() -> Response:
+    """The redacted `?preview=true` response: the fixed `_PREVIEW_OUTPUT` shape, no scan ever run."""
+    return Response(
+        status_code=200,
+        headers={"Content-Type": "application/json"},
+        description=serialization.dumps(_PREVIEW_OUTPUT),
+    )
+
 
 def x402_scan_url(request: Request) -> Response:
     """Paid: fetch a URL (bounded, SSRF-safe) and run it through the static-analysis sandbox.
@@ -115,30 +163,20 @@ def x402_scan_url(request: Request) -> Response:
             429, "rate_limited", "Too many scan requests — please try again later"
         )
 
-    try:
-        payload = serialization.decode(request.body, X402ScanUrlRequest)
-    except serialization.DecodeError as exc:
-        return json_error_response(400, "invalid_request", str(exc))
-    url = payload.url.strip()
-    if not (url.startswith("http://") or url.startswith("https://")):
-        return json_error_response(400, "invalid_request", "url must be http:// or https://")
-
-    promo_code, promo_wallet = promo_request_params(request)
-    result = require_paid_request(
-        request,
-        price=settings.x402_scan_price,
-        resource=_RESOURCE,
-        promo_code=promo_code,
-        promo_wallet=promo_wallet,
-        description=(
+    offer = {
+        "price": settings.x402_scan_price,
+        "resource": _RESOURCE,
+        "description": (
             "Static security scan of a file fetched from a URL: known-malware "
             "signature match (ClamAV), file-type verification, entropy, embedded "
             "URL/IP extraction, and a zip/tar-bomb-safe archive member listing "
             "with the same checks applied per member. The target is downloaded "
             f"server-side (max {settings.x402_scan_max_download_bytes} bytes) and "
-            "scanned in a network-isolated sandbox that never executes it."
+            "scanned in a network-isolated sandbox that never executes it. Supports "
+            "?preview=true for a free, redacted, unpaid, rate-limited fixed example of "
+            "the response shape (no target is ever fetched or scanned for a preview)."
         ),
-        extensions=describe_json_endpoint(
+        "extensions": describe_json_endpoint(
             input=_INPUT_EXAMPLE,
             input_schema={
                 "type": "object",
@@ -152,9 +190,35 @@ def x402_scan_url(request: Request) -> Response:
             # x402_directory's own x402_list for the same documented pitfall).
             body_type="json",
         ),
+    }
+    # An unpaid request sees the offer before its body is ever parsed (see
+    # challenge_if_unpaid); with a payment attached, the url is still
+    # validated before the gate so a malformed request is never charged.
+    challenge = challenge_if_unpaid(request, **offer)
+    if challenge is not None:
+        return challenge
+
+    try:
+        payload = serialization.decode(request.body, X402ScanUrlRequest)
+    except serialization.DecodeError as exc:
+        return json_error_response(400, "invalid_request", str(exc))
+    url = payload.url.strip()
+    if not (url.startswith("http://") or url.startswith("https://")):
+        return json_error_response(400, "invalid_request", "url must be http:// or https://")
+
+    promo_code, promo_wallet = promo_request_params(request)
+    result = require_paid_request(
+        request,
+        **offer,
+        promo_code=promo_code,
+        promo_wallet=promo_wallet,
+        preview=preview_requested(request),
     )
     if result.error:
         return result.error
+
+    if result.is_preview:
+        return _scan_preview_response()
 
     if result.is_promo:
         return _handle_promo_scan(url, result)

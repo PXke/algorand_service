@@ -55,18 +55,8 @@ class BackupCreateRequest(msgspec.Struct, kw_only=True):
     label: Annotated[str, Meta(max_length=_MAX_LABEL_LENGTH)] = ""
 
 
-class BackupRenewRequest(msgspec.Struct, kw_only=True):
-    """Request body for POST /storage/backups/:backup_id/renew.
-
-    `wallet` here is ONLY a lookup hint for the free, pre-payment-gate
-    existence/price check -- exactly the same trust level as
-    X402ListingRenewRequest.url on the directory's own renew route. It is
-    NOT itself proof of ownership: the actual authorization decision compares
-    the REAL settled payment's `result.payer` against the row's own stored
-    `wallet` column (api/routes.py's own docstring has the full reasoning) --
-    this field never bypasses that check, it only tells the free lookup
-    which Cassandra partition to read (x402_storage_backups is partitioned
-    by wallet, so a point read needs it up front).
-    """
-
-    wallet: WalletAddress
+# POST /storage/backups/:backup_id/renew takes no body at all: `wallet` moved
+# to a query param 2026-09-06 (api/routes.py's x402_storage_renew_backup own
+# docstring has the full reasoning) so it is no longer decoded through a
+# Struct here -- there used to be a BackupRenewRequest with just that one
+# field.

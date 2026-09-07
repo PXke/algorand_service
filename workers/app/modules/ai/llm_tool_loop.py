@@ -28,13 +28,14 @@ every other provider's adapter simply doesn't override it.
 
 from __future__ import annotations
 
+import concurrent.futures
 import json
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
-from app.core.config import LLM_MAX_TOOL_ROUNDS
+from app.core.config import LLM_MAX_TOOL_ROUNDS, LLM_TOOL_LOOP_MAX_PARALLEL_CALLS
 from app.modules.ai.story_spike import StorySpikedError
 
 logger = logging.getLogger(__name__)
@@ -66,11 +67,23 @@ class RoundResult:
     adapter needs later to echo this round's assistant turn back into its own
     conversation state (the full response message dict for OpenAI, the
     content-block list for Anthropic/Gemini).
+
+    `started_at_ms`/`ended_at_ms` (2026-09-05, owner ask): wall-clock epoch
+    milliseconds around this round's actual provider request/response
+    boundary, set by an adapter whose send_round measures it (currently the
+    OpenAI-compatible one, around its `_post` call -- including that call's
+    own internal retries, so the window matches real elapsed wall time).
+    None when the adapter doesn't measure. An adapter that does measure
+    stamps them onto the assistant turn it appends to the debug transcript,
+    so a stored compose session records when each LLM call actually ran
+    instead of leaving the timeline to be inferred from log gaps.
     """
 
     text: str
     tool_calls: list[NormalizedToolCall] = field(default_factory=list)
     raw: Any = None
+    started_at_ms: int | None = None
+    ended_at_ms: int | None = None
 
 
 # Tools that are genuinely optional/low-stakes (a nice-to-have side effect,
@@ -92,6 +105,58 @@ CALL_CAPPED_TOOLS: dict[str, int] = {
     "suggest_tool": 6,
     "search_x": 3,
 }
+
+# Tools that share this compose's single, persistent PlaywrightSession
+# (writer_tools._wrap_playwright_backed_tools injects the SAME session
+# object into every one of these -- one real browser reused across the
+# whole compose, not one per call). A single browser page/context is not
+# safe to drive from two threads at once, and several of these keep their
+# own per-compose position/budget state in the shared tool context besides
+# (fetch_url's continue_reading offsets, play_interactive's step budget,
+# connect_wallet's call budget), which is read-then-written per call and
+# would race exactly like seen_calls/tool_call_counts would.
+_BROWSER_BACKED_TOOLS: frozenset[str] = frozenset(
+    {
+        "fetch_url",
+        "click_element",
+        "type_into_page",
+        "capture_screenshot",
+        "inspect_network_hosts",
+        "nft_asset_listing_status",
+        "nft_collection_market_stats",
+        "play_interactive",
+        "connect_wallet",
+    }
+)
+
+# Tools that get NO shared PlaywrightSession injected and instead launch
+# their own throwaway Chromium (browser_scrape.fetch_page with
+# playwright_session=None) when their cheap HTTP path doesn't find what
+# they need. Nothing shared races here, but browser_reaper.py's
+# orphaned-Chromium lessons apply just as much to N simultaneous
+# launch+teardown cycles started from worker threads, so these are
+# serialized alongside the session-backed tools rather than dispatched to
+# the pool.
+_OWN_BROWSER_LAUNCH_TOOLS: frozenset[str] = frozenset({"extract_pdf_from_page"})
+
+# The full set `_run_tool_calls_parallel` keeps out of the thread pool:
+# these run one at a time, in call order, in the calling thread, while
+# everything else in the round runs concurrently in the bounded pool.
+_SERIALIZED_TOOLS: frozenset[str] = _BROWSER_BACKED_TOOLS | _OWN_BROWSER_LAUNCH_TOOLS
+
+# abort_article (story_spike.py) is the one tool whose handler can raise
+# uncaught out of _invoke_handler (StorySpikedError) to terminate the whole
+# compose. Before parallelization, the plain sequential loop stopped dead
+# the instant it hit this call -- every tool call listed AFTER it in the
+# same round was never even attempted, deliberately: the writer chose to
+# abort, and a later call's side effect (e.g. a DB-writing
+# suggest_glossary_term) running anyway would be a real correctness
+# regression, not just a cosmetic ordering difference. Dispatching a whole
+# round concurrently loses that "stop at the abort" guarantee, so a round
+# containing this tool is excluded from parallelization entirely and runs
+# through the plain sequential `_execute_tool_call` path instead --
+# correctness over speed for a terminal, rare, single-call round.
+_STORY_TERMINATING_TOOLS: frozenset[str] = frozenset({"abort_article"})
 
 
 def round_budget_note(round_idx: int, rounds: int) -> str:
@@ -171,6 +236,11 @@ def _dedup_note(name: str, args: dict[str, Any]) -> dict[str, Any]:
     return {"note": note}
 
 
+def _spike_trace_result(spike: StorySpikedError) -> dict[str, Any]:
+    """The `trace["result"]` recorded for a call whose handler spiked the story. Shared by the sequential path (which records it inside `_invoke_handler`) and the parallel path (whose worker threads never touch `trace`, so its assembly pass records it instead)."""
+    return {"spiked": True, "category": spike.category, "reason": spike.reason}
+
+
 def _invoke_handler(
     name: str,
     args: dict[str, Any],
@@ -189,20 +259,81 @@ def _invoke_handler(
         return result, name == require_tool
     except StorySpikedError as spike:
         if trace is not None:
-            trace.append(
-                {
-                    "tool": name,
-                    "arguments": args,
-                    "result": {
-                        "spiked": True,
-                        "category": spike.category,
-                        "reason": spike.reason,
-                    },
-                }
-            )
+            trace.append({"tool": name, "arguments": args, "result": _spike_trace_result(spike)})
         raise
     except Exception as exc:  # tool failure must not abort the article
         return {"error": str(exc)}, False
+
+
+@dataclass
+class _Spiked:
+    """A StorySpikedError a handler raised while running in `_run_tool_calls_parallel`, carried back to the calling thread as a value instead of propagating out of a worker thread.
+
+    A worker thread must not touch `trace` and must not decide the round's
+    control flow, so the spike is recorded and re-raised by the assembly
+    pass, at this call's position in the original order -- exactly what the
+    sequential path does.
+    """
+
+    error: StorySpikedError
+
+
+# One call's settled outcome: either a (result, satisfied_require_tool) pair
+# or a spike to re-raise in call order.
+_Outcome = tuple[dict[str, Any], bool] | _Spiked
+
+
+@dataclass
+class _Reservation:
+    """One call's outcome from the sequential, non-blocking reservation pass.
+
+    `resolved` is a ready (result, satisfied_require_tool) pair for a call
+    that's already fully decided WITHOUT running its handler (malformed
+    arguments, a call-cap refusal, or an exact-repeat dedup nudge) -- None
+    means the handler still genuinely needs to run.
+    """
+
+    call: NormalizedToolCall
+    resolved: tuple[dict[str, Any], bool] | None
+
+
+def _reserve_tool_call(
+    call: NormalizedToolCall,
+    *,
+    seen_calls: set[str],
+    tool_call_counts: dict[str, int],
+) -> _Reservation:
+    """Fast, in-memory bookkeeping for one call: the cap check, the dedup check, and (only for a call that clears both) the seen_calls/tool_call_counts mutation that must land before the handler runs. Never invokes a handler and never touches `trace` -- callers do that afterward, once they know whether this call resolved immediately or needs `_invoke_handler`.
+
+    Must be called for every call in a round SEQUENTIALLY, in call order,
+    before any handler invocation is dispatched (in parallel or otherwise):
+    this is the one part of the per-call sequence that is a genuine
+    check-then-mutate race if two calls run it concurrently (two identical
+    or capped calls could both pass their check before either updates the
+    shared `seen_calls`/`tool_call_counts`), so it stays single-threaded by
+    construction rather than behind a lock.
+    """
+    if call.args is None:
+        return _Reservation(call, ({"error": "malformed tool arguments"}, False))
+
+    name, args = call.name, call.args
+    cap = CALL_CAPPED_TOOLS.get(name)
+    sig = f"{name}:{json.dumps(args, sort_keys=True)}"
+
+    if cap is not None and tool_call_counts.get(name, 0) >= cap:
+        return _Reservation(call, (_capped_refusal(name, tool_call_counts[name]), False))
+    if _is_dedup_nudge_case(sig, seen_calls, name, args):
+        return _Reservation(call, (_dedup_note(name, args), False))
+
+    seen_calls.add(sig)
+    if cap is not None:
+        tool_call_counts[name] = tool_call_counts.get(name, 0) + 1
+    return _Reservation(call, None)
+
+
+def _trace_arguments(call: NormalizedToolCall) -> Any:  # noqa: ANN401 -- str for a malformed call, dict otherwise; trace["arguments"] is legitimately either
+    """What to record as `trace["arguments"]` for one call: the raw unparsed text for a malformed call (its `args` never existed), otherwise the parsed arguments."""
+    return call.raw_args if call.args is None else call.args
 
 
 def _execute_tool_call(
@@ -214,32 +345,148 @@ def _execute_tool_call(
     require_tool: str | None,
     trace: list[dict[str, Any]] | None,
 ) -> tuple[dict[str, Any], bool]:
-    """Execute one model-requested tool call (or refuse/nudge past a cap or exact repeat this session), record it to the trace, and return (result, satisfied_require_tool)."""
-    if call.args is None:
-        malformed: dict[str, Any] = {"error": "malformed tool arguments"}
-        if trace is not None:
-            trace.append({"tool": call.name, "arguments": call.raw_args, "result": malformed})
-        return malformed, False
-
-    name, args = call.name, call.args
-    cap = CALL_CAPPED_TOOLS.get(name)
-    sig = f"{name}:{json.dumps(args, sort_keys=True)}"
-
-    if cap is not None and tool_call_counts.get(name, 0) >= cap:
-        result, satisfied_require_tool = _capped_refusal(name, tool_call_counts[name]), False
-    elif _is_dedup_nudge_case(sig, seen_calls, name, args):
-        result, satisfied_require_tool = _dedup_note(name, args), False
+    """Execute one model-requested tool call (or refuse/nudge past a cap or exact repeat this session), record it to the trace, and return (result, satisfied_require_tool). Fully sequential -- reserve, then (if not already resolved) invoke, then record -- used directly for a round that can't be safely parallelized (see _STORY_TERMINATING_TOOLS) and to build the reservation/invoke pieces `_run_tool_calls_parallel` composes differently for everything else."""
+    reservation = _reserve_tool_call(call, seen_calls=seen_calls, tool_call_counts=tool_call_counts)
+    if reservation.resolved is not None:
+        result, satisfied_require_tool = reservation.resolved
     else:
-        seen_calls.add(sig)
-        if cap is not None:
-            tool_call_counts[name] = tool_call_counts.get(name, 0) + 1
         result, satisfied_require_tool = _invoke_handler(
-            name, args, handlers=handlers, require_tool=require_tool, trace=trace
+            call.name, call.args, handlers=handlers, require_tool=require_tool, trace=trace
         )
 
     if trace is not None:
-        trace.append({"tool": name, "arguments": args, "result": result})
+        trace.append({"tool": call.name, "arguments": _trace_arguments(call), "result": result})
     return result, satisfied_require_tool
+
+
+def _assemble_round_results(
+    reservations: list[_Reservation],
+    results: list[_Outcome | None],
+    *,
+    trace: list[dict[str, Any]] | None,
+) -> tuple[list[tuple[NormalizedToolCall, dict[str, Any]]], bool]:
+    """Fold one round's settled outcomes back into (entries, required_satisfied), appending to `trace` in the ORIGINAL call order regardless of which handler finished first. Runs only in the calling thread -- this is the single writer of `trace` for a parallelized round. A carried-back spike is recorded and re-raised at its own position, so every call ordered before it is already on the trace, exactly as the sequential path leaves it."""
+    entries: list[tuple[NormalizedToolCall, dict[str, Any]]] = []
+    required_satisfied = False
+    for reservation, outcome in zip(reservations, results, strict=True):
+        call = reservation.call
+        if outcome is None:  # pragma: no cover -- every index is resolved or invoked above
+            raise AssertionError(f"tool call {call.name!r} was never resolved")
+        if isinstance(outcome, _Spiked):
+            if trace is not None:
+                trace.append(
+                    {
+                        "tool": call.name,
+                        "arguments": _trace_arguments(call),
+                        "result": _spike_trace_result(outcome.error),
+                    }
+                )
+            raise outcome.error
+        result, satisfied = outcome
+        required_satisfied = required_satisfied or satisfied
+        if trace is not None:
+            trace.append({"tool": call.name, "arguments": _trace_arguments(call), "result": result})
+        entries.append((call, result))
+    return entries, required_satisfied
+
+
+def _run_tool_calls_parallel(
+    tool_calls: list[NormalizedToolCall],
+    *,
+    handlers: dict[str, Any],
+    seen_calls: set[str],
+    tool_call_counts: dict[str, int],
+    require_tool: str | None,
+    trace: list[dict[str, Any]] | None,
+) -> tuple[list[tuple[NormalizedToolCall, dict[str, Any]]], bool]:
+    """Execute one round's tool calls, parallelizing the slow I/O-bound handler invocations while keeping the fast bookkeeping race-free and the recorded order deterministic.
+
+    Three passes:
+
+    1. Reservation (sequential, in the calling thread, in call order): each
+       call's cap/dedup decision via `_reserve_tool_call`. No handler runs
+       here and nothing here is slow, so no lock is needed -- this whole
+       pass completes before any thread starts.
+    2. Execution (parallel): every call whose handler still needs to run is
+       split into `_SERIALIZED_TOOLS` (browser-backed: one shared
+       PlaywrightSession per compose plus its own per-compose position/
+       budget state, or its own throwaway Chromium launch), run one at a
+       time in the calling thread, and everything else, dispatched
+       concurrently to a thread pool bounded by
+       `LLM_TOOL_LOOP_MAX_PARALLEL_CALLS` (these are I/O-bound: indexer/
+       algod queries, X/web search, plain HTTP API reads -- see
+       app/core/http_client.py for why the shared httpx.Client is verified
+       safe to call from multiple threads at once).
+    3. Assembly (sequential, in the calling thread): every worker thread
+       only computes and returns a (index, result) pair -- it never mutates
+       `trace` or any other shared collection itself. Only this pass, back
+       in the calling thread, appends to `trace` and builds the returned
+       (call, result) list, walking every call in its ORIGINAL order
+       regardless of which handler happened to finish first. That ordering
+       is deliberate: the research digest formatter, admin transcript
+       viewers, and tests all read `trace` sequentially.
+
+    Should not be called for a round containing a `_STORY_TERMINATING_TOOLS`
+    call -- `_handle_tool_calls_round` routes those through the fully
+    sequential `_execute_tool_call` path instead. A StorySpikedError from a
+    handler NOT on that list is still handled correctly here rather than
+    losing the round's trace (see `_Spiked`), so the list staying exhaustive
+    is a speed/side-effect concern, not a correctness cliff.
+    """
+    reservations = [
+        _reserve_tool_call(call, seen_calls=seen_calls, tool_call_counts=tool_call_counts)
+        for call in tool_calls
+    ]
+    results: list[_Outcome | None] = [r.resolved for r in reservations]
+    pending = [i for i, r in enumerate(reservations) if r.resolved is None]
+    serial_indices = [i for i in pending if reservations[i].call.name in _SERIALIZED_TOOLS]
+    parallel_indices = [i for i in pending if reservations[i].call.name not in _SERIALIZED_TOOLS]
+
+    def _invoke(idx: int) -> tuple[int, _Outcome]:
+        call = reservations[idx].call
+        # trace=None: a worker thread must never touch the shared `trace`
+        # list itself -- only the assembly pass below does, sequentially.
+        # A spike is carried back as a value for the same reason: it has to
+        # be recorded and re-raised from the calling thread, in call order.
+        try:
+            return idx, _invoke_handler(
+                call.name, call.args, handlers=handlers, require_tool=require_tool, trace=None
+            )
+        except StorySpikedError as spike:
+            return idx, _Spiked(spike)
+
+    def _run_serial_calls_here() -> None:
+        for idx in serial_indices:
+            i, outcome = _invoke(idx)
+            results[i] = outcome
+
+    if parallel_indices:
+        max_workers = min(len(parallel_indices), LLM_TOOL_LOOP_MAX_PARALLEL_CALLS)
+        pool = concurrent.futures.ThreadPoolExecutor(
+            max_workers=max_workers, thread_name_prefix="tool-call"
+        )
+        try:
+            futures = [pool.submit(_invoke, i) for i in parallel_indices]
+            # Runs concurrently with the pool above -- serialized calls touch
+            # no state the pool's handlers touch, so there's no reason to
+            # wait for one before starting the other.
+            _run_serial_calls_here()
+            for future in concurrent.futures.as_completed(futures):
+                i, outcome = future.result()
+                results[i] = outcome
+        finally:
+            # cancel_futures + wait=False, NOT a `with` block: on the normal
+            # path every future is already done and this returns at once,
+            # but when SoftTimeLimitExceeded (or KeyboardInterrupt) is raised
+            # into this thread mid-round, `with`'s shutdown(wait=True) would
+            # block the whole task's cleanup until every queued call --
+            # including ones that never started -- ran to completion.
+            # CLAUDE.md invariant 2.6 wants that bookkeeping to run promptly.
+            pool.shutdown(wait=False, cancel_futures=True)
+    else:
+        _run_serial_calls_here()
+
+    return _assemble_round_results(reservations, results, trace=trace)
 
 
 class ToolLoopAdapter:
@@ -322,25 +569,45 @@ def _handle_tool_calls_round(
     trace: list[dict[str, Any]] | None,
     required_satisfied: bool,
 ) -> tuple[str | None, bool]:
-    """Handle a round where the model made tool calls: salvage a bogus-tool-call final article, or execute every real call and fold the results back in. Returns (salvaged_final_or_None, required_satisfied)."""
+    """Handle a round where the model made tool calls: salvage a bogus-tool-call final article, or execute every real call (in parallel where it's safe to) and fold the results back in. Returns (salvaged_final_or_None, required_satisfied)."""
     salvaged = adapter.try_salvage(result)
     if salvaged is not None:
         return salvaged, required_satisfied
 
     adapter.append_assistant_turn(result)
-    entries: list[tuple[NormalizedToolCall, dict[str, Any]]] = []
-    for call in result.tool_calls:
-        tool_result, satisfied = _execute_tool_call(
-            call,
+
+    if any(call.name in _STORY_TERMINATING_TOOLS for call in result.tool_calls):
+        # A story-terminating call (abort_article) can raise uncaught to end
+        # the compose outright, and the model may have listed other calls
+        # after it in the same round -- the pre-parallelization loop never
+        # even attempted those, deliberately (see _STORY_TERMINATING_TOOLS).
+        # Preserve that exactly by running this one round through the plain
+        # sequential path instead of the parallel one below.
+        entries: list[tuple[NormalizedToolCall, dict[str, Any]]] = []
+        for call in result.tool_calls:
+            tool_result, satisfied = _execute_tool_call(
+                call,
+                handlers=handlers,
+                seen_calls=seen_calls,
+                tool_call_counts=tool_call_counts,
+                require_tool=require_tool,
+                trace=trace,
+            )
+            if satisfied:
+                required_satisfied = True
+            entries.append((call, tool_result))
+    else:
+        entries, satisfied_any = _run_tool_calls_parallel(
+            result.tool_calls,
             handlers=handlers,
             seen_calls=seen_calls,
             tool_call_counts=tool_call_counts,
             require_tool=require_tool,
             trace=trace,
         )
-        if satisfied:
+        if satisfied_any:
             required_satisfied = True
-        entries.append((call, tool_result))
+
     adapter.append_tool_results(entries)
     return None, required_satisfied
 

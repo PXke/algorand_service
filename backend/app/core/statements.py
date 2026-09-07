@@ -38,6 +38,7 @@ from algorand_shared.crawler_statements import (
     URL_QUEUE_INSERT,
     URL_QUEUE_INSERT_PENDING,
 )
+from algorand_shared.ecosystem_statements import EcosystemStmts as EcosystemStmts
 from algorand_shared.platform_statements import (
     CLASSIFIER_FEEDBACK_INSERT_BY_TIME,
     DOMAIN_TRACKING_INSERT,
@@ -817,13 +818,16 @@ class X402DirectoryStmts:
     # writes the same badge everywhere: the service decides what they hold
     # (the existing badge when the payer is unchanged, empty otherwise) and
     # the workers probe beat (algorand_shared.x402_statements.X402ProbeStmts)
-    # sets or clears them between writes.
+    # sets or clears them between writes. boosted_until (migration 114) is
+    # carried the same way -- ListingService.renew() is the only writer, see
+    # its own docstring.
     UPSERT_LISTING = _Stmt(
         "INSERT INTO algorand_platform.x402_listings ("
         "url_hash, url, price, assets, description, schema_json, tags, "
         "term_end, settlement_tx_id, created_at, payer, category, "
-        "verified_wallet, verified_at, reimburses, contact"
-        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        "verified_wallet, verified_at, reimburses, contact, source, discovered_from, "
+        "boosted_until"
+        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
     )
     # First-time listing path: a lightweight transaction, so two concurrent
     # first-time listers of the same url cannot both observe "not listed" and
@@ -834,21 +838,23 @@ class X402DirectoryStmts:
         "INSERT INTO algorand_platform.x402_listings ("
         "url_hash, url, price, assets, description, schema_json, tags, "
         "term_end, settlement_tx_id, created_at, payer, category, "
-        "verified_wallet, verified_at, reimburses, contact"
-        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) IF NOT EXISTS"
+        "verified_wallet, verified_at, reimburses, contact, source, discovered_from, "
+        "boosted_until"
+        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) IF NOT EXISTS"
     )
     GET_LISTING = _Stmt(
         "SELECT url_hash, url, price, assets, description, schema_json, tags, "
         "term_end, settlement_tx_id, created_at, payer, verified_wallet, verified_at, category, "
-        "reimburses, contact "
+        "reimburses, contact, source, discovered_from, boosted_until "
         "FROM algorand_platform.x402_listings WHERE url_hash = ?"
     )
     INSERT_RECENCY = _Stmt(
         "INSERT INTO algorand_platform.x402_listings_by_recency ("
         "directory, created_at, url_hash, url, price, assets, description, "
         "schema_json, tags, term_end, settlement_tx_id, payer, category, "
-        "verified_wallet, verified_at, reimburses, contact"
-        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        "verified_wallet, verified_at, reimburses, contact, source, discovered_from, "
+        "boosted_until"
+        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
     )
     # Deletes the row a re-listing supersedes. Needs the exact created_at of
     # the previous listing (read from x402_listings first), since created_at is
@@ -863,10 +869,14 @@ class X402DirectoryStmts:
     DELETE_LISTING = _Stmt("DELETE FROM algorand_platform.x402_listings WHERE url_hash = ?")
     # Newest-first by clustering order; the LIMIT is bound, never interpolated,
     # and the caller clamps it (no unbounded listings, CLAUDE.md section 4).
+    # PAID listings only (CassandraListingStore._write_projections only ever
+    # writes a SOURCE_AUTO_DISCOVERED item into LIST_AUTO_DISCOVERED's table
+    # below, never here) -- an auto-discovered import can never crowd a real
+    # paid listing out of this feed.
     LIST_RECENT = _Stmt(
         "SELECT url_hash, url, price, assets, description, schema_json, tags, "
         "term_end, settlement_tx_id, created_at, payer, verified_wallet, verified_at, category, "
-        "reimburses, contact "
+        "reimburses, contact, source, discovered_from, boosted_until "
         "FROM algorand_platform.x402_listings_by_recency "
         "WHERE directory = ? LIMIT ?"
     )
@@ -875,13 +885,16 @@ class X402DirectoryStmts:
     # single-partition newest-first read with no ALLOW FILTERING. The
     # listing's category (099) is one more row here under the reserved tag
     # `category:<name>` (StoredListing.projection_tags), which is how
-    # GET /x402/search?category= reads with no fourth table.
+    # GET /x402/search?category= reads with no fourth table. PAID listings
+    # only, same as INSERT_RECENCY -- an auto-discovered stub has no tags and
+    # is never written here.
     INSERT_BY_TAG = _Stmt(
         "INSERT INTO algorand_platform.x402_listings_by_tag ("
         "tag, created_at, url_hash, url, price, assets, description, "
         "schema_json, tags, term_end, settlement_tx_id, payer, category, "
-        "verified_wallet, verified_at, reimburses, contact"
-        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        "verified_wallet, verified_at, reimburses, contact, source, discovered_from, "
+        "boosted_until"
+        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
     )
     # Same addressing rule as DELETE_RECENCY: created_at is a clustering
     # column, so the previous listing's exact created_at is needed.
@@ -892,9 +905,37 @@ class X402DirectoryStmts:
     LIST_BY_TAG = _Stmt(
         "SELECT url_hash, url, price, assets, description, schema_json, tags, "
         "term_end, settlement_tx_id, created_at, payer, verified_wallet, verified_at, category, "
-        "reimburses, contact "
+        "reimburses, contact, source, discovered_from, boosted_until "
         "FROM algorand_platform.x402_listings_by_tag "
         "WHERE tag = ? LIMIT ?"
+    )
+    # Auto-discovered ("unclaimed") listing feed (migration 113) -- a SEPARATE
+    # recency projection from x402_listings_by_recency, at its own constant
+    # partition (AUTO_DISCOVERED_PARTITION), so an import of many free stubs
+    # can never crowd a real paid listing out of LIST_RECENT/LIST_BY_TAG.
+    # Same column shape as INSERT_RECENCY/LIST_RECENT; only
+    # discovery_import.py writes here. See ListingService.search()'s
+    # paid-first merge and CassandraListingStore's class docstring.
+    INSERT_AUTO_DISCOVERED_RECENCY = _Stmt(
+        "INSERT INTO algorand_platform.x402_listings_auto_discovered_by_recency ("
+        "directory, created_at, url_hash, url, price, assets, description, "
+        "schema_json, tags, term_end, settlement_tx_id, payer, category, "
+        "verified_wallet, verified_at, reimburses, contact, source, discovered_from"
+        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+    )
+    # Deletes the row a claim (a real payer relisting a previously
+    # auto-discovered url) supersedes -- see
+    # CassandraListingStore._write_projections' claim-transition branch.
+    DELETE_AUTO_DISCOVERED_RECENCY = _Stmt(
+        "DELETE FROM algorand_platform.x402_listings_auto_discovered_by_recency "
+        "WHERE directory = ? AND created_at = ? AND url_hash = ?"
+    )
+    LIST_AUTO_DISCOVERED = _Stmt(
+        "SELECT url_hash, url, price, assets, description, schema_json, tags, "
+        "term_end, settlement_tx_id, created_at, payer, verified_wallet, verified_at, category, "
+        "reimburses, contact, source, discovered_from "
+        "FROM algorand_platform.x402_listings_auto_discovered_by_recency "
+        "WHERE directory = ? LIMIT ?"
     )
 
 
@@ -904,19 +945,25 @@ class X402BoardStmts:
     # Full INSERT, never a partial UPDATE: a partial write to either board
     # table would upsert a row whose unwritten columns read back as null, the
     # same phantom-row class articles_feed hit (CLAUDE.md section 3).
+    # boosted_until (migration 114) is carried the same way -- BoardService.
+    # renew() is the only writer, see its own docstring. category (migration
+    # 120) is carried the same way too -- only BoardService.create() writes it.
     UPSERT_PLACEMENT = _Stmt(
         "INSERT INTO algorand_platform.x402_board_entries ("
-        "entry_id, link, name, pitch, payer, term_end, settlement_tx_id, created_at"
-        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+        "entry_id, link, name, pitch, payer, term_end, settlement_tx_id, created_at, "
+        "boosted_until, category"
+        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
     )
     GET_PLACEMENT = _Stmt(
         "SELECT entry_id, link, name, pitch, payer, term_end, settlement_tx_id, "
-        "created_at FROM algorand_platform.x402_board_entries WHERE entry_id = ?"
+        "created_at, boosted_until, category FROM algorand_platform.x402_board_entries "
+        "WHERE entry_id = ?"
     )
     INSERT_RECENCY = _Stmt(
         "INSERT INTO algorand_platform.x402_board_by_recency ("
-        "board, created_at, entry_id, link, name, pitch, payer, term_end, settlement_tx_id"
-        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        "board, created_at, entry_id, link, name, pitch, payer, term_end, settlement_tx_id, "
+        "boosted_until, category"
+        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
     )
     # Deletes the row a renewed placement supersedes. Needs the exact
     # created_at of the previous placement (read from x402_board_entries
@@ -932,8 +979,34 @@ class X402BoardStmts:
     # not part of the key, so a CQL filter on it would need ALLOW FILTERING.
     LIST_RECENT = _Stmt(
         "SELECT entry_id, link, name, pitch, payer, term_end, settlement_tx_id, "
-        "created_at FROM algorand_platform.x402_board_by_recency "
+        "created_at, boosted_until, category FROM algorand_platform.x402_board_by_recency "
         "WHERE board = ? LIMIT ?"
+    )
+    # Category lookup projection (migration 120), same shape/reasoning as
+    # x402_listings_by_tag (096): x402_board_entries stores category as a
+    # plain column, not part of any key, so filtering by it would need
+    # ALLOW FILTERING on a non-key column, which CLAUDE.md section 4
+    # forbids. One row per placement, keyed by its (already-validated,
+    # closed-enum) category -- a placement carries exactly one category, so
+    # (unlike the directory's multi-tag projection) there is never more than
+    # one row to write or delete per placement here.
+    INSERT_BY_CATEGORY = _Stmt(
+        "INSERT INTO algorand_platform.x402_board_by_category ("
+        "category, created_at, entry_id, link, name, pitch, payer, term_end, "
+        "settlement_tx_id, boosted_until"
+        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+    )
+    # Deletes the row a relisted/recategorized placement supersedes. Needs the
+    # previous row's own (category, created_at) -- both can change on a
+    # relist -- read from x402_board_entries before this runs.
+    DELETE_BY_CATEGORY = _Stmt(
+        "DELETE FROM algorand_platform.x402_board_by_category "
+        "WHERE category = ? AND created_at = ? AND entry_id = ?"
+    )
+    LIST_BY_CATEGORY = _Stmt(
+        "SELECT entry_id, link, name, pitch, payer, term_end, settlement_tx_id, "
+        "created_at, boosted_until FROM algorand_platform.x402_board_by_category "
+        "WHERE category = ? LIMIT ?"
     )
     # Click-through counter (migration 098), its own table because a counter
     # column cannot share a table with non-counter columns. Bumped only by
@@ -942,10 +1015,27 @@ class X402BoardStmts:
         "UPDATE algorand_platform.x402_board_clicks SET clicks = clicks + 1 WHERE entry_id = ?"
     )
     GET_CLICKS = _Stmt("SELECT clicks FROM algorand_platform.x402_board_clicks WHERE entry_id = ?")
+    # Click-event time series (migration 120) for the owner-only click-
+    # analytics read -- a SEPARATE table from the counter above (a counter
+    # column cannot share a table with non-counter columns either). Table-
+    # level TTL bounds storage; the caller-facing read is independently
+    # bounded again by BoardService.click_history's own days/limit clamp
+    # (CLAUDE.md section 4), same two-layer-bound precedent as
+    # x402_uptime_checks_by_url / x402_uptime_history_max_days.
+    INSERT_CLICK_EVENT = _Stmt(
+        "INSERT INTO algorand_platform.x402_board_click_events ("
+        "entry_id, clicked_at, referrer"
+        ") VALUES (?, ?, ?)"
+    )
+    LIST_CLICK_EVENTS = _Stmt(
+        "SELECT entry_id, clicked_at, referrer FROM algorand_platform.x402_board_click_events "
+        "WHERE entry_id = ? AND clicked_at >= ? LIMIT ?"
+    )
     # Admin removal of one placement: a point delete of the canonical row.
-    # The recency projection row is removed with DELETE_RECENCY (which needs
-    # the created_at read from this row first). The click counter is left in
-    # place -- see CassandraPlacementStore.delete.
+    # The recency projection row is removed with DELETE_RECENCY and the
+    # category projection with DELETE_BY_CATEGORY (both need the created_at/
+    # category read from this row first). The click counter and click-event
+    # log are left in place -- see CassandraPlacementStore.delete.
     DELETE_PLACEMENT = _Stmt("DELETE FROM algorand_platform.x402_board_entries WHERE entry_id = ?")
 
 
@@ -1026,6 +1116,19 @@ class X402FeaturesStmts:
         "WHERE board = ? AND created_at = ? AND request_id = ?"
     )
     DELETE_CLAIMS = _Stmt("DELETE FROM algorand_platform.x402_feature_claims WHERE request_id = ?")
+    # Request-level lifecycle status (migration 119), DISTINCT from the claims
+    # rows above -- see app/modules/x402_features/models/domain.py's
+    # FEATURE_STATUS_* for the full reasoning. A genuine UPDATE of an
+    # already-existing row (see CassandraFeatureStore.update_status for why
+    # that is not the articles_feed phantom-row hazard), and a single-column
+    # point read mirroring GET_VOTE_TOTAL's shape for the batched multi-id
+    # read (get_statuses).
+    UPDATE_STATUS = _Stmt(
+        "UPDATE algorand_platform.x402_feature_requests SET status = ? WHERE request_id = ?"
+    )
+    GET_STATUS = _Stmt(
+        "SELECT status FROM algorand_platform.x402_feature_requests WHERE request_id = ?"
+    )
 
 
 class X402Stmts:
@@ -1485,10 +1588,16 @@ class X402SocialStmts:
     # non-illegal_content case, design doc section 5.3 step 4) and the
     # recency browse projection (so GET /groups can filter it out --
     # bounded scan, sorted in Python, group_service.list_recent).
+    # `tags` (migration 115, Group Discovery by tag) is on the canonical row
+    # only, not the recency projection -- same thin-projection precedent
+    # x402_social_agents_by_recency already sets (see StoredGroup's own
+    # docstring): the plain, unfiltered GET /groups newest-first browse never
+    # needed a group's tags before, and this keeps that projection's write
+    # shape unchanged.
     INSERT_GROUP = _Stmt(
         "INSERT INTO algorand_platform.x402_social_groups ("
-        "group_id, name, description, owner, created_at, settlement_tx_id, hidden_platform"
-        ") VALUES (?, ?, ?, ?, ?, ?, ?)"
+        "group_id, name, description, owner, created_at, settlement_tx_id, hidden_platform, tags"
+        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
     )
     INSERT_GROUP_RECENCY = _Stmt(
         "INSERT INTO algorand_platform.x402_social_groups_by_recency ("
@@ -1497,11 +1606,31 @@ class X402SocialStmts:
     )
     GET_GROUP = _Stmt(
         "SELECT group_id, name, description, owner, created_at, settlement_tx_id, "
-        "hidden_platform FROM algorand_platform.x402_social_groups WHERE group_id = ?"
+        "hidden_platform, tags FROM algorand_platform.x402_social_groups WHERE group_id = ?"
     )
     LIST_GROUPS_RECENT = _Stmt(
         "SELECT bucket, created_at, group_id, name, description, owner, hidden_platform "
         "FROM algorand_platform.x402_social_groups_by_recency WHERE bucket = ? LIMIT ?"
+    )
+    # -- Group Discovery by tag (migration 115): a lookup table so
+    # GET /groups?tag= can filter by tag without ALLOW FILTERING on
+    # x402_social_groups.tags (CLAUDE.md section 4). One row per (tag,
+    # group_id); written once at group creation time only (group_service.py)
+    # -- there is no PATCH /groups to keep this in sync with later. Unlike
+    # x402_listings_by_tag, this carries NO denormalized group fields --
+    # just the id and created_at -- so a later hidden_platform change to the
+    # canonical row can never make this projection lie; the caller always
+    # point-reads GET_GROUP for the real row (same shape as
+    # LIST_AGENTS_BY_INTEREST above). LIMIT is always bound to
+    # domain.GROUP_TAG_CANDIDATE_CAP, never the caller's own requested page
+    # size -- one popular tag must not become an unbounded partition scan.
+    UPSERT_GROUP_TAG = _Stmt(
+        "INSERT INTO algorand_platform.x402_social_groups_by_tag "
+        "(tag, group_id, created_at) VALUES (?, ?, ?)"
+    )
+    LIST_GROUPS_BY_TAG = _Stmt(
+        "SELECT group_id, created_at FROM algorand_platform.x402_social_groups_by_tag "
+        "WHERE tag = ? LIMIT ?"
     )
     UPSERT_GROUP_MEMBER = _Stmt(
         "INSERT INTO algorand_platform.x402_social_group_members ("
@@ -1784,31 +1913,70 @@ class X402SocialStmts:
         "FROM algorand_platform.x402_social_removals WHERE case_id = ?"
     )
 
+    # -- Private messages (DMs, migration 122) -- see that migration's own
+    # note on why DM send is free/session-authenticated rather than paid. --
+    INSERT_DM_MESSAGE = _Stmt(
+        "INSERT INTO algorand_platform.x402_social_dm_messages ("
+        "conversation_id, created_at, message_id, sender, recipient, body"
+        ") VALUES (?, ?, ?, ?, ?, ?)"
+    )
+    # Newest-first by clustering order; LIMIT is always bound, never
+    # interpolated, and the caller clamps it (CLAUDE.md section 4: no
+    # unbounded listings) -- same shape as LIST_COMMENTS.
+    LIST_DM_MESSAGES = _Stmt(
+        "SELECT conversation_id, created_at, message_id, sender, recipient, body "
+        "FROM algorand_platform.x402_social_dm_messages WHERE conversation_id = ? LIMIT ?"
+    )
+    # Idempotent overwrite-in-place, one row per (wallet, peer_wallet) --
+    # same "re-stamp on write, never delete-then-reinsert" shape
+    # x402_social_follows' INSERT_FOLLOW already uses (this table is not
+    # itself clustered by recency, so there is no old position to remove).
+    UPSERT_DM_CONVERSATION = _Stmt(
+        "INSERT INTO algorand_platform.x402_social_dm_conversations ("
+        "wallet, peer_wallet, conversation_id, last_message_at, last_sender, "
+        "last_message_preview"
+        ") VALUES (?, ?, ?, ?, ?, ?)"
+    )
+    # Bounded single-partition scan (LIMIT domain.DM_CONVERSATION_SCAN_LIMIT,
+    # never a caller-supplied page size) -- the caller sorts by
+    # last_message_at and clamps to its own requested page size in Python,
+    # the same bounded-scan-then-sort trade LIST_FOLLOWING/LIST_FOLLOWERS
+    # already make for "most recently followed."
+    LIST_DM_CONVERSATIONS = _Stmt(
+        "SELECT wallet, peer_wallet, conversation_id, last_message_at, last_sender, "
+        "last_message_preview "
+        "FROM algorand_platform.x402_social_dm_conversations WHERE wallet = ? LIMIT ?"
+    )
+
 
 # --------------------------------------------------------------------------- #
 # x402_storage_backups
 # --------------------------------------------------------------------------- #
 class X402StorageStmts:
-    """Prepared statements for x402 agent backup storage (migrations 111 and 112).
+    """Prepared statements for x402 agent backup storage (migrations 111, 112 and 115).
 
     Canonical table is partitioned by wallet, clustered newest-first by
     backup_id (a timeuuid). The expiry projection (112) is partitioned by
     the UTC date of expires_at so the reaper can find globally-due rows
-    without ALLOW FILTERING.
+    without ALLOW FILTERING. Migration 115 adds `current_version` to the
+    canonical table and a second, one-level-down (versions table + its own
+    expiry projection) pair for per-version history -- see
+    app/modules/x402_storage/models/domain.py's StoredBackupVersion.
     """
 
     # Full INSERT, never a partial UPDATE (CLAUDE.md section 3) -- used for
     # both create() and every later mutation (renew's expires_at/
-    # settlement_tx_id, delete's status flip), each writing every column.
+    # settlement_tx_id, delete's status flip, add_version's new content),
+    # each writing every column.
     UPSERT_BACKUP = _Stmt(
         "INSERT INTO algorand_platform.x402_storage_backups ("
         "wallet, backup_id, connector, connector_params, size_bytes, content_hash, "
-        "label, created_at, expires_at, status, settlement_tx_id"
-        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        "label, created_at, expires_at, status, settlement_tx_id, current_version"
+        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
     )
     GET_BACKUP = _Stmt(
         "SELECT wallet, backup_id, connector, connector_params, size_bytes, content_hash, "
-        "label, created_at, expires_at, status, settlement_tx_id "
+        "label, created_at, expires_at, status, settlement_tx_id, current_version "
         "FROM algorand_platform.x402_storage_backups WHERE wallet = ? AND backup_id = ?"
     )
     # Newest-first by construction (CLUSTERING ORDER BY (backup_id DESC)) --
@@ -1816,7 +1984,7 @@ class X402StorageStmts:
     # after this LIMITed read, same shape as x402_directory.search().
     LIST_RECENT = _Stmt(
         "SELECT wallet, backup_id, connector, connector_params, size_bytes, content_hash, "
-        "label, created_at, expires_at, status, settlement_tx_id "
+        "label, created_at, expires_at, status, settlement_tx_id, current_version "
         "FROM algorand_platform.x402_storage_backups WHERE wallet = ? LIMIT ?"
     )
     INSERT_BY_EXPIRY = _Stmt(
@@ -1831,6 +1999,90 @@ class X402StorageStmts:
     LIST_BY_EXPIRY_DAY = _Stmt(
         "SELECT expiry_day, expires_at, wallet, backup_id "
         "FROM algorand_platform.x402_storage_by_expiry WHERE expiry_day = ? LIMIT ?"
+    )
+
+    # ── migration 115: per-version history ──
+    # Full INSERT -- written once at creation (version 1 alongside every new
+    # canonical row, or version N+1 by add_version); the ONE later mutation
+    # is the status flip to 'deleted' on a whole-backup delete or the
+    # reaper's own per-version delete, each a full re-INSERT of every
+    # column, same rule as UPSERT_BACKUP.
+    UPSERT_BACKUP_VERSION = _Stmt(
+        "INSERT INTO algorand_platform.x402_storage_backup_versions ("
+        "wallet, backup_id, version, connector, connector_params, size_bytes, "
+        "content_hash, label, created_at, expires_at, status, settlement_tx_id"
+        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+    )
+    GET_BACKUP_VERSION = _Stmt(
+        "SELECT wallet, backup_id, version, connector, connector_params, size_bytes, "
+        "content_hash, label, created_at, expires_at, status, settlement_tx_id "
+        "FROM algorand_platform.x402_storage_backup_versions "
+        "WHERE wallet = ? AND backup_id = ? AND version = ?"
+    )
+    # Newest-version-first by construction (CLUSTERING ORDER BY (version
+    # DESC)) -- returns rows of every status; the service filters to
+    # active/unexpired after this LIMITed read, same shape as LIST_RECENT.
+    LIST_BACKUP_VERSIONS = _Stmt(
+        "SELECT wallet, backup_id, version, connector, connector_params, size_bytes, "
+        "content_hash, label, created_at, expires_at, status, settlement_tx_id "
+        "FROM algorand_platform.x402_storage_backup_versions "
+        "WHERE wallet = ? AND backup_id = ? LIMIT ?"
+    )
+    INSERT_VERSION_BY_EXPIRY = _Stmt(
+        "INSERT INTO algorand_platform.x402_storage_version_by_expiry ("
+        "expiry_day, expires_at, wallet, backup_id, version"
+        ") VALUES (?, ?, ?, ?, ?)"
+    )
+    # A lightweight transaction (IF NOT EXISTS), used ONLY by add_version()'s
+    # own version-slot claim -- unlike UPSERT_BACKUP_VERSION (used for
+    # create()'s version 1, where backup_id is a fresh random uuid with a
+    # negligible collision chance, and for the later status-flip-to-deleted
+    # mutation of an already-known row), the version number a concurrent
+    # add_version computes (backup.current_version + 1) is NOT
+    # collision-free: two callers reading the same stale current_version
+    # would otherwise both INSERT the SAME (wallet, backup_id, version) row,
+    # the second silently clobbering the first's connector pointer and
+    # orphaning its already-paid-for bytes with no path back to them
+    # (finding #5, 2026-09-06). Exactly one INSERT is applied; the loser's
+    # was_applied is False and it raises StorageError("version_conflict")
+    # instead of ever reaching the head update.
+    INSERT_BACKUP_VERSION_IF_ABSENT = _Stmt(
+        "INSERT INTO algorand_platform.x402_storage_backup_versions ("
+        "wallet, backup_id, version, connector, connector_params, size_bytes, "
+        "content_hash, label, created_at, expires_at, status, settlement_tx_id"
+        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) IF NOT EXISTS"
+    )
+    DELETE_VERSION_BY_EXPIRY = _Stmt(
+        "DELETE FROM algorand_platform.x402_storage_version_by_expiry "
+        "WHERE expiry_day = ? AND expires_at = ? AND wallet = ? AND backup_id = ? AND version = ?"
+    )
+    LIST_VERSIONS_BY_EXPIRY_DAY = _Stmt(
+        "SELECT expiry_day, expires_at, wallet, backup_id, version "
+        "FROM algorand_platform.x402_storage_version_by_expiry WHERE expiry_day = ? LIMIT ?"
+    )
+
+
+# --------------------------------------------------------------------------- #
+# x402_uptime_checks_by_url (migration 117)
+# --------------------------------------------------------------------------- #
+class X402UptimeHistoryStmts:
+    """Prepared statements for x402 uptime-check history (a caller-url's own real-check trend).
+
+    One partition per url_hash, clustered newest-first by checked_at.
+    Write-only on the check route's hot path (one INSERT per genuine
+    cache-miss check); the read is a single bounded range scan within one
+    partition, always LIMITed (CLAUDE.md section 4).
+    """
+
+    INSERT = _Stmt(
+        "INSERT INTO algorand_platform.x402_uptime_checks_by_url ("
+        "url_hash, checked_at, url, reachable, http_status, response_time_ms, error"
+        ") VALUES (?, ?, ?, ?, ?, ?, ?)"
+    )
+    LIST_SINCE = _Stmt(
+        "SELECT url_hash, checked_at, url, reachable, http_status, response_time_ms, error "
+        "FROM algorand_platform.x402_uptime_checks_by_url "
+        "WHERE url_hash = ? AND checked_at >= ? LIMIT ?"
     )
 
 

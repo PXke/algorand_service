@@ -6,6 +6,8 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
+    "build:marketplace": "VITE_PRODUCT=marketplace vite build",
+    "build:registry": "VITE_PRODUCT=registry vite build",
     "preview": "vite preview",
     "check": "svelte-check --tsconfig ./tsconfig.app.json && tsc -p tsconfig.node.json",
     "test": "vitest run"
@@ -25,6 +27,7 @@
   "dependencies": {
     "@blockshake/defly-connect": "^1.2.1",
     "@bugsnag/browser": "^8.10.0",
+    "@bugsnag/browser-performance": "^3.4.1",
     "@galaxypay/lute-connect": "^3.0.1",
     "@perawallet/connect": "^1.6.0",
     "algosdk": "^3.6.0",

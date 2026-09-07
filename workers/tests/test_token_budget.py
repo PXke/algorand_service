@@ -48,7 +48,7 @@ def test_serialize_big_result_trims_text_but_keeps_links() -> None:
 
 
 def test_fit_elides_oldest_tool_results_first() -> None:
-    """Elides the oldest tool result first to fit budget, keeping the newest and non-tool roles intact."""
+    """Elides the oldest tool result first to fit budget in the RETURNED list, keeping the newest and non-tool roles intact -- and never mutates the original list/dicts it was given (that original is the live debug transcript in real callers)."""
     convo = [
         {"role": "system", "content": "S" * 400},
         {"role": "user", "content": "U" * 400},
@@ -56,22 +56,45 @@ def test_fit_elides_oldest_tool_results_first() -> None:
         {"role": "assistant", "content": "draft so far"},
         {"role": "tool", "name": "fetch_url", "content": "NEW" + "y" * 4_000},
     ]
+    original_snapshot = [dict(m) for m in convo]
     before = estimate_message_tokens(convo)
-    after = fit_messages_to_budget(convo, budget_tokens=before - 500)
+    trimmed, after = fit_messages_to_budget(convo, budget_tokens=before - 500)
     assert after <= before - 500
-    # Oldest tool result elided first; newest kept; non-tool roles untouched.
-    assert "elided" in convo[2]["content"]
-    assert convo[4]["content"].startswith("NEW")
-    assert convo[0]["content"] == "S" * 400
-    assert convo[3]["content"] == "draft so far"
+    # Oldest tool result elided first; newest kept; non-tool roles untouched --
+    # all in the RETURNED list.
+    assert "elided" in trimmed[2]["content"]
+    assert trimmed[4]["content"].startswith("NEW")
+    assert trimmed[0]["content"] == "S" * 400
+    assert trimmed[3]["content"] == "draft so far"
+    # The original list passed in is completely untouched -- it's the caller's
+    # persisted/live transcript, not scratch space for this one request.
+    assert convo == original_snapshot
+
+
+def test_fit_does_not_mutate_original_message_dicts() -> None:
+    """Regression: the original tool-message dict objects must not be mutated in place, even though the elided entries in the returned list are new dicts. A caller sharing the same list as debug["messages"] (see _OpenAIToolLoopAdapter) must see the real content survive."""
+    old_tool_msg = {"role": "tool", "name": "fetch_url", "content": "OLD" + "x" * 4_000}
+    convo = [
+        {"role": "system", "content": "S" * 400},
+        old_tool_msg,
+        {"role": "tool", "name": "fetch_url", "content": "NEW" + "y" * 4_000},
+    ]
+    before = estimate_message_tokens(convo)
+    trimmed, _ = fit_messages_to_budget(convo, budget_tokens=before - 500)
+    assert "elided" in trimmed[1]["content"]
+    # The dict object referenced by both `convo` and any other holder (e.g.
+    # debug["messages"]) still has its real content.
+    assert old_tool_msg["content"] == "OLD" + "x" * 4_000
+    assert convo[1]["content"] == "OLD" + "x" * 4_000
 
 
 def test_fit_noop_when_under_budget() -> None:
-    """Leaves the conversation untouched when it's already under the token budget."""
+    """Leaves the conversation untouched (and returns the SAME list) when it's already under the token budget."""
     convo = [{"role": "tool", "name": "t", "content": "small"}]
     snapshot = [dict(m) for m in convo]
-    fit_messages_to_budget(convo, budget_tokens=10_000)
+    trimmed, _ = fit_messages_to_budget(convo, budget_tokens=10_000)
     assert convo == snapshot
+    assert trimmed is convo
 
 
 def test_estimate_message_tokens_counts_multimodal_image_blocks() -> None:

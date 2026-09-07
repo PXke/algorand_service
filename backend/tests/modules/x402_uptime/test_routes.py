@@ -4,8 +4,14 @@ Same convention `tests/modules/x402_scan/test_scan_route_refund.py` uses:
 require_paid_request is monkeypatched directly to a canned PaymentResult
 (the payment gate itself is covered elsewhere), and the service-level
 functions the real `_uptime_product_write` calls (get_cached/is_fresh/
-target_over_budget/check_target/set_cached) are faked individually so the
-route's OWN branching logic runs for real.
+target_over_budget/sample_target/set_cached) are faked individually so the
+route's OWN branching logic runs for real. `sample_target` (not
+`check_target` directly) is the seam here: it is a coarser seam one level
+above the actual multi-sample/percentile logic, which has its own dedicated
+tests in test_percentiles.py. `history_service.record` is left un-mocked in
+most tests -- the default HistoryService() resolves to a real, in-process
+InMemoryUptimeHistoryStore (settings.x402_uptime_history_store defaults to
+"memory"), so it is exercised for real with no I/O.
 """
 
 from __future__ import annotations
@@ -65,6 +71,12 @@ _UP_RESULT = UptimeResult(
 
 
 @pytest.fixture(autouse=True)
+def _already_paid(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Skip the pre-parse 402 for header-less requests: every route test here models a request that already carries a payment (the gate is stubbed), so the unpaid challenge is out of scope. Its ordering has its own tests in tests/test_x402_unpaid_challenge.py."""
+    monkeypatch.setattr(uptime_routes, "challenge_if_unpaid", lambda *_a, **_kw: None)
+
+
+@pytest.fixture(autouse=True)
 def _no_mark_fulfilled_side_effects(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(uptime_routes, "mark_fulfilled", lambda *_a, **_kw: True)
 
@@ -115,10 +127,10 @@ def test_bad_scheme_is_rejected_before_the_payment_gate(monkeypatch: pytest.Monk
 def test_fresh_cache_hit_never_calls_the_real_checker_or_the_target_limiter(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A fresh cache hit is served as-is; neither the target limiter nor a real check ever runs."""
+    """A fresh cache hit is served as-is (percentiles included); neither the target limiter, a real check, nor a history write ever runs."""
     monkeypatch.setattr(circuit_breaker, "is_tripped", lambda _resource: False)
     monkeypatch.setattr(uptime_routes, "require_paid_request", lambda *_a, **_kw: _settled_result())
-    cached = CachedCheck(result=_UP_RESULT, cached_at=1000.0)
+    cached = CachedCheck(result=_UP_RESULT, cached_at=1000.0, latency_samples_ms=[90, 100, 110])
     monkeypatch.setattr(uptime_routes, "get_cached", lambda _url: cached)
     monkeypatch.setattr(uptime_routes, "is_fresh", lambda _cached, **_kw: True)
     monkeypatch.setattr(
@@ -128,8 +140,15 @@ def test_fresh_cache_hit_never_calls_the_real_checker_or_the_target_limiter(
     )
     monkeypatch.setattr(
         uptime_routes,
-        "check_target",
+        "sample_target",
         lambda *_a, **_kw: (_ for _ in ()).throw(AssertionError("must not run a real check")),
+    )
+    monkeypatch.setattr(
+        uptime_routes.history_service,
+        "record",
+        lambda *_a, **_kw: (_ for _ in ()).throw(
+            AssertionError("a cache hit is not a new measurement")
+        ),
     )
 
     response = uptime_routes.x402_uptime_check(_request())
@@ -139,6 +158,12 @@ def test_fresh_cache_hit_never_calls_the_real_checker_or_the_target_limiter(
     assert body["cache"] == "hit"
     assert body["reachable"] is True
     assert body["settlement_tx_id"] == "TX-UPTIME-1"
+    # Percentiles come from the ORIGINAL check's stored samples, not just
+    # the single `result.response_time_ms` -- see CachedCheck.latency_samples_ms.
+    assert body["latency_samples"] == 3
+    assert body["latency_min_ms"] == 90
+    assert body["latency_p50_ms"] == 100
+    assert body["latency_max_ms"] == 110
 
 
 def test_cache_miss_under_budget_runs_a_real_check_and_caches_it(
@@ -149,12 +174,18 @@ def test_cache_miss_under_budget_runs_a_real_check_and_caches_it(
     monkeypatch.setattr(uptime_routes, "require_paid_request", lambda *_a, **_kw: _settled_result())
     monkeypatch.setattr(uptime_routes, "get_cached", lambda _url: None)
     monkeypatch.setattr(uptime_routes, "target_over_budget", lambda _key: False)
-    monkeypatch.setattr(uptime_routes, "check_target", lambda *_a, **_kw: _UP_RESULT)
+    monkeypatch.setattr(uptime_routes, "sample_target", lambda _url, **_kw: (_UP_RESULT, [100]))
     set_calls: list[str] = []
     monkeypatch.setattr(
         uptime_routes,
         "set_cached",
-        lambda url, _result: (set_calls.append(url), 2000.0)[1],
+        lambda url, _result, _latencies: (set_calls.append(url), 2000.0)[1],
+    )
+    record_calls: list[str] = []
+    monkeypatch.setattr(
+        uptime_routes.history_service,
+        "record",
+        lambda url, _result, **_kw: record_calls.append(url),
     )
 
     response = uptime_routes.x402_uptime_check(_request())
@@ -164,6 +195,7 @@ def test_cache_miss_under_budget_runs_a_real_check_and_caches_it(
     assert body["cache"] == "miss"
     assert body["reachable"] is True
     assert set_calls == [_URL]
+    assert record_calls == [_URL]
 
 
 def test_budget_exhausted_with_a_stale_cache_serves_it_labeled_stale(
@@ -178,7 +210,7 @@ def test_budget_exhausted_with_a_stale_cache_serves_it_labeled_stale(
     monkeypatch.setattr(uptime_routes, "target_over_budget", lambda _key: True)
     monkeypatch.setattr(
         uptime_routes,
-        "check_target",
+        "sample_target",
         lambda *_a, **_kw: (_ for _ in ()).throw(AssertionError("must not run a real check")),
     )
 
@@ -243,8 +275,14 @@ def test_a_down_result_is_a_normal_charged_answer_not_a_refund(
         error="timeout",
         redirect_chain=[_URL],
     )
-    monkeypatch.setattr(uptime_routes, "check_target", lambda *_a, **_kw: down_result)
-    monkeypatch.setattr(uptime_routes, "set_cached", lambda _url, _result: 2000.0)
+    monkeypatch.setattr(uptime_routes, "sample_target", lambda _url, **_kw: (down_result, [10]))
+    monkeypatch.setattr(uptime_routes, "set_cached", lambda _url, _result, _latencies: 2000.0)
+    recorded: list[UptimeResult] = []
+    monkeypatch.setattr(
+        uptime_routes.history_service,
+        "record",
+        lambda _url, result, **_kw: recorded.append(result),
+    )
 
     fulfilled: list[str] = []
     monkeypatch.setattr(
@@ -263,6 +301,10 @@ def test_a_down_result_is_a_normal_charged_answer_not_a_refund(
     assert body["error"] == "timeout"
     assert body["cache"] == "miss"
     assert fulfilled == ["TX-UPTIME-1"]
+    # Regression: a downtime IS the point of the history feature -- a failed
+    # check must still be recorded, not silently dropped as "not a success".
+    assert len(recorded) == 1
+    assert recorded[0].reachable is False
 
 
 def test_promo_success_never_marks_fulfilled_and_carries_no_settlement(
@@ -275,8 +317,8 @@ def test_promo_success_never_marks_fulfilled_and_carries_no_settlement(
     )
     monkeypatch.setattr(uptime_routes, "get_cached", lambda _url: None)
     monkeypatch.setattr(uptime_routes, "target_over_budget", lambda _key: False)
-    monkeypatch.setattr(uptime_routes, "check_target", lambda *_a, **_kw: _UP_RESULT)
-    monkeypatch.setattr(uptime_routes, "set_cached", lambda _url, _result: 2000.0)
+    monkeypatch.setattr(uptime_routes, "sample_target", lambda _url, **_kw: (_UP_RESULT, [100]))
+    monkeypatch.setattr(uptime_routes, "set_cached", lambda _url, _result, _latencies: 2000.0)
     fulfilled: list[str] = []
     monkeypatch.setattr(
         uptime_routes,

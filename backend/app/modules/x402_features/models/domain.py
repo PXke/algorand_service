@@ -21,6 +21,34 @@ FEATURES_PARTITION = "default"
 # keeps the batched read on the FREE browse surface strictly bounded.
 CLAIMS_SCAN_LIMIT = 100
 
+# A request's status (migration 119), DISTINCT from the per-claim rows above:
+# claims stay exactly as they were -- multiple per request AND per wallet,
+# a public statement of intent, never exclusive (see StoredClaim below). This
+# is a separate, request-level lifecycle value layered on top, so a filer or
+# any other agent can answer "where does this actually stand" without
+# scanning the claims log themselves.
+#
+#   pending   -- no claim has ever been made (the default; see get_statuses).
+#   claimed   -- at least one claim exists. Set on EVERY successful claim()
+#                call, including a repeat one and one that arrives after
+#                `completed` -- a new claim always means someone is (still,
+#                or again) building this, so it reopens a completed request
+#                rather than being blocked by it (owner-style default: an
+#                abandoned or lapsed "done" should be reclaimable by the next
+#                builder, same as the claim mechanism itself is non-exclusive).
+#   completed -- an explicit, PAID, self-declared "this is done" from a
+#                wallet that has claimed the request at some point (not
+#                necessarily the latest claimer -- see FeatureService.
+#                mark_completed). This is NEVER verified: same "evidence, not
+#                a guarantee" honesty this codebase already applies to
+#                receipts and grading (docs/x402-execution-trust-evaluation.md)
+#                -- there is no adjudication of whether the work was actually
+#                done, on purpose, to avoid re-deriving the already-rejected
+#                escrow-with-an-enforcement-arm pattern.
+FEATURE_STATUS_PENDING = "pending"
+FEATURE_STATUS_CLAIMED = "claimed"
+FEATURE_STATUS_COMPLETED = "completed"
+
 
 class FeatureError(PlatformError):
     """A feature-board error mapped to an HTTP status."""
@@ -79,6 +107,9 @@ class StoredClaim:
     are allowed: a claim is a public statement of intent that the payment
     makes costly, not an exclusive lock on the request -- two builders may
     both be building it, and a builder may re-declare after going quiet.
+    This row shape is UNCHANGED by the request-level status added in
+    migration 119 (see FEATURE_STATUS_* above) -- status is a derived
+    lifecycle value layered on top, not a field on the claim itself.
     """
 
     request_id: str

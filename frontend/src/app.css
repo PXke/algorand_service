@@ -372,6 +372,53 @@ button:focus-visible {
   max-width: var(--max-wide);
 }
 
+/* ---- Page head ------------------------------------------------------
+   Every index page (feed, most-read, glossary, search, contact, 404) opens
+   the same way: accent slug, mono kicker, display title, one-line lead.
+   One rule owns the rhythm so the routes cannot drift apart. */
+.page-head {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.page-head h1 {
+  margin: 0;
+  font-size: clamp(28px, 4vw, 34px);
+  line-height: 1.15;
+}
+
+.page-head .lead {
+  margin: 0;
+  max-width: 42rem;
+}
+
+/* ---- Compact page head ------------------------------------------------
+   For small, single-purpose tool pages (the registry, marketplace utility
+   pages) -- .page-head above is deliberately newspaper-front-page scaled
+   (34px display h1, 42rem lead) for the editorial index pages it was built
+   for; reusing it on a directory-listing tool reads as oversized (found
+   2026-09-07, operator: "too big, design pretty bad"). Same rhythm/shape,
+   smaller scale -- so a tool page still opens the way every page on the
+   site does, just not shouting. */
+.compact-head {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.compact-head h1 {
+  margin: 0;
+  font-size: clamp(20px, 2.4vw, 24px);
+  line-height: 1.2;
+}
+
+.compact-head .lead {
+  margin: 0;
+  max-width: 38rem;
+  font-size: 14px;
+}
+
 /* ---- Editorial grid -------------------------------------------------
    Lead and the markets tape sit above this, full measure. This pair is
    the pack of stories and the most-read column — a ruled page, not a
@@ -802,5 +849,217 @@ button:focus-visible {
     animation: none;
     transition: none;
   }
+}
+
+/* ---- x402 marketplace redesign (routes/marketplace/*.svelte) --------
+   Shared row-list / section-card primitives for the 2026-09-07 marketplace
+   nav/page redesign (docs/x402-marketplace-product-redesign.md §4). Global,
+   not per-component, so Directory/Board/Requests/Trust/Services/Developers
+   read one implementation instead of five copies of the same list markup
+   (CLAUDE.md §3). The legacy News-build hub page (routes/X402.svelte,
+   routes/X402Endpoints.svelte) keeps its own local styles, untouched. */
+.x402-rows {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.x402-row {
+  padding: 14px 0;
+  border-bottom: 1px solid var(--border);
+  min-width: 0;
+}
+.x402-row-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 16px;
+  min-width: 0;
+}
+.x402-row-name {
+  font-family: var(--font-display);
+  font-size: 1.02rem;
+  font-weight: 700;
+  letter-spacing: -0.2px;
+  color: var(--on-surface);
+  text-decoration: none;
+  overflow-wrap: anywhere;
+  min-width: 0;
+}
+a.x402-row-name:hover {
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  text-decoration-thickness: 1.5px;
+}
+.x402-row-price {
+  flex-shrink: 0;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--accent);
+}
+.x402-row-desc {
+  margin: 6px 0 0;
+  font-family: var(--font-serif);
+  font-size: 0.95rem;
+  line-height: 1.5;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+.x402-row-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+  margin: 8px 0 0;
+}
+.x402-badge,
+.x402-stamp,
+.x402-tagchip {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.x402-badge {
+  padding: 2px 6px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+}
+.x402-badge.live {
+  color: var(--gain);
+  border-color: var(--gain);
+}
+.x402-badge.gated {
+  color: var(--muted);
+}
+.x402-badge.verified {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+.x402-tagchip {
+  border: 0;
+  padding: 0;
+  background: none;
+  color: var(--accent);
+  cursor: pointer;
+  text-transform: none;
+}
+.x402-tagchip:hover {
+  text-decoration: underline;
+}
+.x402-hit-count {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.7px;
+  text-transform: uppercase;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+.x402-hit-count .sep {
+  margin-inline: 6px;
+  color: var(--subtle);
+}
+.x402-empty {
+  padding: 24px 0;
+  font-family: var(--font-serif);
+}
+.x402-err {
+  color: var(--danger);
+}
+/* Overview's section cards + Trust/Services' product-line rows. */
+.x402-section-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 16px;
+}
+.x402-section-card {
+  padding: 18px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  background: var(--surface);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+}
+.x402-section-card h2 {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: 1.1rem;
+  font-weight: 700;
+}
+.x402-section-card p {
+  margin: 0;
+  font-family: var(--font-serif);
+  font-size: 0.92rem;
+  line-height: 1.5;
+  color: var(--muted);
+}
+.x402-product-lines {
+  list-style: none;
+  margin: 4px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+}
+.x402-product-line {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 0;
+  border-top: 1px solid var(--border);
+}
+.x402-product-line-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 10px;
+}
+.x402-product-line-head a,
+.x402-product-line-head span.x402-product-name {
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: 0.95rem;
+  color: var(--on-surface);
+  text-decoration: none;
+}
+.x402-product-line-head a:hover {
+  text-decoration: underline;
+}
+.x402-product-line p {
+  margin: 0;
+  font-family: var(--font-serif);
+  font-size: 0.85rem;
+  line-height: 1.45;
+  color: var(--muted);
+}
+.x402-stat-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 20px 32px;
+}
+.x402-stat {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.x402-stat .value {
+  font-family: var(--font-mono);
+  font-size: 1.6rem;
+  font-weight: 700;
+  color: var(--on-surface);
+  font-variant-numeric: tabular-nums;
+}
+.x402-stat .label {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.7px;
+  text-transform: uppercase;
+  color: var(--muted);
 }
 

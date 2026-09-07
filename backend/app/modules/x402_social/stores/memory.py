@@ -16,6 +16,8 @@ from app.modules.x402_social.models.domain import (
     RemovalRecord,
     StoredCase,
     StoredComment,
+    StoredDmConversation,
+    StoredDmMessage,
     StoredGroup,
     StoredMembership,
     StoredPost,
@@ -63,6 +65,7 @@ class InMemorySocialStore:
         self._groups: dict[str, StoredGroup] = {}
         self._group_names: dict[str, str] = {}  # name_norm -> group_id
         self._groups_recency: dict[str, StoredGroup] = {}
+        self._group_tags: dict[str, dict[str, int]] = {}  # tag -> {group_id: created_at_epoch}
         self._memberships: dict[tuple[str, str], StoredMembership] = {}  # (group_id, wallet)
 
         # Phase S2 (design doc section 5).
@@ -75,6 +78,12 @@ class InMemorySocialStore:
         self._standing: dict[str, StoredStanding] = {}
         self._reporter_slots: dict[str, set[str]] = {}  # reporter -> {case_id, ...}
         self._removals: dict[str, RemovalRecord] = {}  # case_id -> record
+
+        # Private messages (DMs, migration 122).
+        self._dm_messages: dict[str, list[StoredDmMessage]] = {}  # conversation_id -> log
+        self._dm_conversations: dict[
+            tuple[str, str], StoredDmConversation
+        ] = {}  # (wallet, peer_wallet) -> row
 
         # Guards every read-modify-write below (reaction/follow/membership
         # dict mutation is not atomic under CPython's bytecode the same way
@@ -353,6 +362,20 @@ class InMemorySocialStore:
             )
             return [replace(g) for g in ordered[: max(0, limit)]]
 
+    # ----------------------------------------------------------------- #
+    # Group Discovery by tag (added 2026-09-06)
+    # ----------------------------------------------------------------- #
+    def upsert_group_tag(self, *, tag: str, group_id: str, created_at_epoch: int) -> None:
+        """Add (or overwrite) one (tag, group_id) row to the tag lookup."""
+        with self._lock:
+            self._group_tags.setdefault(tag, {})[group_id] = created_at_epoch
+
+    def list_groups_by_tag(self, tag: str, *, limit: int) -> list[tuple[str, int]]:
+        """Up to `limit` (group_id, created_at_epoch) pairs registered under one tag."""
+        with self._lock:
+            items = list(self._group_tags.get(tag, {}).items())
+        return items[: max(0, limit)]
+
     def mark_group_hidden_platform(self, item: StoredGroup) -> None:
         """Set hidden_platform=True on the canonical row and the recency projection row (Phase S2)."""
         with self._lock:
@@ -552,3 +575,36 @@ class InMemorySocialStore:
         """Point read of one hard-delete audit record, or None."""
         with self._lock:
             return self._removals.get(case_id)
+
+    # ----------------------------------------------------------------- #
+    # Private messages (DMs, migration 122)
+    # ----------------------------------------------------------------- #
+    def insert_dm_message(self, item: StoredDmMessage) -> None:
+        """Append one message to its conversation's log."""
+        with self._lock:
+            self._dm_messages.setdefault(item.conversation_id, []).append(item)
+
+    def list_dm_messages(self, conversation_id: str, *, limit: int) -> list[StoredDmMessage]:
+        """Return one conversation's messages newest-first, at most `limit` of them.
+
+        Ties on created_at break by message_id ascending -- same
+        "created_at DESC, id ASC" tie-break shape LIST_POSTS_BY_AUTHOR's own
+        in-memory mirror uses (`(-p.created_at_epoch, p.post_id)`).
+        """
+        with self._lock:
+            ordered = sorted(
+                self._dm_messages.get(conversation_id, []),
+                key=lambda m: (-m.created_at_epoch, m.message_id),
+            )
+            return ordered[: max(0, limit)]
+
+    def upsert_dm_conversation(self, item: StoredDmConversation) -> None:
+        """Create or overwrite-in-place one wallet's own conversation-list row for `item.peer_wallet`."""
+        with self._lock:
+            self._dm_conversations[(item.wallet, item.peer_wallet)] = item
+
+    def list_dm_conversations(self, wallet: str, *, limit: int) -> list[StoredDmConversation]:
+        """Return `wallet`'s own conversation rows, at most `limit` of them (unordered -- the caller sorts by last_message_at)."""
+        with self._lock:
+            rows = [row for (w, _peer), row in self._dm_conversations.items() if w == wallet]
+            return rows[: max(0, limit)]

@@ -23,6 +23,7 @@ import pytest
 
 pytest.importorskip("x402")
 
+from x402.extensions.bazaar import validate_discovery_extension
 from x402.mechanisms.avm.constants import ALGORAND_TESTNET_CAIP2
 from x402.schemas.payments import PaymentRequirements
 from x402.schemas.responses import SupportedKind, SupportedResponse
@@ -157,6 +158,12 @@ def _settled_result(payer: str = _PAYER, txid: str = "TX123") -> x402_guard.Paym
         asset_id="10458941",
         network=ALGORAND_TESTNET_CAIP2,
     )
+
+
+@pytest.fixture(autouse=True)
+def _already_paid(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Skip the pre-parse 402 for header-less requests: every route test here models a request that already carries a payment (the gate is stubbed, or run against the offline facilitator), so the unpaid challenge is out of scope. Its ordering has its own tests in tests/test_x402_unpaid_challenge.py."""
+    monkeypatch.setattr(board_routes, "challenge_if_unpaid", lambda *_a, **_kw: None)
 
 
 @pytest.fixture
@@ -596,7 +603,11 @@ def test_board_read_fails_open_when_redis_is_down(
 # POST /board/:entry_id/renew — paid, owner only
 # --------------------------------------------------------------------------- #
 def _placed(
-    store: InMemoryPlacementStore, *, payer: str = _PAYER, now: datetime | None = None
+    store: InMemoryPlacementStore,
+    *,
+    payer: str = _PAYER,
+    category: str = "other",
+    now: datetime | None = None,
 ) -> StoredPlacement:
     return BoardService(store).create(
         normalized_link="https://agent.example.com/home",
@@ -604,6 +615,7 @@ def _placed(
         pitch="first",
         payer=payer,
         settlement_tx_id="TX1",
+        category=category,
         now=now,
     )
 
@@ -629,13 +641,13 @@ def test_renewing_an_unknown_entry_is_a_404_that_never_reaches_the_gate(
 
 
 @pytest.mark.usefixtures("testnet_settings", "fake_redis")
-def test_renew_without_payment_is_a_402_at_the_placement_price_with_discovery(
+def test_renew_without_payment_is_a_402_at_the_boost_price_with_discovery(
     store: InMemoryPlacementStore, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """An existing entry with no payment header yields a 402 at the board price, declaring Bazaar discovery and the owner-only rule."""
+    """An existing entry with no payment header yields a 402 at the board's boost price, declaring Bazaar discovery and the owner-only rule."""
     from x402.http.utils import decode_payment_required_header
 
-    monkeypatch.setattr(settings, "x402_board_price", "$0.05")
+    monkeypatch.setattr(settings, "x402_board_boost_price", "$0.05")
     monkeypatch.setattr(board_routes, "board_service", BoardService(store))
     placement = _placed(store)
 
@@ -646,14 +658,26 @@ def test_renew_without_payment_is_a_402_at_the_placement_price_with_discovery(
     assert payment_required.accepts[0].amount == "50000"
     assert (payment_required.extensions or {}).get("bazaar") is not None
     assert "Only the wallet that placed" in (payment_required.resource.description or "")
+    # One Bazaar entry for the route template, not one per entry id; and a
+    # POST must declare a body extension or the facilitator's validator
+    # rejects it and never catalogs the route (found live 2026-09-05).
+    assert payment_required.resource.url.endswith("/api/v1/x402/board/{entry_id}/renew")
+    assert validate_discovery_extension(payment_required.extensions["bazaar"]).valid
 
 
-def test_a_settled_renewal_extends_the_term_from_its_current_end_and_marks_fulfilled(
+def test_a_settled_boost_stacks_from_its_current_end_and_never_touches_the_term_and_marks_fulfilled(
     store: InMemoryPlacementStore, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Renewing early adds a full term on top of what is left, keeps created_at, records the new txid, and marks the settlement fulfilled after the store write."""
+    """Boosting early adds a full boost window on top of what is left, keeps created_at AND term_end untouched, records the new txid, and marks the settlement fulfilled after the store write.
+
+    Regression coverage for the 2026-09-06 repurposing: renew() used to
+    extend term_end_epoch (survival); the board is not probed, so nothing
+    refreshes term_end any more -- it now stacks onto boosted_until_epoch
+    (search-ranking priority) and must never move term_end_epoch.
+    """
     monkeypatch.setattr(circuit_breaker, "is_tripped", lambda _resource: False)
     monkeypatch.setattr(settings, "x402_board_term_days", 14)
+    monkeypatch.setattr(settings, "x402_board_boost_days", 3)
     monkeypatch.setattr(board_routes, "board_service", BoardService(store))
     monkeypatch.setattr(
         board_routes, "require_paid_request", lambda *_a, **_kw: _settled_result(txid="TXR")
@@ -673,19 +697,22 @@ def test_a_settled_renewal_extends_the_term_from_its_current_end_and_marks_fulfi
     assert response.status_code == 200
     body = json.loads(response.description)["placement"]
     assert body["entry_id"] == placement.entry_id
-    assert body["term_end_epoch"] == placement.term_end_epoch + 14 * 86400
+    assert body["term_end_epoch"] == placement.term_end_epoch
     assert body["created_at_epoch"] == placement.created_at_epoch
     assert body["settlement_tx_id"] == "TXR"
+    now_epoch = int(datetime.now(tz=UTC).timestamp())
+    assert abs(body["boosted_until_epoch"] - (now_epoch + 3 * 86400)) < 5
     stored = store.get(placement.entry_id)
     assert stored is not None
-    assert stored.term_end_epoch == body["term_end_epoch"]
-    assert fulfilled == [("TXR", "x402-board-renew")]
+    assert stored.term_end_epoch == placement.term_end_epoch
+    assert stored.boosted_until_epoch == body["boosted_until_epoch"]
+    assert fulfilled == [("TXR", "x402-board-boost")]
 
 
-def test_renewing_an_expired_placement_starts_a_fresh_term_from_now(
+def test_boosting_an_expired_placement_starts_a_fresh_boost_window_from_now(
     store: InMemoryPlacementStore,
 ) -> None:
-    """After expiry the new term runs from now, not from the long-past term end."""
+    """After the placement's term has lapsed, a boost still starts from now (not the long-past boost end) and does not resurrect term_end."""
     service = BoardService(store)
     base = datetime(2026, 1, 1, tzinfo=UTC)
     placement = _placed(store, now=base)
@@ -693,9 +720,10 @@ def test_renewing_an_expired_placement_starts_a_fresh_term_from_now(
 
     renewed = service.renew(placement=placement, payer=_PAYER, settlement_tx_id="TXR", now=later)
 
-    assert renewed.term_end_epoch == int(
-        (later + timedelta(days=settings.x402_board_term_days)).timestamp()
+    assert renewed.boosted_until_epoch == int(
+        (later + timedelta(days=settings.x402_board_boost_days)).timestamp()
     )
+    assert renewed.term_end_epoch == placement.term_end_epoch
 
 
 def test_a_different_wallet_cannot_renew_someone_elses_tile(
@@ -1166,6 +1194,438 @@ def test_place_and_renew_never_forward_promo_params(
             query={"promo": "LAUNCH1000-TEST", "promo_wallet": _PAYER},
             path=path,
             **extra_kwargs,
+        )
+    )
+
+    assert "promo_code" not in captured
+    assert "promo_wallet" not in captured
+
+
+# --------------------------------------------------------------------------- #
+# Category filter (migration 120)
+# --------------------------------------------------------------------------- #
+def test_an_omitted_category_defaults_to_other(store: InMemoryPlacementStore) -> None:
+    """No `category` on create() stores DEFAULT_BOARD_CATEGORY ('other')."""
+    placement = BoardService(store).create(
+        normalized_link="https://agent.example.com/home",
+        name="Agent",
+        pitch="first",
+        payer=_PAYER,
+        settlement_tx_id="TX1",
+    )
+    assert placement.category == "other"
+
+
+def test_category_filter_returns_only_matching_placements(
+    store: InMemoryPlacementStore,
+) -> None:
+    """`list_active(category=...)` returns only placements in that category; unfiltered browse is unaffected."""
+    service = BoardService(store)
+    finance = service.create(
+        normalized_link="https://finance.example.com/x",
+        name="Finance Bot",
+        pitch="fx",
+        payer=_PAYER,
+        settlement_tx_id="TX1",
+        category="finance",
+    )
+    service.create(
+        normalized_link="https://social.example.com/x",
+        name="Social Bot",
+        pitch="chat",
+        payer=_OTHER_PAYER,
+        settlement_tx_id="TX2",
+        category="social",
+    )
+
+    filtered = service.list_active(limit=50, category="finance")
+    assert [item.entry_id for item in filtered] == [finance.entry_id]
+
+    unfiltered = service.list_active(limit=50)
+    assert len(unfiltered) == 2
+
+
+@pytest.mark.usefixtures("fake_redis")
+def test_an_unknown_category_is_rejected_before_the_payment_gate(
+    store: InMemoryPlacementStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A bogus `category` on POST /board is a 400 taken BEFORE the gate — nobody is charged for it."""
+    monkeypatch.setattr(board_routes, "board_service", BoardService(store))
+
+    def _must_not_charge(*_args: object, **_kwargs: object) -> Never:
+        raise AssertionError("the payment gate must not run for an unplaceable category")
+
+    monkeypatch.setattr(board_routes, "require_paid_request", _must_not_charge)
+
+    response = board_routes.x402_board_place(
+        _request(
+            body=json.dumps(
+                {"link": "https://agent.example.com/x", "category": "nonsense"}
+            ).encode()
+        )
+    )
+
+    assert response.status_code == 400
+    assert "invalid_request" in response.description
+    assert board_routes.board_service.list_active(limit=50) == []
+
+
+def test_a_settled_placement_stores_and_serves_its_declared_category(
+    store: InMemoryPlacementStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A valid `category` on POST /board is stored and served back on the placement."""
+    monkeypatch.setattr(circuit_breaker, "is_tripped", lambda _resource: False)
+    monkeypatch.setattr(board_routes, "board_service", BoardService(store))
+    monkeypatch.setattr(board_routes, "require_paid_request", lambda *_a, **_kw: _settled_result())
+
+    response = board_routes.x402_board_place(
+        _request(
+            body=json.dumps({"link": "https://agent.example.com/x", "category": "AI"}).encode()
+        )
+    )
+
+    assert response.status_code == 200
+    assert json.loads(response.description)["placement"]["category"] == "ai"
+
+
+@pytest.mark.usefixtures("fake_redis")
+def test_board_read_filters_by_category(
+    store: InMemoryPlacementStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """GET /board?category= only returns tiles in that category."""
+    monkeypatch.setattr(board_routes, "board_service", BoardService(store))
+    service = BoardService(store)
+    service.create(
+        normalized_link="https://finance.example.com/x",
+        name="Finance Bot",
+        pitch="fx",
+        payer=_PAYER,
+        settlement_tx_id="TX1",
+        category="finance",
+    )
+    service.create(
+        normalized_link="https://social.example.com/x",
+        name="Social Bot",
+        pitch="chat",
+        payer=_OTHER_PAYER,
+        settlement_tx_id="TX2",
+        category="social",
+    )
+
+    result = board_routes.x402_board_read(_request(method="GET", query={"category": "finance"}))
+
+    assert [item["name"] for item in result["items"]] == ["Finance Bot"]
+
+
+@pytest.mark.usefixtures("fake_redis")
+def test_board_read_rejects_an_unknown_category(
+    store: InMemoryPlacementStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """GET /board?category=bogus is a 400, not an empty result — an agent should learn its filter is wrong."""
+    monkeypatch.setattr(board_routes, "board_service", BoardService(store))
+
+    result = board_routes.x402_board_read(_request(method="GET", query={"category": "bogus"}))
+
+    assert result.status_code == 400
+    assert "invalid_request" in result.description
+
+
+# --------------------------------------------------------------------------- #
+# Click analytics (migration 120): the click-event log and its aggregation
+# --------------------------------------------------------------------------- #
+def test_click_records_a_real_event_and_history_buckets_it_by_day(
+    store: InMemoryPlacementStore,
+) -> None:
+    """Each click() call writes a click event, and click_history() buckets them by UTC calendar day."""
+    service = BoardService(store)
+    placement = _placed(store, now=datetime(2026, 9, 1, tzinfo=UTC))
+
+    day1 = datetime(2026, 9, 1, 10, 0, tzinfo=UTC)
+    day2 = datetime(2026, 9, 2, 9, 0, tzinfo=UTC)
+    service.click(placement.entry_id, now=day1)
+    service.click(placement.entry_id, now=day1)
+    service.click(placement.entry_id, now=day2)
+
+    # Anchored to "now" being day2 so the 2-day window covers exactly these clicks.
+    history = service.click_history(placement.entry_id, days=2, limit=100, now=day2)
+
+    assert history is not None
+    assert history["entry_id"] == placement.entry_id
+    assert history["total_clicks_in_window"] == 3
+    assert history["capped"] is False
+    by_date = {row["date"]: row["clicks"] for row in history["daily"]}
+    assert by_date[day1.date().isoformat()] == 2
+    assert by_date[day2.date().isoformat()] == 1
+
+
+def test_click_history_zero_fills_days_with_no_clicks(store: InMemoryPlacementStore) -> None:
+    """A day inside the window with no clicks is reported as 0, not omitted."""
+    service = BoardService(store)
+    base = datetime(2026, 9, 1, tzinfo=UTC)
+    placement = _placed(store, now=base)
+    service.click(placement.entry_id, now=base)
+
+    history = service.click_history(placement.entry_id, days=3, limit=100, now=base)
+
+    assert history is not None
+    assert len(history["daily"]) == 3
+    assert sum(row["clicks"] for row in history["daily"]) == 1
+
+
+def test_click_history_respects_the_row_cap_and_reports_capped(
+    store: InMemoryPlacementStore,
+) -> None:
+    """More click events than the configured row cap: the read stops at the cap and says so."""
+    service = BoardService(store)
+    now = datetime(2026, 9, 1, tzinfo=UTC)
+    placement = _placed(store, now=now)
+    for _ in range(5):
+        service.click(placement.entry_id, now=now)
+
+    history = service.click_history(placement.entry_id, days=1, limit=3, now=now)
+
+    assert history is not None
+    assert history["total_clicks_in_window"] == 3
+    assert history["capped"] is True
+
+
+def test_click_history_on_an_unknown_entry_is_none(store: InMemoryPlacementStore) -> None:
+    """click_history() returns None for an unknown entry, same shape as get()."""
+    assert BoardService(store).click_history("nope", days=7, limit=100) is None
+
+
+def test_click_records_only_a_coarse_hostname_referrer(store: InMemoryPlacementStore) -> None:
+    """A full referring URL (path, query string) is never stored — only the bare host."""
+    base = datetime(2026, 9, 1, tzinfo=UTC)
+    placement = _placed(store, now=base)
+    service = BoardService(store)
+
+    service.click(
+        placement.entry_id,
+        referrer="https://Example.COM/path?utm_source=abc&session=xyz",
+        now=base,
+    )
+
+    history = service.click_history(placement.entry_id, days=1, limit=100, now=base)
+    assert history is not None
+    assert history["top_referrers"] == [{"referrer": "example.com", "clicks": 1}]
+
+
+def test_click_through_route_captures_the_referer_header(
+    store: InMemoryPlacementStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """GET /board/:entry_id/go reads the caller's Referer header and records a coarse form of it."""
+    monkeypatch.setattr(board_routes, "board_service", BoardService(store))
+    placement = _placed(store)
+
+    board_routes.x402_board_go(
+        _request(
+            method="GET",
+            path_params={"entry_id": placement.entry_id},
+            headers={"Referer": "https://linking-site.example/some/page"},
+        )
+    )
+
+    history = BoardService(store).click_history(placement.entry_id, days=1, limit=100)
+    assert history is not None
+    assert history["top_referrers"] == [{"referrer": "linking-site.example", "clicks": 1}]
+
+
+def test_a_malformed_referer_header_does_not_break_the_redirect(
+    store: InMemoryPlacementStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A garbage Referer header must not turn a real click-through into a failed redirect."""
+    monkeypatch.setattr(board_routes, "board_service", BoardService(store))
+    placement = _placed(store)
+
+    response = board_routes.x402_board_go(
+        _request(
+            method="GET",
+            path_params={"entry_id": placement.entry_id},
+            headers={"Referer": "::: not a url :::"},
+        )
+    )
+
+    assert response.status_code == 302
+    history = BoardService(store).click_history(placement.entry_id, days=1, limit=100)
+    assert history is not None
+    assert history["total_clicks_in_window"] == 1
+
+
+# --------------------------------------------------------------------------- #
+# GET /board/:entry_id/clicks — paid, owner-only click analytics
+# --------------------------------------------------------------------------- #
+@pytest.mark.usefixtures("testnet_settings", "fake_redis")
+def test_click_history_route_without_payment_returns_402_at_the_click_history_price(
+    store: InMemoryPlacementStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No payment header yields a 402 at the configured click-history price."""
+    from x402.http.utils import decode_payment_required_header
+
+    monkeypatch.setattr(settings, "x402_board_click_history_price", "$0.01")
+    monkeypatch.setattr(board_routes, "board_service", BoardService(store))
+    placement = _placed(store)
+
+    response = board_routes.x402_board_click_history(
+        _request(method="GET", path_params={"entry_id": placement.entry_id})
+    )
+
+    assert response.status_code == 402
+    offer = decode_payment_required_header(response.headers["PAYMENT-REQUIRED"]).accepts[0]
+    assert offer.amount == "10000"
+
+
+@pytest.mark.usefixtures("fake_redis")
+def test_click_history_route_unknown_entry_is_a_404_that_never_reaches_the_gate(
+    store: InMemoryPlacementStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Existence is checked before the gate: reading analytics for a missing entry costs nothing."""
+    monkeypatch.setattr(board_routes, "board_service", BoardService(store))
+
+    def _must_not_charge(*_args: object, **_kwargs: object) -> Never:
+        raise AssertionError("the payment gate must not run for an unknown entry")
+
+    monkeypatch.setattr(board_routes, "require_paid_request", _must_not_charge)
+
+    response = board_routes.x402_board_click_history(
+        _request(method="GET", path_params={"entry_id": "nope"})
+    )
+
+    assert response.status_code == 404
+    assert "not_found" in response.description
+
+
+@pytest.mark.usefixtures("fake_redis")
+def test_click_history_route_on_an_ownerless_placement_is_a_409_that_never_reaches_the_gate(
+    store: InMemoryPlacementStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A tile with no attributed payer can never pass the ownership check, so nobody is charged to find that out."""
+    monkeypatch.setattr(board_routes, "board_service", BoardService(store))
+    ownerless = BoardService(store).create(
+        normalized_link="https://agent.example.com/home",
+        name="Agent",
+        pitch="anon",
+        payer="",
+        settlement_tx_id="TXANON",
+    )
+
+    def _must_not_charge(*_args: object, **_kwargs: object) -> Never:
+        raise AssertionError("the payment gate must not run for an unreadable placement")
+
+    monkeypatch.setattr(board_routes, "require_paid_request", _must_not_charge)
+
+    response = board_routes.x402_board_click_history(
+        _request(method="GET", path_params={"entry_id": ownerless.entry_id})
+    )
+
+    assert response.status_code == 409
+    assert "not_readable" in response.description
+
+
+def test_click_history_route_rejects_a_non_owner_payment_kept_not_refunded(
+    store: InMemoryPlacementStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A different wallet's payment settles, gets a 403 with its receipt headers, and no data is returned — the payment is kept, not refunded."""
+    monkeypatch.setattr(circuit_breaker, "is_tripped", lambda _resource: False)
+    monkeypatch.setattr(board_routes, "board_service", BoardService(store))
+    monkeypatch.setattr(
+        board_routes,
+        "require_paid_request",
+        lambda *_a, **_kw: _settled_result(payer=_OTHER_PAYER, txid="TXX"),
+    )
+    monkeypatch.setattr(
+        paid_request_module,
+        "send_refund",
+        lambda **_kw: (_ for _ in ()).throw(
+            AssertionError("an ownership rejection must never attempt a refund")
+        ),
+    )
+    monkeypatch.setattr(
+        board_routes,
+        "mark_fulfilled",
+        lambda *_a, **_kw: (_ for _ in ()).throw(AssertionError("must not mark fulfilled")),
+    )
+    placement = _placed(store)
+
+    response = board_routes.x402_board_click_history(
+        _request(method="GET", path_params={"entry_id": placement.entry_id})
+    )
+
+    assert response.status_code == 403
+    assert "placement_owned_by_another_payer" in response.description
+    assert response.headers["PAYMENT-RESPONSE"] == "ok"
+
+
+def test_click_history_route_returns_the_owners_own_analytics_and_marks_fulfilled(
+    store: InMemoryPlacementStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The placing wallet's own settled read returns the real analytics payload and marks fulfilled."""
+    monkeypatch.setattr(circuit_breaker, "is_tripped", lambda _resource: False)
+    monkeypatch.setattr(board_routes, "board_service", BoardService(store))
+    monkeypatch.setattr(
+        board_routes, "require_paid_request", lambda *_a, **_kw: _settled_result(txid="TXH")
+    )
+    fulfilled: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        board_routes,
+        "mark_fulfilled",
+        lambda txid, *, resource: fulfilled.append((txid, resource)) or True,
+    )
+    placement = _placed(store)
+    BoardService(store).click(placement.entry_id, now=datetime.now(tz=UTC))
+
+    response = board_routes.x402_board_click_history(
+        _request(method="GET", path_params={"entry_id": placement.entry_id}, query={"days": "7"})
+    )
+
+    assert response.status_code == 200
+    body = json.loads(response.description)
+    assert body["entry_id"] == placement.entry_id
+    assert body["days"] == 7
+    assert body["total_clicks_in_window"] == 1
+    assert body["settlement_tx_id"] == "TXH"
+    assert fulfilled == [("TXH", "x402-board-click-history")]
+
+
+def test_click_history_route_clamps_days_to_the_configured_maximum(
+    store: InMemoryPlacementStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A caller cannot ask for an unbounded window — `days` is clamped."""
+    monkeypatch.setattr(settings, "x402_board_click_history_max_days", 5)
+    monkeypatch.setattr(circuit_breaker, "is_tripped", lambda _resource: False)
+    monkeypatch.setattr(board_routes, "board_service", BoardService(store))
+    monkeypatch.setattr(board_routes, "require_paid_request", lambda *_a, **_kw: _settled_result())
+    monkeypatch.setattr(board_routes, "mark_fulfilled", lambda *_a, **_kw: None)
+    placement = _placed(store)
+
+    response = board_routes.x402_board_click_history(
+        _request(method="GET", path_params={"entry_id": placement.entry_id}, query={"days": "9999"})
+    )
+
+    assert response.status_code == 200
+    assert json.loads(response.description)["days"] == 5
+
+
+def test_click_history_route_never_forwards_promo_params(
+    store: InMemoryPlacementStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Same promo-off invariant as place/renew: the ownership check compares `payer` against the placement's owner."""
+    monkeypatch.setattr(board_routes, "board_service", BoardService(store))
+    placement = _placed(store)
+    captured: dict = {}
+
+    def _spy_require_paid_request(*_args: object, **kwargs: object) -> object:
+        captured.update(kwargs)
+        return _settled_result()
+
+    monkeypatch.setattr(board_routes, "require_paid_request", _spy_require_paid_request)
+    monkeypatch.setattr(board_routes, "mark_fulfilled", lambda *_a, **_kw: None)
+
+    board_routes.x402_board_click_history(
+        _request(
+            method="GET",
+            path_params={"entry_id": placement.entry_id},
+            query={"promo": "LAUNCH1000-TEST", "promo_wallet": _PAYER},
         )
     )
 

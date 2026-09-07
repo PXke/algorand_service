@@ -103,6 +103,94 @@ _maybe_build_frontend() {
   echo "$hash" >"$stamp"
 }
 
+# x402.pxke.me marketplace build (2026-09-07): same source tree as the news
+# build, driven by VITE_PRODUCT=marketplace (frontend/vite.config.ts), output
+# to frontend/dist-marketplace instead of frontend/dist. Shares
+# _frontend_build_hash() with the news build (same frontend/src inputs feed
+# both) but tracks its own stamp file and output dir -- a source change
+# rebuilds both, which is correct since both builds compile the same source.
+# X402_SITE_DOMAIN must be set (deploy.conf) for this to run; an unset value
+# means the subdomain isn't provisioned yet, same "empty placeholder is a
+# no-op" convention render()/the nginx template already use.
+_maybe_build_marketplace_frontend() {
+  [[ -n "${X402_SITE_DOMAIN:-}" ]] || {
+    echo ">>> X402_SITE_DOMAIN unset — skipping marketplace frontend build" >&2
+    return 0
+  }
+
+  local stamp="$OUT_DIR/.frontend-marketplace-build.sha256"
+  local hash
+  local web="$REPO_ROOT/frontend/dist-marketplace/index.html"
+
+  if [[ "$SKIP_FRONTEND_BUILD" == "1" ]]; then
+    [[ -f "$web" ]] || {
+      echo "error: frontend skipped but no build at frontend/dist-marketplace (deploy frontend once first)" >&2
+      exit 1
+    }
+    echo ">>> Skipping Vite marketplace build (no frontend changes)" >&2
+    return 0
+  fi
+
+  hash=$(_frontend_build_hash)
+  if [[ -f "$stamp" && "$(cat "$stamp")" == "$hash" && -f "$web" ]]; then
+    echo ">>> Marketplace frontend inputs unchanged — skipping Vite build" >&2
+    return 0
+  fi
+
+  command -v npm >/dev/null 2>&1 || {
+    echo "error: npm not found (or set SKIP_FRONTEND_BUILD=1)" >&2
+    exit 1
+  }
+  # _write_vite_env / npm ci already ran (or were skipped) via
+  # _maybe_build_frontend, which always runs first -- see call site below.
+
+  echo ">>> Building Vite marketplace SPA (VITE_PRODUCT=marketplace)" >&2
+  (cd "$REPO_ROOT/frontend" && npm run build:marketplace >&2)
+  echo "$hash" >"$stamp"
+}
+
+# algorand-registry.pxke.me build (2026-09-07): third parallel product build,
+# identical shape to _maybe_build_marketplace_frontend above -- same source
+# tree, VITE_PRODUCT=registry, output to frontend/dist-registry. See that
+# function's own comment for the shared-hash/no-op-when-unprovisioned
+# reasoning, which applies here unchanged.
+_maybe_build_registry_frontend() {
+  [[ -n "${REGISTRY_SITE_DOMAIN:-}" ]] || {
+    echo ">>> REGISTRY_SITE_DOMAIN unset — skipping registry frontend build" >&2
+    return 0
+  }
+
+  local stamp="$OUT_DIR/.frontend-registry-build.sha256"
+  local hash
+  local web="$REPO_ROOT/frontend/dist-registry/index.html"
+
+  if [[ "$SKIP_FRONTEND_BUILD" == "1" ]]; then
+    [[ -f "$web" ]] || {
+      echo "error: frontend skipped but no build at frontend/dist-registry (deploy frontend once first)" >&2
+      exit 1
+    }
+    echo ">>> Skipping Vite registry build (no frontend changes)" >&2
+    return 0
+  fi
+
+  hash=$(_frontend_build_hash)
+  if [[ -f "$stamp" && "$(cat "$stamp")" == "$hash" && -f "$web" ]]; then
+    echo ">>> Registry frontend inputs unchanged — skipping Vite build" >&2
+    return 0
+  fi
+
+  command -v npm >/dev/null 2>&1 || {
+    echo "error: npm not found (or set SKIP_FRONTEND_BUILD=1)" >&2
+    exit 1
+  }
+  # _write_vite_env / npm ci already ran (or were skipped) via
+  # _maybe_build_frontend, which always runs first -- see call site below.
+
+  echo ">>> Building Vite registry SPA (VITE_PRODUCT=registry)" >&2
+  (cd "$REPO_ROOT/frontend" && npm run build:registry >&2)
+  echo "$hash" >"$stamp"
+}
+
 _prune_web_build() {
   local web="$REPO_ROOT/frontend/dist"
   find "$web" -name '*.map' -delete 2>/dev/null || true
@@ -147,6 +235,54 @@ _assemble_stage() {
     rsync -a "$STAGE_DIR/frontend_web/" "$web_cache/"
     echo "$web_fp" >"$web_cache/.fingerprint"
   fi
+
+  # x402.pxke.me marketplace build -- same cache/precompress treatment as
+  # frontend_web above, own cache dir/fingerprint since it's a distinct
+  # output tree (frontend/dist-marketplace). Only staged when the build
+  # actually ran (X402_SITE_DOMAIN set) -- an absent frontend_web_x402 in the
+  # release is a deliberate "not provisioned yet" state, not an error; the
+  # nginx template's own @X402_SITE_DOMAIN@ empty-placeholder convention
+  # already makes an unprovisioned subdomain harmless.
+  if [[ -f "$REPO_ROOT/frontend/dist-marketplace/index.html" ]]; then
+    local webx_cache="$OUT_DIR/frontend_web_x402_cache"
+    local webx_fp
+    webx_fp=$(_web_tree_fingerprint "$REPO_ROOT/frontend/dist-marketplace")
+    if [[ -f "$webx_cache/.fingerprint" && "$(cat "$webx_cache/.fingerprint")" == "$webx_fp" ]]; then
+      echo ">>> Reusing cached precompressed frontend_web_x402" >&2
+      rsync -a "$webx_cache/" "$STAGE_DIR/frontend_web_x402/"
+    else
+      rsync -a "$REPO_ROOT/frontend/dist-marketplace/" "$STAGE_DIR/frontend_web_x402/"
+      if [[ "$PACKAGE_PRECOMPRESS" == "1" ]]; then
+        bash "$REPO_ROOT/deploy/scripts/precompress_web.sh" \
+          "$STAGE_DIR/frontend_web_x402" "$PACKAGE_BROTLI_QUALITY" "$PACKAGE_PRECOMPRESS_JOBS"
+      fi
+      rm -rf "$webx_cache"
+      mkdir -p "$webx_cache"
+      rsync -a "$STAGE_DIR/frontend_web_x402/" "$webx_cache/"
+      echo "$webx_fp" >"$webx_cache/.fingerprint"
+    fi
+  fi
+
+  # algorand-registry.pxke.me build -- same shape as frontend_web_x402 above.
+  if [[ -f "$REPO_ROOT/frontend/dist-registry/index.html" ]]; then
+    local webr_cache="$OUT_DIR/frontend_web_registry_cache"
+    local webr_fp
+    webr_fp=$(_web_tree_fingerprint "$REPO_ROOT/frontend/dist-registry")
+    if [[ -f "$webr_cache/.fingerprint" && "$(cat "$webr_cache/.fingerprint")" == "$webr_fp" ]]; then
+      echo ">>> Reusing cached precompressed frontend_web_registry" >&2
+      rsync -a "$webr_cache/" "$STAGE_DIR/frontend_web_registry/"
+    else
+      rsync -a "$REPO_ROOT/frontend/dist-registry/" "$STAGE_DIR/frontend_web_registry/"
+      if [[ "$PACKAGE_PRECOMPRESS" == "1" ]]; then
+        bash "$REPO_ROOT/deploy/scripts/precompress_web.sh" \
+          "$STAGE_DIR/frontend_web_registry" "$PACKAGE_BROTLI_QUALITY" "$PACKAGE_PRECOMPRESS_JOBS"
+      fi
+      rm -rf "$webr_cache"
+      mkdir -p "$webr_cache"
+      rsync -a "$STAGE_DIR/frontend_web_registry/" "$webr_cache/"
+      echo "$webr_fp" >"$webr_cache/.fingerprint"
+    fi
+  fi
 }
 
 _precompress_stage_web() {
@@ -167,10 +303,13 @@ EOF
 
 _create_archive() {
   echo ">>> Compressing archive (xz -${PACKAGE_XZ_LEVEL})" >&2
+  local -a stage_dirs=(backend workers shared schema conduit deploy frontend_web BUILD_INFO.txt)
+  [[ -d "$STAGE_DIR/frontend_web_x402" ]] && stage_dirs+=(frontend_web_x402)
+  [[ -d "$STAGE_DIR/frontend_web_registry" ]] && stage_dirs+=(frontend_web_registry)
   XZ_OPT="-${PACKAGE_XZ_LEVEL} -T0" tar caf "$ARCHIVE" \
     --exclude='deploy/build' \
     -C "$STAGE_DIR" \
-    backend workers shared schema conduit deploy frontend_web BUILD_INFO.txt
+    "${stage_dirs[@]}"
   (
     cd "$OUT_DIR"
     sha256sum "$(basename "$ARCHIVE")" >"$(basename "$ARCHIVE").sha256"
@@ -205,6 +344,8 @@ _prune_old_archives() {
 _maybe_build_frontend
 [[ -f "$REPO_ROOT/frontend/dist/index.html" ]] \
   || { echo "error: no Vite build at frontend/dist" >&2; exit 1; }
+_maybe_build_marketplace_frontend
+_maybe_build_registry_frontend
 
 if [[ -n "${INDEXNOW_KEY:-}" ]]; then
   printf '%s' "$INDEXNOW_KEY" >"$REPO_ROOT/frontend/dist/${INDEXNOW_KEY}.txt"

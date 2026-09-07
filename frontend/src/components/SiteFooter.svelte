@@ -1,9 +1,12 @@
 <script lang="ts">
   import { messages, t } from '../lib/i18n'
   import { navigate } from '../lib/router'
+  import { config } from '../lib/config'
   import BrandMark from './BrandMark.svelte'
 
   const year = String(new Date().getFullYear())
+  const isMarketplace = config.product === 'marketplace'
+  const isRegistry = config.product === 'registry'
 
   function go(href: string, e: MouseEvent) {
     e.preventDefault()
@@ -17,55 +20,126 @@
       <div class="brand">
         <div class="nameplate">
           <BrandMark size={30} />
-          <strong class="title">{t($messages, 'appTitle')}</strong>
+          <!-- Plain literal in marketplace/registry mode, same "not a new
+               i18n key" shortcut AppShell's masthead wordmark uses -- avoids
+               the 9-locale key-parity requirement (CLAUDE.md §5) for a
+               couple of words. -->
+          <strong class="title"
+            >{isMarketplace
+              ? 'PXke x402'
+              : isRegistry
+              ? 'PXke Registry'
+              : t($messages, 'appTitle')}</strong
+          >
         </div>
-        <p class="tagline muted">{t($messages, 'footerTagline')}</p>
+        <p class="tagline muted">
+          {isMarketplace
+            ? 'x402 endpoints on Algorand: list yours, find others, pay per call.'
+            : isRegistry
+            ? 'A free, human-reviewed directory of Algorand ecosystem projects.'
+            : t($messages, 'footerTagline')}
+        </p>
       </div>
 
       <div class="cols">
-        <div class="col news">
-          <p class="heading">{t($messages, 'navNews')}</p>
-          <div class="links split">
-            <div>
-              <a href="/news" onclick={(e) => go('/news', e)}>{t($messages, 'navLatest')}</a>
-              <a href="/hot" onclick={(e) => go('/hot', e)}>{t($messages, 'hotTitle')}</a>
+        {#if isMarketplace}
+          <!-- Marketplace build: no newspaper chrome -- these are the
+               marketplace's own top-level pages (2026-09-07 redesign, see
+               docs/x402-marketplace-product-redesign.md §4.1), not newspaper
+               sections. App.svelte's route table for this build has no /x402
+               prefix and no other page -- linking off it would be a
+               self-inflicted dead end. -->
+          <div class="col news">
+            <p class="heading">Marketplace</p>
+            <div class="links split">
+              <div>
+                <a href="/directory" onclick={(e) => go('/directory', e)}>Directory</a>
+                <a href="/board" onclick={(e) => go('/board', e)}>Board</a>
+              </div>
+              <div>
+                <a href="/requests" onclick={(e) => go('/requests', e)}>Requests</a>
+                <a href="/trust" onclick={(e) => go('/trust', e)}>Trust</a>
+              </div>
             </div>
-            <div>
-              <a href="/topics" onclick={(e) => go('/topics', e)}>{t($messages, 'navTopics')}</a>
-              <a href="/feed.xml" rel="noopener">RSS</a>
+          </div>
+
+          <div class="col">
+            <p class="heading">{t($messages, 'footerAboutHeading')}</p>
+            <div class="links">
+              <a href="/list" onclick={(e) => go('/list', e)}>{t($messages, 'x402CtaListLabel')}</a>
+              <a href="/services" onclick={(e) => go('/services', e)}>Services</a>
+              <a href="/developers" onclick={(e) => go('/developers', e)}>Developers</a>
             </div>
           </div>
-        </div>
-
-        <div class="col">
-          <p class="heading">{t($messages, 'footerAboutHeading')}</p>
-          <div class="links">
-            <a href="/about" onclick={(e) => go('/about', e)}>{t($messages, 'navAbout')}</a>
-            <a href="/contact" onclick={(e) => go('/contact', e)}>{t($messages, 'navContact')}</a>
-            <a href="/glossary" onclick={(e) => go('/glossary', e)}>{t($messages, 'navGlossary')}</a>
-            <a href="/x402" onclick={(e) => go('/x402', e)}>{t($messages, 'navX402')}</a>
+        {:else if isRegistry}
+          <!-- Registry build: no newspaper chrome, no marketplace/x402 chrome
+               -- just the registry's own two pages. Same "plain literal, no
+               new i18n key" shortcut as the rest of tonight's registry nav. -->
+          <div class="col news">
+            <p class="heading">Registry</p>
+            <div class="links">
+              <a href="/registry" onclick={(e) => go('/registry', e)}>Browse</a>
+              <a href="/registry/submit" onclick={(e) => go('/registry/submit', e)}
+                >Submit a project</a
+              >
+            </div>
           </div>
-        </div>
-
-        <div class="col">
-          <p class="heading">{t($messages, 'footerFollowHeading')}</p>
-          <div class="links">
-            <a
-              href="https://bsky.app/profile/algorand.pxke.me"
-              target="_blank"
-              rel="noopener noreferrer">Bluesky</a
-            >
-            <a href="https://t.me/PXkeAlgorandNews" target="_blank" rel="noopener noreferrer"
-              >Telegram</a
-            >
+        {:else}
+          <div class="col news">
+            <p class="heading">{t($messages, 'navNews')}</p>
+            <div class="links split">
+              <div>
+                <a href="/news" onclick={(e) => go('/news', e)}>{t($messages, 'navLatest')}</a>
+                <a href="/hot" onclick={(e) => go('/hot', e)}>{t($messages, 'hotTitle')}</a>
+              </div>
+              <div>
+                <a href="/topics" onclick={(e) => go('/topics', e)}>{t($messages, 'navTopics')}</a>
+                <a href="/feed.xml" rel="noopener">RSS</a>
+              </div>
+            </div>
           </div>
-        </div>
+
+          <div class="col">
+            <p class="heading">{t($messages, 'footerAboutHeading')}</p>
+            <div class="links">
+              <a href="/about" onclick={(e) => go('/about', e)}>{t($messages, 'navAbout')}</a>
+              <a href="/contact" onclick={(e) => go('/contact', e)}>{t($messages, 'navContact')}</a>
+              <a href="/glossary" onclick={(e) => go('/glossary', e)}>{t($messages, 'navGlossary')}</a>
+              <a href="/registry" onclick={(e) => go('/registry', e)}>{t($messages, 'navRegistry')}</a>
+              <a href="/x402" onclick={(e) => go('/x402', e)}>{t($messages, 'navX402')}</a>
+            </div>
+          </div>
+        {/if}
+
+        {#if !isRegistry}
+          <!-- Social is deliberately absent from the registry build -- a
+               small, single-purpose directory, no follow-us chrome. -->
+          <div class="col">
+            <p class="heading">{t($messages, 'footerFollowHeading')}</p>
+            <div class="links">
+              <a
+                href="https://bsky.app/profile/algorand.pxke.me"
+                target="_blank"
+                rel="noopener noreferrer">Bluesky</a
+              >
+              <a href="https://t.me/PXkeAlgorandNews" target="_blank" rel="noopener noreferrer"
+                >Telegram</a
+              >
+            </div>
+          </div>
+        {/if}
       </div>
     </div>
 
     <hr class="rule" />
     <div class="colophon">
-      <p class="rights">{t($messages, 'footerRights', { year })}</p>
+      <p class="rights">
+        {isMarketplace
+          ? `© ${year} PXke x402. x402 endpoints on Algorand.`
+          : isRegistry
+          ? `© ${year} PXke Registry. A free, human-reviewed directory of Algorand projects.`
+          : t($messages, 'footerRights', { year })}
+      </p>
     </div>
   </div>
 </footer>

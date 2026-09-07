@@ -1,15 +1,19 @@
 <script lang="ts">
   import { messages, t } from '../lib/i18n'
   import { absoluteUrl } from '../lib/seo'
+  import { shareIntentUrl, type ShareKind } from '../lib/share'
   import Icon from './Icon.svelte'
 
   let {
     url,
     title,
+    tags = undefined,
     compact = false,
   }: {
     url: string
     title: string
+    /** Article tag slugs; they become the share's hashtags. */
+    tags?: readonly string[] | null
     compact?: boolean
   } = $props()
 
@@ -56,16 +60,8 @@
     }
   }
 
-  function intent(kind: 'x' | 'bluesky' | 'telegram') {
-    const u = encodeURIComponent(abs)
-    const text = encodeURIComponent(title)
-    const href =
-      kind === 'x'
-        ? `https://twitter.com/intent/tweet?url=${u}&text=${text}`
-        : kind === 'bluesky'
-          ? `https://bsky.app/intent/compose?text=${text}%20${u}`
-          : `https://t.me/share/url?url=${u}&text=${text}`
-    window.open(href, '_blank', 'noopener,noreferrer')
+  function intent(kind: ShareKind) {
+    window.open(shareIntentUrl(kind, { url: abs, title, tags }), '_blank', 'noopener,noreferrer')
     close()
   }
 </script>

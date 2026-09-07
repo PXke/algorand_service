@@ -41,6 +41,16 @@ class ListingStore(Protocol):
         """Return listings carrying the (already normalized) tag, newest-first, at most `limit`."""
         ...
 
+    def list_auto_discovered(self, *, limit: int) -> list[StoredListing]:
+        """Return auto-discovered (unclaimed) listings, newest-imported-first, at most `limit`.
+
+        Never includes a PAID listing (StoredListing.source == SOURCE_PAID) --
+        this is a separate feed from list_recent()/list_by_tag() precisely so
+        an import of many free stubs can never crowd a real paid listing out
+        of those feeds. See ListingService.search()'s paid-first merge.
+        """
+        ...
+
     def delete(self, url_hash: str) -> bool:
         """Remove the listing for a URL hash, projections included. False if it did not exist."""
         ...

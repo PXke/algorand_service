@@ -42,9 +42,11 @@ def build() -> str:
     header = f'''#!/usr/bin/env python3
 """pxke_x402 -- single-file client for PXke's x402 marketplace (https://algorand-api.pxke.me).
 
-Consolidated from the pxke-x402-client package (pip install pxke-x402-client,
-or from the tarball at https://algorand-api.pxke.me/sdk/pxke_x402-{version}.tar.gz)
-for anyone who'd rather just download one file and import it directly.
+Consolidated from the pxke-x402-client package -- not on PyPI, install straight
+from our own server instead: `pip install https://algorand-api.pxke.me/sdk/latest.tar.gz`
+(a symlink to the current version, same pattern as this file's own latest.py
+alias) -- or just grab this file directly, for anyone who'd rather download
+one file and import it than install a package at all.
 
 Requires: requests, py-algorand-sdk, msgpack, x402-avm>=2.0.2 (pip install
 requests py-algorand-sdk msgpack "x402-avm[avm]>=2.0.2").

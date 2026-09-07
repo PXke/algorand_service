@@ -200,6 +200,7 @@ def build_openapi() -> dict[str, Any]:
             "title": catalog["name"],
             "version": "1.0.0",
             "description": _AUTH_NOTE,
+            "contact": {"email": "px9e@proton.me"},
         },
         "servers": [{"url": settings.x402_public_api_base}],
         "paths": paths,

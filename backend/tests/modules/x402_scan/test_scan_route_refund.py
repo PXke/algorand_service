@@ -61,6 +61,12 @@ def _stub_report() -> dict[str, object]:
 
 
 @pytest.fixture(autouse=True)
+def _already_paid(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Skip the pre-parse 402 for header-less requests: every route test here models a request that already carries a payment (the gate is stubbed), so the unpaid challenge is out of scope. Its ordering has its own tests in tests/test_x402_unpaid_challenge.py."""
+    monkeypatch.setattr(scan_routes, "challenge_if_unpaid", lambda *_a, **_kw: None)
+
+
+@pytest.fixture(autouse=True)
 def _no_mark_fulfilled_side_effects(monkeypatch: pytest.MonkeyPatch) -> None:
     """mark_fulfilled talks to a real store by default -- no-op it, these tests only check control flow."""
     monkeypatch.setattr(scan_routes, "mark_fulfilled", lambda *_a, **_kw: True)

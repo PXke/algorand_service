@@ -1,8 +1,11 @@
 """The agentic compose loop must not finish until the mandatory self-review tool (review_draft) has been called at least once."""
 
+from typing import Any
+
 import pytest
 
-from app.modules.ai.llm_openai_compatible import MistralProvider
+from app.modules.ai.llm_openai_compatible import MistralProvider, _OpenAIToolLoopAdapter
+from app.modules.ai.token_budget import estimate_message_tokens
 
 
 def _msg(content: str = "", tool_calls: list[dict] | None = None) -> dict:
@@ -363,8 +366,9 @@ def test_exhaustion_finalizer_fits_budget_and_passes_max_tokens(
     seen_budgets: list[int] = []
     seen_max_tokens: list[int | None] = []
 
-    def fake_fit(_convo: list, budget: int) -> None:
+    def fake_fit(convo: list, budget: int) -> tuple[list, int]:
         seen_budgets.append(budget)
+        return convo, 0
 
     def fake_chat_completion(
         _messages: list[dict],
@@ -389,3 +393,86 @@ def test_exhaustion_finalizer_fits_budget_and_passes_max_tokens(
     assert out == "FINAL"
     assert seen_max_tokens == [1234]
     assert seen_budgets  # fit_messages_to_budget ran again right before the finalizer
+
+
+def test_send_round_elides_outgoing_request_but_preserves_debug_transcript(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression for the 2026-09-06 audit-integrity bug (confirmed live in prod): `send_round` used to call `fit_messages_to_budget(self._convo, ...)` IN PLACE, and `self._convo` is the SAME list object as `debug["messages"]` (see `prepare` / `_merged_convo_with_prior_debug`). So a budget-forced elision permanently overwrote real, already-fetched tool-result content with the `"[earlier tool result elided ...]"` placeholder in the PERSISTED compose_sessions transcript that the admin Sessions UI and the compose-session-interrogation feature replay as ground truth -- not just in the one outgoing API request that genuinely needed trimming.
+
+    This asserts both halves of the fix: the outgoing request still gets the
+    old tool result elided (budget enforcement is unchanged), while
+    `debug["messages"]` -- literally the same list `self._convo` is -- still
+    holds the real, un-elided content afterward.
+    """
+    client = MistralProvider(api_key="test-key")
+    debug: dict[str, Any] = {}
+    adapter = _OpenAIToolLoopAdapter(
+        client, [{"role": "user", "content": "x"}], handlers={}, context_tokens=None, max_tokens=100
+    )
+    adapter.prepare(debug)
+    assert debug["messages"] is adapter._convo  # same object, per _merged_convo_with_prior_debug
+
+    old_tool_content = "OLD" + "z" * 4_000
+    new_tool_content = "NEW" + "y" * 4_000
+    adapter._convo.append(
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "1",
+                    "type": "function",
+                    "function": {"name": "fetch_url", "arguments": "{}"},
+                }
+            ],
+        }
+    )
+    adapter._convo.append(
+        {"role": "tool", "name": "fetch_url", "tool_call_id": "1", "content": old_tool_content}
+    )
+    adapter._convo.append(
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "2",
+                    "type": "function",
+                    "function": {"name": "fetch_url", "arguments": "{}"},
+                }
+            ],
+        }
+    )
+    adapter._convo.append(
+        {"role": "tool", "name": "fetch_url", "tool_call_id": "2", "content": new_tool_content}
+    )
+    # Force a budget just under the current total, so the round-1 tool
+    # result -- the OLDEST -- is exactly what fit_messages_to_budget elides.
+    adapter._convo_budget = estimate_message_tokens(adapter._convo) - 500
+
+    sent_payloads: list[dict] = []
+
+    def fake_post(payload: dict) -> dict:
+        sent_payloads.append(payload)
+        return _msg(content="FINAL")
+
+    monkeypatch.setattr(client, "_post", fake_post)
+
+    adapter.send_round(tools=[], temperature=0.6, max_tokens=None, round_budget_note="")
+
+    # (a) The OUTGOING request had the old tool result elided -- unchanged
+    # budget-enforcement behavior.
+    outgoing_tool_contents = [
+        m["content"] for m in sent_payloads[0]["messages"] if m.get("role") == "tool"
+    ]
+    assert old_tool_content not in outgoing_tool_contents
+    assert any("elided" in c for c in outgoing_tool_contents)
+    assert new_tool_content in outgoing_tool_contents  # newest kept
+
+    # (b) debug["messages"] (== adapter._convo, the persisted transcript)
+    # still has the REAL, un-elided content -- this is the actual fix.
+    stored_tool_contents = [m["content"] for m in debug["messages"] if m.get("role") == "tool"]
+    assert old_tool_content in stored_tool_contents
+    assert new_tool_content in stored_tool_contents
+    assert not any("elided" in c for c in stored_tool_contents)

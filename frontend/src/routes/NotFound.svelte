@@ -11,16 +11,19 @@
 />
 
 <div class="page stack">
-  <span class="accent-slug"></span>
-  <h1>{t($messages, 'notFound')}</h1>
-  <button class="btn btn-primary" type="button" onclick={() => navigate('/')}>
-    {t($messages, 'navHome')}
-  </button>
+  <header class="page-head">
+    <span class="accent-slug"></span>
+    <h1>{t($messages, 'notFound')}</h1>
+  </header>
+  <div class="actions">
+    <button class="btn btn-primary" type="button" onclick={() => navigate('/')}>
+      {t($messages, 'navHome')}
+    </button>
+  </div>
 </div>
 
 <style>
-  h1 {
-    margin: 8px 0 12px;
-    font-size: clamp(28px, 4vw, 34px);
+  .actions {
+    margin-top: 4px;
   }
 </style>

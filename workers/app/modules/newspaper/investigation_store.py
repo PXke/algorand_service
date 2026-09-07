@@ -130,7 +130,18 @@ def load_prior_search_x_findings(
             if key in seen_queries:
                 continue  # rows arrive newest-first; only the latest result per query is worth keeping
             seen_queries.add(key)
-            findings.append({"query": query, "result": result})
+            findings.append(
+                {
+                    "query": query,
+                    "result": result,
+                    # When this result was actually fetched (the row's own
+                    # clustering timestamp) -- format_prior_search_x_block
+                    # renders it so the reinjected block's "judge this
+                    # against today's date" instruction has the one fact it
+                    # depends on. getattr-guarded for older test doubles.
+                    "created_at": getattr(row, "created_at", None),
+                }
+            )
         return findings
     except Exception:
         logger.warning(
@@ -161,7 +172,9 @@ def format_prior_search_x_block(findings: list[dict[str, Any]]) -> str:
             f"({p.get('likes', 0)} likes, {p.get('reposts', 0)} reposts, {p.get('replies', 0)} replies)"
             for p in posts
         ]
-        sections.append(f'### X search: "{f["query"]}"\n' + "\n".join(lines))
+        fetched = _fetched_date_label(f.get("created_at"))
+        header = f'### X search: "{f["query"]}"' + (f" (fetched {fetched} UTC)" if fetched else "")
+        sections.append(header + "\n" + "\n".join(lines))
     if not sections:
         return ""
     body = "\n\n".join(sections)
@@ -171,10 +184,24 @@ def format_prior_search_x_block(findings: list[dict[str, Any]]) -> str:
         "pass on this same article -- reuse them instead of calling search_x again for "
         "the same or an equivalent question; only call search_x for a genuinely new "
         "question these don't answer. This is real data, but it may be DAYS OR WEEKS "
-        "OLD by now -- judge it against today's date like any other source, and note "
+        "OLD by now -- each query below is labeled with the UTC date it was actually "
+        "fetched; judge that date against today's date like any other source, and note "
         "that no fresh live check was made for it this time.\n\n"
         f"{body}"
     )
+
+
+def _fetched_date_label(created_at: Any) -> str:  # noqa: ANN401 -- Cassandra rows and test doubles hand back datetime, str, or None
+    """The 'YYYY-MM-DD' label for a prior finding's fetch time, or "" when the row carries none (an old test double, a missing attribute) -- the block then simply omits the per-query date rather than fabricating one."""
+    if created_at is None:
+        return ""
+    date = getattr(created_at, "date", None)
+    if callable(date):
+        try:
+            return date().isoformat()
+        except Exception:
+            return ""
+    return str(created_at)[:10]
 
 
 def store_investigation_findings(

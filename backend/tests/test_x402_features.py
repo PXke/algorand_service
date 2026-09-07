@@ -27,6 +27,7 @@ import pytest
 
 pytest.importorskip("x402")
 
+from x402.extensions.bazaar import validate_discovery_extension
 from x402.mechanisms.avm.constants import ALGORAND_TESTNET_CAIP2
 from x402.schemas.payments import PaymentRequirements
 from x402.schemas.responses import SupportedKind, SupportedResponse
@@ -207,6 +208,12 @@ def _breaker_closed_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(circuit_breaker, "is_tripped", lambda _resource: False)
 
 
+@pytest.fixture(autouse=True)
+def _already_paid(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Skip the pre-parse 402 for header-less requests to x402_features_demand: every test in this file that reaches that route models a request that already carries a payment (the gate is stubbed via require_paid_request or testnet_settings), so the unpaid challenge is out of scope here. Its ordering has its own test in tests/test_x402_unpaid_challenge.py."""
+    monkeypatch.setattr(feature_routes, "challenge_if_unpaid", lambda *_a, **_kw: None)
+
+
 @pytest.fixture
 def fake_redis(monkeypatch: pytest.MonkeyPatch) -> _FakeRedis:
     """Swap all Redis seams for one in-process fake shared by replay, rate limiting and the refund circuit breaker."""
@@ -271,9 +278,11 @@ def test_filing_is_free_and_needs_no_payment_header(
         "title",
         "description",
         "created_at_epoch",
+        "status",
         "claims_count",
         "latest_claimer",
     }
+    assert item["status"] == "pending"
     stored = wired.get(item["request_id"])
     assert stored is not None
 
@@ -438,10 +447,16 @@ def test_voting_on_a_real_request_without_payment_returns_402(
     response = feature_routes.x402_features_vote(_request(path_params={"request_id": request_id}))
 
     assert response.status_code == 402
-    offer = decode_payment_required_header(response.headers["PAYMENT-REQUIRED"]).accepts[0]
+    payment_required = decode_payment_required_header(response.headers["PAYMENT-REQUIRED"])
+    offer = payment_required.accepts[0]
     # 0.02 USDC at 6 decimals — the vote price, not the $0.05 request price.
     assert offer.amount == "20000"
     assert offer.extra["tag"] == x402_client.CHALLENGE_TAG
+    # One Bazaar entry for the route template, not one per request id; and a
+    # POST must declare a body extension or the facilitator's validator
+    # rejects it and never catalogs the route (found live 2026-09-05).
+    assert payment_required.resource.url.endswith("/api/v1/x402/features/{request_id}/vote")
+    assert validate_discovery_extension(payment_required.extensions["bazaar"]).valid
 
 
 def test_a_settled_vote_increments_the_total_and_records_the_voter(
@@ -648,6 +663,7 @@ def test_the_free_browse_never_exposes_the_demand_signal(
         "title",
         "description",
         "created_at_epoch",
+        "status",
         "claims_count",
         "latest_claimer",
     }
@@ -799,6 +815,7 @@ def test_demand_preview_serves_a_redacted_response_never_ranking_the_real_reques
             "submitter": None,
             "created_at_epoch": 0,
             "vote_total": -1,
+            "status": "pending",
             "claims_count": 0,
             "latest_claimer": None,
         }
@@ -957,6 +974,11 @@ def test_claiming_without_payment_is_a_402_at_the_vote_price_with_discovery(
     assert payment_required.accepts[0].amount == "20000"
     assert (payment_required.extensions or {}).get("bazaar") is not None
     assert "Not exclusive" in (payment_required.resource.description or "")
+    # Same two Bazaar rules as the vote route: template URL, body-shaped
+    # declaration for a POST (found live 2026-09-05: this route advertised
+    # one concrete URL per request id and a query-shaped declaration).
+    assert payment_required.resource.url.endswith("/api/v1/x402/features/{request_id}/claim")
+    assert validate_discovery_extension(payment_required.extensions["bazaar"]).valid
 
 
 def test_a_settled_claim_is_stored_surfaced_on_both_reads_and_marked_fulfilled(
@@ -983,6 +1005,7 @@ def test_a_settled_claim_is_stored_surfaced_on_both_reads_and_marked_fulfilled(
         "request_id": request_id,
         "claims_count": 1,
         "latest_claimer": _PAYER,
+        "status": "claimed",
         "settlement_tx_id": "TXC1",
     }
     claims = wired.claims_for(request_id)
@@ -994,12 +1017,14 @@ def test_a_settled_claim_is_stored_surfaced_on_both_reads_and_marked_fulfilled(
     browse = feature_routes.x402_features_browse(_request(method="GET"))
     assert browse["items"][0]["claims_count"] == 1
     assert browse["items"][0]["latest_claimer"] == _PAYER
+    assert browse["items"][0]["status"] == "claimed"
     assert "vote" not in json.dumps(browse)
 
     demand = json.loads(feature_routes.x402_features_demand(_request(method="GET")).description)
     assert demand["items"][0]["claims_count"] == 1
     assert demand["items"][0]["latest_claimer"] == _PAYER
     assert demand["items"][0]["vote_total"] == 0
+    assert demand["items"][0]["status"] == "claimed"
 
 
 def test_multiple_claims_are_allowed_and_the_latest_claimer_wins_the_label(
@@ -1054,6 +1079,229 @@ def test_unreadable_claim_summaries_do_not_take_the_free_browse_down(
 
     assert len(result["items"]) == 1
     assert result["items"][0]["claims_count"] == 0
+
+
+# --------------------------------------------------------------------------- #
+# Status lifecycle (migration 119): pending -> claimed -> completed, reopened
+# by a later claim. Distinct from the claim mechanism itself, which keeps its
+# existing multiple-claims-allowed shape untouched (see the tests above).
+# --------------------------------------------------------------------------- #
+def test_a_freshly_filed_request_is_pending_on_both_reads(
+    wired: InMemoryFeatureStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No claim yet means pending -- on the free browse and the paid demand read."""
+    _file_request(FeatureService(wired))
+    monkeypatch.setattr(
+        feature_routes, "require_paid_request", lambda *_a, **_kw: _settled_result()
+    )
+
+    browse = feature_routes.x402_features_browse(_request(method="GET"))
+    demand = json.loads(feature_routes.x402_features_demand(_request(method="GET")).description)
+
+    assert browse["items"][0]["status"] == "pending"
+    assert demand["items"][0]["status"] == "pending"
+
+
+def test_the_first_claim_moves_status_to_claimed(
+    service: FeatureService, store: InMemoryFeatureStore
+) -> None:
+    """A single claim is enough to flip pending -> claimed."""
+    request_id = _file_request(service)
+    assert store.get_statuses([request_id]) == {}  # nothing set yet == pending by convention
+
+    service.claim(request_id=request_id, claimer=_PAYER, settlement_tx_id="C1")
+
+    assert store.get_statuses([request_id]) == {request_id: "claimed"}
+
+
+def test_a_repeat_claim_keeps_the_status_claimed(
+    service: FeatureService, store: InMemoryFeatureStore
+) -> None:
+    """Claiming again (allowed, non-exclusive) is a no-op on status, not a regression."""
+    request_id = _file_request(service)
+    service.claim(request_id=request_id, claimer=_PAYER, settlement_tx_id="C1")
+    service.claim(request_id=request_id, claimer=_OTHER_PAYER, settlement_tx_id="C2")
+
+    assert store.get_statuses([request_id]) == {request_id: "claimed"}
+
+
+def test_mark_completed_requires_a_past_claimer(
+    service: FeatureService, store: InMemoryFeatureStore
+) -> None:
+    """A wallet that never claimed cannot mark the request completed, and nothing changes."""
+    request_id = _file_request(service)
+    service.claim(request_id=request_id, claimer=_PAYER, settlement_tx_id="C1")
+
+    with pytest.raises(feature_routes.FeatureError) as excinfo:
+        service.mark_completed(request_id=request_id, claimer=_OTHER_PAYER)
+
+    assert excinfo.value.code == "request_not_claimed_by_payer"
+    assert store.get_statuses([request_id]) == {request_id: "claimed"}
+
+
+def test_mark_completed_by_any_past_claimer_succeeds_not_only_the_latest(
+    service: FeatureService, store: InMemoryFeatureStore
+) -> None:
+    """Any past claimer may mark completion -- not exclusively the most recent one."""
+    request_id = _file_request(service)
+    service.claim(request_id=request_id, claimer=_PAYER, settlement_tx_id="C1")
+    service.claim(request_id=request_id, claimer=_OTHER_PAYER, settlement_tx_id="C2")
+
+    # _PAYER is no longer the latest claimer, but has claimed at some point.
+    service.mark_completed(request_id=request_id, claimer=_PAYER)
+
+    assert store.get_statuses([request_id]) == {request_id: "completed"}
+
+
+def test_a_new_claim_after_completed_reopens_to_claimed(
+    service: FeatureService, store: InMemoryFeatureStore
+) -> None:
+    """Completed is not terminal: a fresh claim (from anyone) reopens the request."""
+    request_id = _file_request(service)
+    service.claim(request_id=request_id, claimer=_PAYER, settlement_tx_id="C1")
+    service.mark_completed(request_id=request_id, claimer=_PAYER)
+    assert store.get_statuses([request_id]) == {request_id: "completed"}
+
+    service.claim(request_id=request_id, claimer=_OTHER_PAYER, settlement_tx_id="C2")
+
+    assert store.get_statuses([request_id]) == {request_id: "claimed"}
+
+
+@pytest.mark.usefixtures("testnet_settings", "fake_redis", "wired")
+def test_completing_a_missing_request_is_a_404_that_never_reaches_the_gate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Existence is checked before the gate: completing an unknown id costs nothing."""
+
+    def _must_not_charge(*_a: object, **_kw: object) -> Never:
+        raise AssertionError("the payment gate must not run for an unknown request")
+
+    monkeypatch.setattr(feature_routes, "require_paid_request", _must_not_charge)
+
+    response = feature_routes.x402_features_complete(
+        _request(path_params={"request_id": "does-not-exist"})
+    )
+
+    assert response.status_code == 404
+    assert "not_found" in response.description
+
+
+@pytest.mark.usefixtures("testnet_settings", "fake_redis")
+def test_completing_without_payment_is_a_402_at_the_complete_price(
+    wired: InMemoryFeatureStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A completion mark is priced at its own setting, and its 402 declares Bazaar discovery."""
+    from x402.http.utils import decode_payment_required_header
+
+    monkeypatch.setattr(settings, "x402_features_complete_price", "$0.02")
+    request_id = _file_request(FeatureService(wired))
+
+    response = feature_routes.x402_features_complete(
+        _request(path_params={"request_id": request_id})
+    )
+
+    assert response.status_code == 402
+    payment_required = decode_payment_required_header(response.headers["PAYMENT-REQUIRED"])
+    assert payment_required.accepts[0].amount == "20000"
+    assert payment_required.resource.url.endswith("/api/v1/x402/features/{request_id}/complete")
+    assert validate_discovery_extension(payment_required.extensions["bazaar"]).valid
+
+
+def test_a_settled_completion_by_a_past_claimer_updates_status_on_both_reads(
+    wired: InMemoryFeatureStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The full paid route: claim, then complete, then check both read surfaces and mark_fulfilled."""
+    service = FeatureService(wired)
+    request_id = _file_request(service)
+    service.claim(request_id=request_id, claimer=_PAYER, settlement_tx_id="C1")
+    monkeypatch.setattr(
+        feature_routes, "require_paid_request", lambda *_a, **_kw: _settled_result(txid="TXD1")
+    )
+    fulfilled: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        feature_routes,
+        "mark_fulfilled",
+        lambda txid, *, resource: fulfilled.append((txid, resource)) or True,
+    )
+
+    response = feature_routes.x402_features_complete(
+        _request(path_params={"request_id": request_id})
+    )
+
+    assert response.status_code == 200
+    body = json.loads(response.description)
+    assert body == {"request_id": request_id, "status": "completed", "settlement_tx_id": "TXD1"}
+    assert fulfilled == [("TXD1", "x402-features-complete")]
+
+    browse = feature_routes.x402_features_browse(_request(method="GET"))
+    assert browse["items"][0]["status"] == "completed"
+    demand = json.loads(feature_routes.x402_features_demand(_request(method="GET")).description)
+    assert demand["items"][0]["status"] == "completed"
+
+
+def test_completing_by_a_wallet_that_never_claimed_is_rejected_and_kept_not_refunded(
+    wired: InMemoryFeatureStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The settled payer never claimed: a 403, the status is untouched, and no refund is attempted.
+
+    A FeatureError from the product write is run_with_refund's PlatformError
+    path -- payment kept, no refund -- the same ownership-conflict shape the
+    directory's relist-not-yours check uses. send_refund must never be
+    called: this is a caller-fault rejection, not a delivery failure of ours.
+    """
+    request_id = _file_request(FeatureService(wired))
+    monkeypatch.setattr(
+        feature_routes, "require_paid_request", lambda *_a, **_kw: _settled_result(txid="TXD2")
+    )
+
+    def _must_not_refund(**_kw: object) -> Never:
+        raise AssertionError("a caller-fault rejection must never trigger a refund")
+
+    monkeypatch.setattr(paid_request_module, "send_refund", _must_not_refund)
+
+    response = feature_routes.x402_features_complete(
+        _request(path_params={"request_id": request_id})
+    )
+
+    assert response.status_code == 403
+    body = json.loads(response.description)
+    assert body["error"]["code"] == "request_not_claimed_by_payer"
+    assert wired.get_statuses([request_id]) == {}
+
+
+def test_promo_completion_by_a_non_claimer_is_a_clean_4xx_not_a_500(
+    wired: InMemoryFeatureStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The promo bypass path does not skip the claimer check, and a rejection there is a 4xx."""
+    request_id = _file_request(FeatureService(wired))
+    monkeypatch.setattr(
+        feature_routes,
+        "require_paid_request",
+        lambda *_a, **_kw: SimpleNamespace(
+            error=None, is_promo=True, settlement_headers={}, payer=""
+        ),
+    )
+
+    response = feature_routes.x402_features_complete(
+        _request(path_params={"request_id": request_id}, query={"promo": "CODE"})
+    )
+
+    assert response.status_code == 403
+    assert "request_not_claimed_by_payer" in response.description
+
+
+def test_completing_a_probe_payers_own_earlier_claim_is_not_special_cased(
+    wired: InMemoryFeatureStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Completion is not a ranking/demand signal, so unlike vote there is nothing to exclude here."""
+    service = FeatureService(wired)
+    monkeypatch.setattr(settings, "x402_probe_payers", f" {_PROBE.lower()} ")
+    request_id = _file_request(service)
+    service.claim(request_id=request_id, claimer=_PROBE, settlement_tx_id="C1")
+
+    service.mark_completed(request_id=request_id, claimer=_PROBE)
+
+    assert wired.get_statuses([request_id]) == {request_id: "completed"}
 
 
 # --------------------------------------------------------------------------- #

@@ -26,6 +26,7 @@ def http_status_for_code(code: str, *, default: int = 400) -> int:
         "duplicate_txid": 409,
         "duplicate_upvote": 409,
         "listing_owned_by_another_payer": 403,
+        "request_not_claimed_by_payer": 403,
         "rate_limited": 429,
         "treasury_not_configured": 503,
         "consent_store_unavailable": 503,

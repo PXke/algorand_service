@@ -221,11 +221,20 @@ class CassandraSettlementStore:
     def list_for_day(self, day: str, *, limit: int) -> list[SettlementRecord]:
         """One UTC day's settlements, newest first, bounded by a single-partition LIMIT read.
 
-        The table has no explicit clustering order (defaults to settled_at
-        ASC), so this reads the LIMITed page in stored order and reverses it
-        in Python -- correct because the caller (recent_real_settlements)
-        bounds both the per-day LIMIT and the total number of days it scans,
-        never treating this as a paged cursor into a large partition.
+        Fixed 2026-09-06 (an adversarial review flagged the wrong premise
+        this docstring used to state): x402_settlements is declared `WITH
+        CLUSTERING ORDER BY (settled_at DESC, tx_id ASC)` (migration 090),
+        NOT the CQL default of ascending -- a bare `SELECT ... LIMIT ?` with
+        no ORDER BY already reads in that declared order, i.e. newest first,
+        directly from Cassandra. The `.reverse()` this method used to apply
+        was written under the false belief that the table defaulted to
+        ascending order; against the real schema it silently flipped an
+        already-correct newest-first LIMITed page into oldest-first, while
+        this docstring's own summary line kept claiming "newest first."
+        X402GradingStmts.LIST_SETTLEMENTS_FOR_DAY (credibility.py) reads the
+        same table the same way and never reverses, because summing spend is
+        order-independent -- that call site was accidentally correct all
+        along; this one just displayed a day's settlements backwards.
         """
         from app.core.cassandra import get_cassandra_session
         from app.core.statements import X402Stmts
@@ -233,7 +242,7 @@ class CassandraSettlementStore:
         rows = get_cassandra_session().execute(
             X402Stmts.LIST_SETTLEMENTS_FOR_DAY_FULL, (day, limit)
         )
-        out = [
+        return [
             SettlementRecord(
                 tx_id=row.tx_id,
                 asset_id=row.asset_id or "",
@@ -249,8 +258,6 @@ class CassandraSettlementStore:
             )
             for row in rows
         ]
-        out.reverse()
-        return out
 
 
 class InMemorySettlementStore:

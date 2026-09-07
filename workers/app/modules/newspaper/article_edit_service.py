@@ -5,7 +5,6 @@ from __future__ import annotations
 import logging
 import time
 
-from app.core.config import mistral_configured
 from app.modules.newspaper.article_store import _sanitize_body, get_article, update_article
 from app.modules.newspaper.article_tags import derive_article_tags
 from app.modules.newspaper.article_version_store import save_article_version
@@ -49,11 +48,15 @@ def _compose_edit_fields(
 
     try:
         # No template fallback exists (owner decision 2026-07-14: a lesser,
-        # robotic article is worse than no article) — Mistral or nothing.
-        if not mistral_configured():
-            raise LLMError(
-                "MISTRAL_ENABLED and MISTRAL_API_KEY required — no template fallback"
-            )
+        # robotic article is worse than no article) -- the writer purpose's
+        # configured provider or nothing. No separate check needed here:
+        # compose_scrape_article below already runs its own
+        # _require_writer_provider() gate as its first action and raises the
+        # same LLMError this function's own `except LLMError` already
+        # catches -- this used to duplicate that check with a hardcoded
+        # mistral_configured(), which would have silently blocked every
+        # article edit once the dead MISTRAL_API_KEY was removed, same class
+        # of bug fixed in article_composer.py 2026-09-07.
         try:
             publish_kind = PublishKind(row.publish_kind)
         except ValueError:

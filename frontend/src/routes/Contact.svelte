@@ -42,7 +42,7 @@
 />
 
 <div class="page stack contact">
-  <header>
+  <header class="page-head">
     <span class="accent-slug"></span>
     <h1>{t($messages, 'contactTitle')}</h1>
     <p class="lead muted">{t($messages, 'contactSubtitle')}</p>
@@ -96,14 +96,6 @@
 <style>
   .contact {
     gap: 16px;
-  }
-  h1 {
-    margin: 8px 0 0;
-    font-size: clamp(28px, 4vw, 34px);
-  }
-  .lead {
-    margin: 8px 0 0;
-    max-width: 40rem;
   }
   .form-wrap {
     max-width: var(--max-reading);

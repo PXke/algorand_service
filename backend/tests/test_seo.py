@@ -446,7 +446,9 @@ def test_cached_feed_snapshot_reuses_within_ttl(monkeypatch: pytest.MonkeyPatch)
         calls["n"] += 1
         return _feed(2)
 
-    def fake_cached_json(_key: str, _ttl: int, compute: Callable[[], dict[str, object]]) -> dict[str, object]:
+    def fake_cached_json(
+        _key: str, _ttl: int, compute: Callable[[], dict[str, object]]
+    ) -> dict[str, object]:
         if not stored:
             stored.append(compute())
         return stored[0]
@@ -664,6 +666,65 @@ def test_sitemap_single_file_when_under_limit() -> None:
     assert "<urlset" in build.root_xml
     assert "<sitemapindex" not in build.root_xml
     assert build.parts == {}
+
+
+def test_sitemap_stays_single_file_for_many_light_articles() -> None:
+    """A larger but untranslated (byte-light) feed stays a single urlset: neither cap is a hair-trigger on count alone."""
+    items = _feed(45)
+    build = sitemap.build_sitemaps(items, {})
+    assert not build.is_index
+    assert build.parts == {}
+    # Sanity: comfortably under both caps, so this is a real "small" case,
+    # not an accident of one cap being disabled.
+    assert len(build.root_xml.encode("utf-8")) < sitemap.MAX_BYTES_PER_SITEMAP
+
+
+def test_sitemap_splits_on_byte_size_despite_low_url_count() -> None:
+    """A byte-heavy-but-few-URLs feed (full 8-language hreflang cluster per article) trips the byte-size cap and splits, even though the URL count stays far under MAX_URLS_PER_SITEMAP.
+
+    This is the exact live bug: a count-only threshold never fires for this
+    site because per-article translation fanout inflates bytes, not URL
+    count. Uses the real MAX_BYTES_PER_SITEMAP default (no monkeypatch) so
+    this exercises the production cap directly.
+    """
+    from app.core.article_translation_langs import ARTICLE_TRANSLATION_LANGS
+
+    items = _feed(45)
+    translations = {f"id{i}": list(ARTICLE_TRANSLATION_LANGS) for i in range(45)}
+    all_entries_count = len(sitemap._static_entries(items)) + len(
+        sitemap._article_entries(items, translations)
+    )
+    assert all_entries_count < sitemap.MAX_URLS_PER_SITEMAP  # count check alone wouldn't split
+
+    build = sitemap.build_sitemaps(items, translations)
+    assert build.is_index
+    assert "sitemap-pages.xml" in build.parts
+    article_parts = [k for k in build.parts if k.startswith("sitemap-articles-")]
+    assert len(article_parts) >= 2  # a sensible handful of chunks, not one file
+    combined_articles = "".join(build.parts[name] for name in article_parts)
+    assert 'hreflang="fa"' in combined_articles  # translations survive chunking
+
+
+def test_chunk_splits_on_bytes_not_just_count() -> None:
+    """`_chunk`'s greedy packer closes a chunk once EITHER the count or the byte budget would be exceeded by the next entry, and never drops or infinitely defers a single entry heavier than the byte budget."""
+    small = [sitemap._UrlEntry(loc=f"https://x.io/{i}") for i in range(4)]
+    one_entry_bytes = len(sitemap._url_xml(small[0]).encode("utf-8"))
+
+    # Byte cap alone forces a split into pairs, well under a huge count cap.
+    chunks = sitemap._chunk(small, max_count=1000, max_bytes=one_entry_bytes * 2)
+    assert [len(c) for c in chunks] == [2, 2]
+
+    # Count cap alone (huge byte budget) still behaves as a plain fixed-size chunker.
+    chunks = sitemap._chunk(small, max_count=2, max_bytes=10_000_000)
+    assert [len(c) for c in chunks] == [2, 2]
+
+    # A single entry heavier than max_bytes on its own still gets its own
+    # chunk rather than being dropped or merged past the budget.
+    heavy = sitemap._UrlEntry(
+        loc="https://x.io/heavy", alternates=[(f"l{i}", f"https://x.io/{i}") for i in range(20)]
+    )
+    chunks = sitemap._chunk([small[0], heavy, small[1]], max_count=1000, max_bytes=1)
+    assert [len(c) for c in chunks] == [1, 1, 1]
 
 
 def test_news_sitemap_windows_recent_only() -> None:
@@ -1042,9 +1103,7 @@ def test_llms_full_txt_skips_items_with_no_body() -> None:
     ],
     ids=["short", "near-budget", "overlong-en", "overlong-fr", "cjk-width"],
 )
-def test_title_budget(
-    title: str, expect_brand_suffix: bool, expect_ellipsis: bool
-) -> None:
+def test_title_budget(title: str, expect_brand_suffix: bool, expect_ellipsis: bool) -> None:
     """Title budget: short keeps brand suffix; long/CJK drop it; never blind-truncate mid-headline."""
     head, _ = render.render_article(_article(title=title))
     if expect_brand_suffix:
@@ -1216,6 +1275,36 @@ def test_beacon_accepts_slug_article_paths() -> None:
     assert not _is_known_app_path("/news/articles/x/y")
     assert not _is_known_app_path("/news/articles/")
     assert not _is_known_app_path("/news/articles/" + "a" * 100)
+
+
+def test_x402_endpoints_page_is_distinct_from_directory() -> None:
+    """Regression for the 2026-09-06 frontend split.
+
+    /x402/endpoints must SSR its own content, not silently fall back to the
+    directory tab. Before this fix, "news" was removed from X402_TABS (the SPA dropped its
+    own News tab the same way) but nothing added "endpoints" as a real page,
+    so /x402/endpoints resolved through x402_tab's "unknown tab -> directory"
+    fallback and served directory-listing content at a URL that should show
+    PXke's own product catalog and the News Engine instead.
+    """
+    assert "news" not in render.X402_TABS, "News is a page section now, not a Marketplace sub-tab"
+    assert "endpoints" not in render.X402_TABS, (
+        "endpoints is its own page, not a Marketplace sub-tab"
+    )
+
+    directory_head, directory_body = render.render_x402("directory")
+    news_items = [
+        {"title": "A Headline", "url": "https://algorand.pxke.me/news/articles/a-headline"}
+    ]
+    endpoints_head, endpoints_body = render.render_x402("endpoints", news_items=news_items)
+
+    assert "/x402/endpoints" in endpoints_head
+    assert "/x402/endpoints" not in directory_head
+    assert "A Headline" in endpoints_body
+    assert "A Headline" not in directory_body
+    assert render._X402_TAB_HEAD_TITLES["endpoints"] != render._X402_TAB_HEAD_TITLES["directory"]
+
+    assert _is_known_app_path("/x402/endpoints")
 
 
 def test_x402_ssr_news_pricing_matches_the_live_search_price() -> None:

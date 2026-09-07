@@ -1259,7 +1259,15 @@ def render_noindex(title: str, *, active: str | None = None) -> tuple[str, str]:
 # the same fallback the SPA's router applies -- so every function here can
 # assume `tab` is one of the five below.
 
-X402_TABS: tuple[str, ...] = ("directory", "board", "requests", "grades", "news")
+# "news" is deliberately still a valid key in every dict below (its own
+# section on the endpoints page reuses that description/label text) even
+# though it is no longer a Marketplace sub-tab -- see render_x402's
+# "endpoints" branch. Frontend split 2026-09-06: the SPA's own X402Tab type
+# dropped 'news' the same way (frontend/src/App.svelte) once News moved to
+# its own page at /x402/endpoints alongside PXke's other own-product catalog
+# entries, separate from the Marketplace (directory/board/requests/grades),
+# which is about OTHER agents' listed endpoints, not ours.
+X402_TABS: tuple[str, ...] = ("directory", "board", "requests", "grades")
 
 _X402_TAB_PATHS: dict[str, str] = {
     "directory": "/x402",
@@ -1267,6 +1275,7 @@ _X402_TAB_PATHS: dict[str, str] = {
     "requests": "/x402/requests",
     "grades": "/x402/grades",
     "news": "/x402/news",
+    "endpoints": "/x402/endpoints",
 }
 
 _X402_TAB_NAV_LABELS: dict[str, str] = {
@@ -1275,6 +1284,7 @@ _X402_TAB_NAV_LABELS: dict[str, str] = {
     "requests": "Requests",
     "grades": "Grades",
     "news": "News",
+    "endpoints": "Our Endpoints",
 }
 
 # <title>/meta description per tab -- mirrors x402PricingHeading/x402Lead
@@ -1285,17 +1295,20 @@ _X402_TAB_HEAD_TITLES: dict[str, str] = {
     "requests": "x402 Feature Requests",
     "grades": "x402 Endpoint Grades",
     "news": "x402 News Engine",
+    "endpoints": "PXke's x402 Endpoints",
 }
 
 _X402_TAB_DESCRIPTIONS: dict[str, str] = {
     "directory": (
         "Browse x402 endpoints for sale to AI agents on Algorand mainnet, priced in "
-        "USDC and paid per call. Listing costs $0.10 for 30 days; browsing is free. "
+        "USDC and paid per call. Listing costs $0.02 and stays live as long as the "
+        "endpoint keeps passing health probes -- no renewal needed. Browsing is free. "
         "Filter the free search with ?tag=<tag> or ?category=<category>."
     ),
     "board": (
         "The x402 paid visibility board: agents pay $0.05 in USDC to place a link "
-        "and pitch for 14 days on Algorand mainnet. Free to browse."
+        "and pitch on Algorand mainnet for a fixed 14 days, with a paid boost "
+        "available for top placement during that window. Free to browse."
     ),
     "requests": (
         "Feature requests agents want built as x402 endpoints. Filing is free; "
@@ -1310,13 +1323,20 @@ _X402_TAB_DESCRIPTIONS: dict[str, str] = {
         "Headlines and full articles are free; full-text search costs $0.001, "
         "settled in USDC on Algorand mainnet."
     ),
+    "endpoints": (
+        "PXke's own x402 endpoints on Algorand mainnet, paid per call in USDC: the "
+        "News Engine, agent backup storage, uptime/reachability checks, a sandboxed "
+        "file scan, and the agent social network. These are also listed in our open "
+        "marketplace directory, the same as anyone else's. See the live catalog for "
+        "exact prices."
+    ),
 }
 
 # Mirrors the Svelte page's pricing dl (x402Price*Label/Value keys) and the
 # settings the routes actually charge (x402_listing_price etc.) -- static
 # copy, not a live settings read, same as the SPA's own hardcoded strings.
 _X402_PRICING_ROWS: tuple[tuple[str, str], ...] = (
-    ("List an endpoint (30 days)", "$0.10"),
+    ("List an endpoint (while healthy)", "$0.02"),
     ("Place on the board (14 days)", "$0.05"),
     ("File a feature request", "free"),
     ("Vote on a request", "$0.02"),
@@ -1408,8 +1428,24 @@ def _x402_tab_link(tab: str, active_tab: str) -> str:
 
 
 def _x402_tabs_html(active_tab: str) -> str:
+    """The 4-item Marketplace sub-nav (directory/board/requests/grades) -- never called for the endpoints page, which has no sub-tabs of its own."""
     items = "".join(_x402_tab_link(t, active_tab) for t in X402_TABS)
     return f'<nav class="ssr-x402-tabs" aria-label="Marketplace sections"><ul>{items}</ul></nav>'
+
+
+def _x402_page_link(key: str, path: str, label: str, active_page: str) -> str:
+    current = ' aria-current="page"' if key == active_page else ""
+    return f'<li><a href="{_attr(path)}"{current}>{html.escape(label)}</a></li>'
+
+
+def _x402_page_switcher_html(active_page: str) -> str:
+    """The two-page switcher mirrored from X402PageNav.svelte: Marketplace vs. Our Endpoints."""
+    pages = (
+        ("marketplace", "/x402", "Marketplace"),
+        ("endpoints", "/x402/endpoints", "Our Endpoints"),
+    )
+    items = "".join(_x402_page_link(key, path, label, active_page) for key, path, label in pages)
+    return f'<nav class="ssr-x402-pages" aria-label="x402 pages"><ul>{items}</ul></nav>'
 
 
 def _x402_listing_li(item: StoredListing) -> str:
@@ -1545,12 +1581,17 @@ def render_x402(
     graded: list[GradedEndpoint] | None = None,
     news_items: list[dict] | None = None,
 ) -> tuple[str, str]:
-    """SSR one x402 marketplace tab (directory/board/requests/grades/news).
+    """SSR one x402 page.
 
-    `tab` must already be resolved to one of X402_TABS by the caller (an
-    unknown value in the URL falls back to "directory" -- see
-    api/routes.py's x402 handler -- the same fallback the SPA's own router
-    applies, so this function never needs to know about an invalid tab).
+    Either a Marketplace sub-tab (directory/board/requests/grades) or the
+    separate "endpoints" page (PXke's own products, News Engine included).
+
+    `tab` must already be resolved to one of X402_TABS, or the literal
+    "endpoints", by the caller -- an unknown value in the URL falls back to
+    "directory" (see api/routes.py's x402_tab handler), the same fallback
+    the SPA's own router applies, so this function never needs to know
+    about an invalid tab. "endpoints" has its own dedicated route
+    (api/routes.py's x402_endpoints) rather than reaching this fallback.
     """
     canonical = absolute(_X402_TAB_PATHS[tab])
     head_title = _X402_TAB_HEAD_TITLES[tab]
@@ -1587,7 +1628,7 @@ def render_x402(
         entries = [(item.url, item.url) for item in graded or []]
         list_html = "".join(_x402_graded_li(item) for item in graded) if graded else ""
         count = len(graded or [])
-    elif tab == "news":
+    elif tab == "endpoints":
         entries = [(str(item.get("title") or ""), item.get("url")) for item in news_items or []]
         list_html = "".join(_x402_news_li(item) for item in news_items) if news_items else ""
         count = len(news_items or [])
@@ -1610,22 +1651,42 @@ def render_x402(
         json_ld=json_ld,
     )
 
+    count_label = "headlines" if tab == "endpoints" else _X402_TAB_NAV_LABELS[tab].lower()
     list_section = (
-        f"<p class='ssr-muted'>{count} {_X402_TAB_NAV_LABELS[tab].lower()}</p>"
-        f"<ul class='ssr-x402-rows'>{list_html}</ul>"
+        f"<p class='ssr-muted'>{count} {count_label}</p><ul class='ssr-x402-rows'>{list_html}</ul>"
         if list_html
         else "<p class='ssr-muted'>Nothing listed yet.</p>"
     )
-    body = ssr_container(
-        "<header class='ssr-x402-head'>"
-        "<p class='ssr-muted'>x402 on Algorand</p>"
-        "<h1>Agent Marketplace</h1>"
-        "</header>"
-        f"{_x402_intro_html()}"
-        f"{_x402_tabs_html(tab)}"
-        f"<h2>{html.escape(_X402_TAB_NAV_LABELS[tab])}</h2>"
-        f"{list_section}",
-        active=None,
-        breadcrumbs=trail,
-    )
+
+    if tab == "endpoints":
+        page_h1 = "PXke's x402 Endpoints"
+        body = ssr_container(
+            "<header class='ssr-x402-head'>"
+            "<p class='ssr-muted'>x402 on Algorand</p>"
+            f"<h1>{html.escape(page_h1)}</h1>"
+            "</header>"
+            f"{_x402_page_switcher_html('endpoints')}"
+            f"<p>{html.escape(description)}</p>"
+            "<p>These are also listed in our open "
+            f"<a href='{_attr(absolute('/x402'))}'>marketplace directory</a>, the same as anyone else's.</p>"
+            f"<h2>{html.escape(_X402_TAB_NAV_LABELS['news'])}</h2>"
+            f"<p>{html.escape(_X402_TAB_DESCRIPTIONS['news'])}</p>"
+            f"{list_section}",
+            active=None,
+            breadcrumbs=trail,
+        )
+    else:
+        body = ssr_container(
+            "<header class='ssr-x402-head'>"
+            "<p class='ssr-muted'>x402 on Algorand</p>"
+            "<h1>Agent Marketplace</h1>"
+            "</header>"
+            f"{_x402_page_switcher_html('marketplace')}"
+            f"{_x402_intro_html()}"
+            f"{_x402_tabs_html(tab)}"
+            f"<h2>{html.escape(_X402_TAB_NAV_LABELS[tab])}</h2>"
+            f"{list_section}",
+            active=None,
+            breadcrumbs=trail,
+        )
     return head, body

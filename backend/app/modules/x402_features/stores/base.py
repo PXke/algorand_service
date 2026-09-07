@@ -85,3 +85,35 @@ class FeatureStore(Protocol):
         exactly the case where "who paid to vote on this" still matters.
         """
         ...
+
+    def has_claimed(self, request_id: str, wallet: str) -> bool:
+        """Whether `wallet` has ever claimed this request (migration 119's authorization check).
+
+        Reuses the same bounded per-request claims read get_claim_summaries
+        does (CLAIMS_SCAN_LIMIT): a claim older than that bound is not found,
+        the same documented degradation the claim count already accepts.
+        Claims are rare (a builder declares once, not per unit of demand), so
+        this never needs a dedicated lookup table.
+        """
+        ...
+
+    def update_status(self, request_id: str, status: str) -> None:
+        """Set a request's lifecycle status (see domain.FEATURE_STATUS_*).
+
+        Called by the service after a durable write has already happened
+        (store before mark, CLAUDE.md section 2): after append_claim for a
+        claim, or after the authorization check for an explicit completion.
+        The caller is responsible for passing a request id known to exist --
+        this never creates a request.
+        """
+        ...
+
+    def get_statuses(self, request_ids: list[str]) -> dict[str, str]:
+        """Return each request's lifecycle status, keyed by request id.
+
+        Batched for the same reason get_vote_totals and get_claim_summaries
+        are: both read surfaces need it for a whole page. An id with no
+        status set yet (no claim, never completed) may be omitted; the
+        caller treats a missing id as domain.FEATURE_STATUS_PENDING.
+        """
+        ...

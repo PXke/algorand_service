@@ -83,6 +83,86 @@ def test_low_grade_triggers_one_revision(monkeypatch: pytest.MonkeyPatch) -> Non
     assert out["_heuristic_grade"]["grade"] == 8.0
 
 
+def test_checkpoint_fires_once_per_grade_revise_pass(monkeypatch: pytest.MonkeyPatch) -> None:
+    """checkpoint("writing", detail=...) fires once per pass through the grade/revise loop -- root-caused 2026-09-05: before this, the loop had NO checkpoints at all, so once Stage 2 generation finished, compose_sessions.duration_ms/status went stale for the ENTIRE grade/revise loop (up to WRITER_REVISION_MAX_PASSES full revision passes), and a slow rubric grade or revision looked identical to a hung compose in the admin Sessions view -- the "the status flag is bad" complaint this fixes."""
+    grades = iter(
+        [
+            {"grade": 5.0, "issues": ["structure — Formatting Deserts: 6 prose blocks"]},
+            {"grade": 8.0, "issues": []},
+        ]
+    )
+    monkeypatch.setattr(
+        "app.modules.newspaper.article_grader.grade_article_draft",
+        lambda **_kw: next(grades),
+    )
+    monkeypatch.setattr(
+        "app.modules.newspaper.article_quality_llm.grade_article_quality_llm",
+        lambda **_kw: {"narrative_synthesis": 4, "technical_depth": 4, "issues": []},
+    )
+    trace: list[dict] = []
+    fake = _FakeMistral({"title": "T2", "body": "a much longer grounded body", "summary": "s"})
+    checkpoints: list[tuple[str, str]] = []
+
+    def _checkpoint(status: str, *, detail: str = "", digest: str = "") -> None:  # noqa: ARG001 -- digest unused, matches the real checkpoint signature
+        checkpoints.append((status, detail))
+
+    _review_and_revise(
+        fake,
+        {"title": "T", "body": "short"},
+        system="sys",
+        gen_user="u",
+        trace=trace,
+        checkpoint=_checkpoint,
+    )
+
+    # One checkpoint for the initial grade, one for the single revision pass
+    # that follows (WRITER_REVISION_MAX_PASSES defaults to 2) -- each labeled
+    # so an admin reading final_output mid-compose can tell them apart.
+    assert checkpoints == [
+        ("writing", "grading initial draft"),
+        ("writing", "grade/revise pass 1 of 2"),
+    ]
+
+
+def test_revision_tool_loop_on_round_reaches_checkpoint(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A tool-enabled revision pass's own on_round callback reaches checkpoint("writing") for every round it runs, the same way the research stage's on_round already does -- root-caused 2026-09-05 alongside the per-pass checkpoint above: a revision that spends many rounds chasing a flagged issue (fetch_url, a chain lookup) previously refreshed compose_sessions.duration_ms/status ZERO times for the whole length of that tool loop."""
+    grades = iter(
+        [
+            {"grade": 5.0, "issues": ["structure — issue A"]},
+            {"grade": 8.0, "issues": []},
+        ]
+    )
+    monkeypatch.setattr(
+        "app.modules.newspaper.article_grader.grade_article_draft",
+        lambda **_kw: next(grades),
+    )
+    monkeypatch.setattr(
+        "app.modules.newspaper.article_quality_llm.grade_article_quality_llm",
+        lambda **_kw: {"narrative_synthesis": 4, "technical_depth": 4, "issues": []},
+    )
+    trace: list[dict] = []
+    fake = _ToolFakeMistralWithRounds(['{"title": "T2", "body": "revised body", "summary": "s"}'])
+    checkpoints: list[str] = []
+
+    def _checkpoint(status: str, *, detail: str = "", digest: str = "") -> None:  # noqa: ARG001
+        checkpoints.append(status)
+
+    _review_and_revise(
+        fake,
+        {"title": "T1", "body": "original body"},
+        system="sys",
+        gen_user="u",
+        trace=trace,
+        revision_tool_schemas=_NOOP_TOOL_SCHEMAS,
+        revision_tool_handlers=_NOOP_TOOL_HANDLERS,
+        checkpoint=_checkpoint,
+    )
+
+    # 2 per-pass checkpoints (initial grade + the one revision pass) plus one
+    # more from the revision's own tool-loop round firing on_round.
+    assert checkpoints.count("writing") == 3
+
+
 def test_high_grade_keeps_draft_untouched(monkeypatch: pytest.MonkeyPatch) -> None:
     """Returns the original draft unchanged, with no revision call, when the grade clears the bar with no issues."""
     monkeypatch.setattr(
@@ -668,6 +748,23 @@ class _ToolFakeMistral:
         return raw
 
 
+class _ToolFakeMistralWithRounds:
+    """Like _ToolFakeMistral, but actually invokes the caller's `on_round` once before returning -- a real chat_with_tools call fires it once per round via run_tool_loop's _fire_on_round, so this is the minimal stand-in needed to prove a caller's on_round is genuinely threaded through to the revision's tool-enabled call, not just accepted as a kwarg and dropped."""
+
+    def __init__(self, raw_replies: list[str]) -> None:
+        self._raw_replies = list(raw_replies)
+        self.calls = 0
+
+    def chat_with_tools(
+        self, _messages: list[dict], *, on_round: object | None = None, **_kwargs: object
+    ) -> str:
+        if on_round is not None:
+            on_round()  # type: ignore[operator]
+        raw = self._raw_replies[self.calls]
+        self.calls += 1
+        return raw
+
+
 class _ToolFakeMistralRaising:
     """Fake writer client whose chat_with_tools always raises -- a real API/network failure, as opposed to a JSON-parse failure."""
 
@@ -948,10 +1045,10 @@ def test_revision_call_exception_never_carries_a_raw_output_key(
     assert "raw_output" not in failures[0]["result"]
 
 
-def test_revision_carries_forward_prior_stage_context_via_debug(
+def test_revision_outgoing_request_is_bounded_not_the_full_prior_trace(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """2026-08-28 scope correction: the tool-enabled revision call must NOT be a blank-slate 2-message conversation -- it relies on chat_with_tools' existing `_merged_convo_with_prior_debug` merge point to prepend the shared `debug["messages"]` transcript (Stage 1 research + Stage 2 draft) ahead of its own short revise turn, the same mechanism every earlier stage of a real compose already uses (see test_tool_call_id_backfill.py's "the revision pass" tests). This is a behavior of the REAL client, so it uses MistralProvider directly rather than the simplified test fakes elsewhere in this file, which don't implement that merge."""
+    """2026-09-06 cost fix (operator-approved, measured tonight at ~65% of a real compose's uncached token spend): the tool-enabled revision call's OUTGOING request must no longer carry the full accumulated Stage-1/Stage-2 transcript. `chat_with_tools` now seeds it from `_compact_revision_prior` (the current draft) instead of `debug["messages"]`, on top of `revise_user`'s own digest+flagged-issues text (`_build_revision_prompt`/`_build_stage2_user`). This supersedes the pre-fix `test_revision_carries_forward_prior_stage_context_via_debug`, which asserted exactly the behavior this change removes -- see `test_revision_stored_transcript_keeps_full_prior_plus_its_own_turns_in_order` below for the other half (the STORED transcript is unaffected). Uses the REAL MistralProvider, like the test it replaces, since this is `_merged_convo_with_prior_debug`'s own behavior, not something the simplified fakes elsewhere in this file implement."""
     monkeypatch.setattr(
         "app.modules.newspaper.article_grader.grade_article_draft",
         lambda **_kw: {"grade": 4.0, "issues": ["structure — issue A"]},  # forces one revision call
@@ -1005,6 +1102,105 @@ def test_revision_carries_forward_prior_stage_context_via_debug(
 
     assert sent_payloads  # the revision call actually happened
     sent_texts = [str(m.get("content", "")) for m in sent_payloads[0]["messages"]]
-    assert any("STAGE1 RESEARCH PROMPT" in t for t in sent_texts)
-    assert any("RESEARCH FACT" in t for t in sent_texts)
-    assert any("STAGE2 DRAFT" in t for t in sent_texts)
+    # The full raw prior trace must NOT reach the outgoing request anymore.
+    assert not any("STAGE1 SYSTEM" in t for t in sent_texts)
+    assert not any("STAGE1 RESEARCH PROMPT" in t for t in sent_texts)
+    assert not any("RESEARCH FACT" in t for t in sent_texts)
+    assert not any("[stage 2 handoff]" in t for t in sent_texts)
+    # The current draft it's revising must still be there, standing in for
+    # the raw trace (via _compact_revision_prior), so the reviser knows what
+    # it's actually revising.
+    assert any("original body" in t for t in sent_texts)
+
+
+def test_revision_stored_transcript_keeps_full_prior_plus_its_own_turns_in_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The bounded outgoing request (see test above) must not come at the cost of the admin Sessions view: `debug["messages"]` -- the REAL, persisted transcript, a totally different object from what the reviser's own request actually sent once `prior_override` is in play -- must still hold the full prior Stage-1/Stage-2 history untouched, with this revision pass's own real turns (its [system, user] start, plus any tool-call round it actually ran) appended after it, in order. This is the other half of CLAUDE.md's regression-test requirement for the 2026-09-06 cost fix."""
+    grades = iter(
+        [
+            {"grade": 5.0, "issues": ["structure — issue A"]},
+            {"grade": 8.0, "issues": []},  # clean on the recheck -- exactly one revision pass
+        ]
+    )
+    monkeypatch.setattr(
+        "app.modules.newspaper.article_grader.grade_article_draft",
+        lambda **_kw: next(grades),
+    )
+    monkeypatch.setattr(
+        "app.modules.newspaper.article_quality_llm.grade_article_quality_llm",
+        lambda **_kw: {"narrative_synthesis": 4, "technical_depth": 4, "issues": []},
+    )
+    from app.modules.ai.llm_openai_compatible import MistralProvider
+
+    client = MistralProvider(api_key="test-key")
+    # Round 1: the reviser calls a tool before finishing (proving a real
+    # tool-call round still lands in the stored transcript, not just the
+    # pass's own [system, user] start). Round 2: the final revised article.
+    replies = [
+        {
+            "choices": [
+                {
+                    "message": {
+                        "content": "",
+                        "tool_calls": [
+                            {
+                                "id": "r1",
+                                "type": "function",
+                                "function": {"name": "noop", "arguments": "{}"},
+                            }
+                        ],
+                    }
+                }
+            ]
+        },
+        {
+            "choices": [
+                {"message": {"content": '{"title": "T2", "body": "revised", "summary": "s"}'}}
+            ]
+        },
+    ]
+    calls = {"n": 0}
+
+    def fake_post(_payload: dict) -> dict:
+        i = calls["n"]
+        calls["n"] += 1
+        return replies[i]
+
+    monkeypatch.setattr(client, "_post", fake_post)
+
+    prior_messages = [
+        {"role": "system", "content": "STAGE1 SYSTEM"},
+        {"role": "user", "content": "STAGE1 RESEARCH PROMPT"},
+        {"role": "assistant", "content": '{"title": "T1", "body": "STAGE2 DRAFT"}'},
+    ]
+    debug: dict = {"messages": list(prior_messages)}
+
+    _review_and_revise(
+        client,
+        {"title": "T1", "body": "original body"},
+        system="sys",
+        gen_user="u",
+        trace=[],
+        debug=debug,
+        revision_tool_schemas=_NOOP_TOOL_SCHEMAS,
+        revision_tool_handlers=_NOOP_TOOL_HANDLERS,
+    )
+
+    stored = debug["messages"]
+    # The original prior transcript survives, untouched, at the front.
+    assert stored[: len(prior_messages)] == prior_messages
+    tail = stored[len(prior_messages) :]
+    # The pass-0 grade appends a synthetic review_draft turn (see
+    # _record_grade/_debug_tool_turn) BEFORE the revision call -- locate the
+    # revision pass's own start (its fresh "sys..." system message) after it.
+    revision_start = next(
+        i
+        for i, m in enumerate(tail)
+        if m.get("role") == "system" and str(m.get("content", "")).startswith("sys")
+    )
+    revision_tail = tail[revision_start:]
+    assert revision_tail[0]["role"] == "system"
+    assert revision_tail[1]["role"] == "user"
+    assert any(m.get("role") == "assistant" and m.get("tool_calls") for m in revision_tail)
+    assert any(m.get("role") == "tool" and m.get("name") == "noop" for m in revision_tail)

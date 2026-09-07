@@ -138,6 +138,84 @@ def new_session_ref() -> tuple[UUID, datetime]:
     return uuid_from_time(now), now
 
 
+def _slim_message(m: dict[str, Any]) -> dict[str, Any]:
+    """One transcript message, capped for the compose_sessions row.
+
+    Content caps: the research→write digest handoff is the one "user" turn
+    worth seeing in full — it's the ONLY place to audit whether a bad fact
+    (wrong math, a fabricated date) originated in digest synthesis or in the
+    write pass itself; the generic 1500-char cap was truncating it
+    mid-sentence, right around where the Liveness Signals section lives,
+    hiding exactly the evidence needed to diagnose a fabrication (2026-07-10,
+    KryptoNurd). Same failure, different message (2026-08-02, Messina.one):
+    the FIRST user turn ("Write the article now...") carries the actual
+    scraped source material — the primary evidence for whether a specific
+    claim was genuinely grounded or invented; at 1500 chars it cut off after
+    ~30 lines of a multi-page SERVICE WATCH aggregate, nearly producing a
+    false fabrication call. llm_compose.py's two known opening templates both
+    start with "Write the article now", so matching that prefix covers both.
+
+    started_at_ms/ended_at_ms: the per-LLM-call wall-clock window stamped at
+    the actual request/response boundary (llm_openai_compatible's tool-loop
+    adapter, llm_compose._append_stage2_debug_turn) — carried through so the
+    stored transcript records when each call ran instead of leaving the
+    timeline to be inferred from log gaps (2026-09-05).
+    """
+    role = str(m.get("role", ""))
+    entry: dict[str, Any] = {"role": role}
+    content = m.get("content")
+    if content is not None:
+        text = str(content)
+        cap = (
+            6000
+            if text.startswith("[stage 2 handoff]")
+            else (
+                20_000
+                if role == "user" and text.startswith("Write the article now")
+                else (1500 if role in ("user", "system") else 4000)
+            )
+        )
+        entry["content"] = text[:cap]
+    tcs = m.get("tool_calls")
+    if tcs:
+        entry["tool_calls"] = [
+            {
+                "name": (tc.get("function") or {}).get("name"),
+                "arguments": str((tc.get("function") or {}).get("arguments") or "")[:600],
+            }
+            for tc in tcs
+        ]
+    if m.get("name"):
+        entry["name"] = str(m.get("name"))[:64]
+    for timing_key in ("started_at_ms", "ended_at_ms"):
+        value = m.get(timing_key)
+        if isinstance(value, int):
+            entry[timing_key] = value
+    return entry
+
+
+def _fit_transcript_to_cap(slim: list[dict[str, Any]]) -> str:
+    """Serialize `slim` to JSON, evicting whole entries until it fits the 120KB storage cap — never a raw string slice, which cuts mid-object and produces invalid JSON that would break every reader of this column (the Sessions page's json.loads).
+
+    Eviction starts AFTER the opening system+user pair when the transcript
+    begins with one: that pair is the compose's actual prompt — the primary
+    grounding evidence _slim_message's Messina fix gives a generous cap to —
+    and the plain pop(0) used before 2026-09-05 deleted exactly those two
+    messages first on any long session, which is why a stored transcript
+    could open cold at an assistant turn.
+    """
+    head_keep = 0
+    if slim and slim[0].get("role") == "system":
+        head_keep = 1
+        if len(slim) > 1 and slim[1].get("role") == "user":
+            head_keep = 2
+    messages_json = json.dumps(slim)
+    while len(messages_json) > 120_000 and len(slim) > head_keep + 1:
+        slim.pop(head_keep)
+        messages_json = json.dumps(slim)
+    return messages_json[:120_000]
+
+
 def record_compose_session(
     *,
     debug: dict[str, Any] | None,
@@ -158,7 +236,6 @@ def record_compose_session(
     """Persist the agentic transcript of one compose (best-effort). Pass a stable ``session_id``/``created_at`` (from new_session_ref) to UPSERT the same row at each stage so the admin sees progress live (status researching -> writing -> ok), instead of the row only appearing at the very end."""
     try:
         debug = debug or {}
-        slim: list[dict[str, Any]] = []
         # No message-count cap: the two-stage pipeline's most diagnostically
         # important turns (the research->write digest handoff,
         # review_draft/LLM-rubric grading, the final write) always come at the
@@ -168,68 +245,23 @@ def record_compose_session(
         # first-N slice silently dropped the entire handoff+review tail even
         # though the grading itself ran correctly (visible in final_output's
         # heuristic_grade, just invisible in the admin Sessions transcript).
-        # Per-message content is still capped below, so row size stays bounded
-        # by round count, not unbounded per entry.
-        for m in debug.get("messages") or []:
-            role = str(m.get("role", ""))
-            entry: dict[str, Any] = {"role": role}
-            content = m.get("content")
-            if content is not None:
-                text = str(content)
-                # The research→write digest handoff is the one "user" turn worth
-                # seeing in full: it's the ONLY place to audit whether a bad fact
-                # (wrong math, a fabricated date) originated in digest synthesis
-                # or in the write pass itself. The generic 1500-char cap was
-                # truncating it mid-sentence, right around where the Liveness
-                # Signals section lives — hiding exactly the evidence needed to
-                # diagnose a fabrication (2026-07-10, KryptoNurd).
-                #
-                # Same failure, different message (found 2026-08-02, Messina.one):
-                # the FIRST user turn ("Write the article now...") carries the
-                # actual scraped source material -- the primary evidence for
-                # whether a specific claim (a named protocol, an audit firm) was
-                # genuinely grounded or invented. At 1500 chars it cut off after
-                # ~30 lines of a multi-page SERVICE WATCH aggregate, making a
-                # claim sourced from page 3 of the scrape look unsourced when it
-                # wasn't -- nearly produced a false fabrication call on a piece
-                # that was actually fine. llm_compose.py's two known opening
-                # templates both start with "Write the article now" (the
-                # evolution and standard paths alike), so matching that prefix
-                # covers both without needing to know which one fired.
-                cap = (
-                    6000
-                    if text.startswith("[stage 2 handoff]")
-                    else (
-                        20_000
-                        if role == "user" and text.startswith("Write the article now")
-                        else (1500 if role in ("user", "system") else 4000)
-                    )
-                )
-                entry["content"] = text[:cap]
-            tcs = m.get("tool_calls")
-            if tcs:
-                entry["tool_calls"] = [
-                    {
-                        "name": (tc.get("function") or {}).get("name"),
-                        "arguments": str((tc.get("function") or {}).get("arguments") or "")[:600],
-                    }
-                    for tc in tcs
-                ]
-            if m.get("name"):
-                entry["name"] = str(m.get("name"))[:64]
-            slim.append(entry)
+        # Per-message content is still capped (_slim_message), so row size
+        # stays bounded by round count, not unbounded per entry.
+        slim: list[dict[str, Any]] = [_slim_message(m) for m in debug.get("messages") or []]
 
-        # Drop from the FRONT (oldest research rounds first) until the
-        # serialized transcript fits the storage cap, instead of blindly
-        # slicing the JSON string — a raw string slice cuts mid-object and
-        # produces invalid JSON, which would silently break every reader of
-        # this column (the Sessions page's json.loads) rather than just
-        # dropping the least valuable (earliest) entries cleanly.
-        messages_json = json.dumps(slim)
-        while len(messages_json) > 120_000 and len(slim) > 1:
-            slim.pop(0)
-            messages_json = json.dumps(slim)
-        messages_json = messages_json[:120_000]
+        # Ephemeral LLM calls with no message representation of their own
+        # (digest synthesis, raw-mode gap extraction, entity enumeration,
+        # narrative outline, rubric grading -- see llm_compose._note_llm_call)
+        # ride along as ONE trailing bookkeeping entry. Persistence-only: it
+        # is appended to the STORED array here, never to debug["messages"],
+        # so it can never be replayed into a later revision-pass API request.
+        # The interrogation replayer flattens unknown roles to plain user
+        # text, and the Sessions UI renders any role generically.
+        llm_calls = debug.get("llm_calls")
+        if isinstance(llm_calls, list) and llm_calls:
+            slim.append({"role": "llm_call_log", "content": json.dumps(llm_calls)[:8000]})
+
+        messages_json = _fit_transcript_to_cap(slim)
 
         from algorand_shared.feed_bucket import feed_month
 
@@ -323,7 +355,19 @@ def finalize_compose_session_outcome(source_url: str, outcome: str) -> bool:
 
 
 def reap_stale_compose_sessions(*, stale_minutes: int | None = None) -> dict[str, int]:
-    """Mark any compose_sessions row still stuck in a non-terminal status (researching/writing) past the staleness window as "stale". A crash that skips llm_compose's own try/except checkpoint finalizers (killed process, OOM, or an exception before the first checkpoint call) otherwise leaves the row looking perpetually in-progress in the admin Sessions view until the table's 7-day TTL quietly drops it. Best-effort, never raises."""
+    """Mark any compose_sessions row still stuck in a non-terminal status (researching/writing) with no checkpoint progress for the staleness window as "stale". A crash that skips llm_compose's own try/except checkpoint finalizers (killed process, OOM, or an exception before the first checkpoint call) otherwise leaves the row looking perpetually in-progress in the admin Sessions view until the table's 7-day TTL quietly drops it. Best-effort, never raises.
+
+    Staleness is measured from the row's LAST checkpoint upsert (created_at +
+    duration_ms, both already stored), never from created_at alone. Keying on
+    created_at silently broke the live "writing" status display: compose
+    tasks legitimately run up to COMPOSE_TASK_TIME_LIMIT (95 min) since the
+    LLM_MAX_TOOL_ROUNDS 24->48 raise, so this hourly beat overwrote a LIVE
+    session's status to "stale" mid-run once it passed the 60-minute window
+    -- and because the write/grade/revise phase performs no checkpoints, a
+    false "stale" stamped there stuck for the entire visible write phase,
+    which is why the admin Sessions tab never showed "writing" on a long
+    compose (root-caused 2026-09-05 on a ~90-minute recompose).
+    """
     from datetime import UTC, datetime, timedelta
 
     from app.core.config import COMPOSE_SESSION_STALE_MINUTES
@@ -351,7 +395,10 @@ def reap_stale_compose_sessions(*, stale_minutes: int | None = None) -> dict[str
                 created_at = row.created_at
                 if created_at.tzinfo is None:
                     created_at = created_at.replace(tzinfo=UTC)
-                if created_at >= cutoff:
+                last_activity = created_at + timedelta(
+                    milliseconds=int(getattr(row, "duration_ms", 0) or 0)
+                )
+                if last_activity >= cutoff:
                     continue
                 session.execute(
                     ToolInsightStmts.MARK_STALE, ("stale", bucket, row.created_at, row.session_id)

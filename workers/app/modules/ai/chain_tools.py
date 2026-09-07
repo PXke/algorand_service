@@ -1285,6 +1285,59 @@ def _tool_lookup_application(app_id: int | str) -> dict[str, Any]:
     }
 
 
+def _tool_lookup_application_account(app_id: int | str, limit: int = 10) -> dict[str, Any]:
+    """An application's escrow ("app") account: its ALGO balance and recent transaction history.
+
+    Root-caused gap (2026-09-07, writer feedback on the Sprout campaign story):
+    every account/balance/transaction tool here takes a wallet ADDRESS, but a
+    smart contract's escrow balance and refund/call history live at an address
+    the writer has no way to derive from just the app_id -- lookup_application
+    gives only DECODED GLOBAL STATE (a contract's self-reported counters like
+    "raised", which are whatever the contract author chose to track and can be
+    monotonic/never-decrementing even as real refunds happen), never the
+    escrow's actual on-chain balance or its real appl/axfer call history. That
+    forced trusting a project's own dashboard instead of verifying independently
+    on-chain -- exactly the gap this tool closes.
+
+    The escrow address is not stored anywhere on-chain; it's DERIVED, by a
+    fixed public algorithm every Algorand wallet/explorer uses (sha512_256
+    over the literal bytes "appID" + the app id as a big-endian uint64,
+    encoded as a normal Algorand address) -- see algosdk.logic.get_application_address.
+    Deterministic and free: no network call needed for the derivation itself,
+    only for the balance/transaction lookups that follow it.
+
+    Composes the existing lookup_account (current balance) and
+    lookup_account_transactions (recent activity, tx_type shows "appl" for
+    contract calls, "axfer"/"pay" for asset/ALGO transfers out) rather than
+    reimplementing either -- same derived address, so a fund-drain (or its
+    absence) shows up directly in balance_algo and in the transactions list's
+    outbound appl/axfer/pay entries, independent of anything the contract's
+    own global state claims.
+    """
+    aid = str(app_id).strip()
+    if not aid.isdigit():
+        return {"error": "app_id must be a numeric application id"}
+    from algosdk import logic
+
+    try:
+        escrow_address = logic.get_application_address(int(aid))
+    except (ValueError, OverflowError, TypeError) as e:
+        return {"app_id": int(aid), "error": f"could not derive escrow address: {e}"}
+    account = _tool_lookup_account(escrow_address)
+    if account.get("error"):
+        return {"app_id": int(aid), "escrow_address": escrow_address, **account}
+    transactions = _tool_lookup_account_transactions(escrow_address, limit=limit)
+    return {
+        "app_id": int(aid),
+        "escrow_address": escrow_address,
+        "balance_algo": account.get("balance_algo"),
+        "min_balance_algo": account.get("min_balance_algo"),
+        "assets_held": account.get("assets"),
+        "recent_transactions": transactions.get("transactions", []),
+        "most_recent_transaction_time": transactions.get("most_recent_round_time"),
+    }
+
+
 _BOXES_REQUEST_MAX = 10_000
 # Deliberately far above any real box count this tool will meet in practice —
 # see _boxes_get for why the request always asks for this many regardless of
@@ -1768,6 +1821,35 @@ CHAIN_SCHEMAS: list[dict[str, Any]] = [
     {
         "type": "function",
         "function": {
+            "name": "lookup_application_account",
+            "description": (
+                "An application's escrow (\"app\") account: its live ALGO/asset "
+                "balance and recent transaction history (appl calls, axfer/pay "
+                "transfers), by app_id alone. Use this — not lookup_application — "
+                "to independently verify an escrow's real balance or whether funds "
+                "have actually moved (a refund, a drain); lookup_application only "
+                "returns a contract's self-reported global-state counters (e.g. a "
+                "'raised' variable), which can be monotonic and never reflect a "
+                "later refund. The escrow address is derived deterministically "
+                "from app_id (no separate address needed or discoverable any "
+                "other way from the app id alone)."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "app_id": {"type": "integer", "description": "numeric application id"},
+                    "limit": {
+                        "type": "integer",
+                        "description": "max recent transactions to return (default 10, max 30)",
+                    },
+                },
+                "required": ["app_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "lookup_asset_by_name",
             "description": (
                 "Search mainnet Algorand Standard Assets by name or unit-name when "
@@ -2186,6 +2268,7 @@ CHAIN_HANDLERS: dict[str, Any] = {
     "get_asset_transaction_volume": _tool_get_asset_transaction_volume,
     "nft_collection_distribution_timeline": _tool_nft_collection_distribution_timeline,
     "lookup_application": _tool_lookup_application,
+    "lookup_application_account": _tool_lookup_application_account,
     "application_boxes": _tool_application_boxes,
     "get_asset_holder_share": _tool_get_asset_holder_share,
     "lookup_asset_holders": _tool_lookup_asset_holders,

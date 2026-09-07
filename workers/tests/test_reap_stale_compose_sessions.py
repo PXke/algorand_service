@@ -9,10 +9,13 @@ from app.modules.ai.tool_insights_store import reap_stale_compose_sessions
 
 
 class _Row:
-    def __init__(self, created_at: datetime, session_id: str, status: str) -> None:
+    def __init__(
+        self, created_at: datetime, session_id: str, status: str, duration_ms: int = 0
+    ) -> None:
         self.created_at = created_at
         self.session_id = session_id
         self.status = status
+        self.duration_ms = duration_ms
 
 
 def test_reaps_old_non_terminal_rows(
@@ -36,6 +39,38 @@ def test_reaps_old_non_terminal_rows(
     assert result == {"checked": 3, "reaped": 1}
     mark_call = fake_cassandra_session.execute.call_args_list[1]
     assert mark_call.args[1][3] == "old-researching"
+
+
+def test_live_long_compose_with_recent_checkpoint_is_not_reaped(
+    fake_cassandra_session: MagicMock,
+) -> None:
+    """Regression pin (2026-09-05): staleness is measured from the LAST checkpoint upsert (created_at + duration_ms), never from created_at alone. A compose legitimately running ~90 minutes (COMPOSE_TASK_TIME_LIMIT is 95 min since the 24->48 round raise) used to get flipped to "stale" mid-run once it aged past the 60-minute window -- and because the write/grade/revise phase performs no checkpoints, the false "stale" stuck for the whole visible write phase, hiding the researching->writing transition from the admin Sessions view entirely."""
+    now = datetime.now(tz=UTC)
+    rows = [
+        # Started 80 min ago, but its last checkpoint (duration_ms) was 5 min
+        # ago -- alive, mid-write, must NOT be reaped.
+        _Row(
+            now - timedelta(minutes=80),
+            "live-long-writing",
+            "writing",
+            duration_ms=75 * 60 * 1000,
+        ),
+        # Started 120 min ago and last checkpointed 110 min ago -- genuinely
+        # dead (crashed before its finalizers), reap it.
+        _Row(
+            now - timedelta(minutes=120),
+            "crashed-researching",
+            "researching",
+            duration_ms=10 * 60 * 1000,
+        ),
+    ]
+    fake_cassandra_session.execute.side_effect = [rows, None, []]
+
+    result = reap_stale_compose_sessions(stale_minutes=60)
+
+    assert result == {"checked": 2, "reaped": 1}
+    mark_call = fake_cassandra_session.execute.call_args_list[1]
+    assert mark_call.args[1][3] == "crashed-researching"
 
 
 def test_no_rows_is_a_noop(fake_cassandra_session: MagicMock) -> None:

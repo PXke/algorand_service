@@ -34,8 +34,8 @@ from __future__ import annotations
 import json
 import threading
 import uuid as uuid_module
-from collections.abc import Callable
-from datetime import UTC, datetime
+from collections.abc import Callable, Iterator
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any, Never
 from unittest.mock import patch
@@ -47,7 +47,8 @@ pytest.importorskip("x402")
 
 from algosdk import account, util
 from algosdk.encoding import encode_address
-from x402.mechanisms.avm.constants import ALGORAND_TESTNET_CAIP2
+from x402.extensions.bazaar import bazaar_resource_server_extension, validate_discovery_extension
+from x402.mechanisms.avm.constants import ALGORAND_MAINNET_CAIP2, ALGORAND_TESTNET_CAIP2
 
 from app.core import rate_limit as rate_limit_core
 from app.core.config import settings
@@ -58,6 +59,12 @@ from app.modules.x402 import circuit_breaker as circuit_breaker_module
 from app.modules.x402 import guard as x402_guard
 from app.modules.x402 import paid_request as payment_service
 from app.modules.x402.refund import RefundResult
+from app.modules.x402.settlement import (
+    EUR_VALUE_UNAVAILABLE,
+    InMemorySettlementStore,
+    SettlementRecord,
+    set_settlement_store,
+)
 from app.modules.x402_social.api import routes as social_routes
 from app.modules.x402_social.models.domain import (
     CASE_STATE_REJECTED,
@@ -66,6 +73,7 @@ from app.modules.x402_social.models.domain import (
     CATEGORY_NOT_HELPFUL,
     GROUP_ROLE_MEMBER,
     HARD_DELETE_SNAPSHOT_PLACEHOLDER,
+    LEADERBOARD_MAX_LIMIT,
     MAX_BIO_LEN,
     MAX_INTERESTS,
     REACTION_UP,
@@ -77,13 +85,21 @@ from app.modules.x402_social.models.domain import (
     ReactionTotals,
     SocialError,
     StoredCase,
+    StoredDmConversation,
+    StoredDmMessage,
     StoredGroup,
     StoredStanding,
     compute_ban_seconds,
     compute_report_cooldown_seconds,
 )
-from app.modules.x402_social.services import prose, session_service, trending_service
+from app.modules.x402_social.services import (
+    leaderboard_service,
+    prose,
+    session_service,
+    trending_service,
+)
 from app.modules.x402_social.services import rate_limit as social_rate_limit
+from app.modules.x402_social.services.dm_service import DmService, conversation_id_for
 from app.modules.x402_social.services.graph_service import GraphService
 from app.modules.x402_social.services.group_service import GroupService
 from app.modules.x402_social.services.markdown_guard import validate_markdown_body
@@ -101,6 +117,7 @@ _VOTER_A = encode_address(bytes([5]) + bytes(31))
 _VOTER_B = encode_address(bytes([6]) + bytes(31))
 _VOTER_C = encode_address(bytes([7]) + bytes(31))
 _VOTER_D = encode_address(bytes([8]) + bytes(31))
+_PROBE_PAYER = encode_address(bytes([9]) + bytes(31))
 
 _RESOURCE_BY_ROUTE = {
     "x402_social_register": social_routes._REGISTER_RESOURCE,
@@ -225,6 +242,12 @@ class _BrokenRedis:
         raise ConnectionError("redis down")
 
 
+@pytest.fixture(autouse=True)
+def _already_paid(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Skip the pre-parse 402 for header-less requests: every route test here models a request that already carries a payment (the gate is stubbed, or run against the offline facilitator), so the unpaid challenge is out of scope. Its ordering has its own tests in tests/test_x402_unpaid_challenge.py."""
+    monkeypatch.setattr(social_routes, "challenge_if_unpaid", lambda *_a, **_kw: None)
+
+
 @pytest.fixture
 def fake_redis(monkeypatch: pytest.MonkeyPatch) -> _FakeRedis:
     """Swap every Redis seam this module (and the shared paid-route machinery it calls through) touches for one in-process fake.
@@ -247,6 +270,46 @@ def fake_redis(monkeypatch: pytest.MonkeyPatch) -> _FakeRedis:
 def store() -> InMemorySocialStore:
     """A fresh in-memory social store per test."""
     return InMemorySocialStore()
+
+
+@pytest.fixture
+def ledger() -> Iterator[InMemorySettlementStore]:
+    """The shared in-memory settlement ledger, installed process-wide and torn down.
+
+    Same fixture shape as test_x402_grading.py's own `ledger` -- installed at
+    the shared seam rather than handed to leaderboard_service directly, so a
+    test exercises the same modules.x402.settlement.get_settlement_store()
+    wiring the real leaderboard route (and every paid route's
+    record_settlement call) goes through.
+    """
+    settlement_store = InMemorySettlementStore()
+    set_settlement_store(settlement_store)
+    yield settlement_store
+    set_settlement_store(None)
+
+
+def _settled(
+    ledger_: InMemorySettlementStore,
+    *,
+    payer: str,
+    eur_value: float,
+    tx_id: str,
+    network: str = ALGORAND_TESTNET_CAIP2,
+    resource: str = "x402-directory-list",
+) -> None:
+    """Record one real settlement directly on the ledger, with an explicit eur_value (bypassing the price oracle entirely -- these tests are exercising leaderboard_service's aggregation, not price_oracle)."""
+    ledger_.record_settlement(
+        SettlementRecord(
+            tx_id=tx_id,
+            asset_id="10458941",
+            amount_atomic="1000000",
+            payer=payer,
+            resource=resource,
+            network=network,
+            settled_at_epoch=int(datetime.now(tz=UTC).timestamp()),
+            eur_value=eur_value,
+        )
+    )
 
 
 def _settled_result(
@@ -1741,6 +1804,78 @@ def test_cassandra_store_treats_a_malformed_post_id_as_not_found_not_a_500(
     assert cassandra_store.get_post("not-a-uuid") is None
     assert cassandra_store.list_comments("not-a-uuid", limit=10) == []
     assert cassandra_store.get_reaction_totals("not-a-uuid") == ReactionTotals()
+
+    # A well-formed but non-version-1 UUID is "not found" too: post_id/case_id
+    # are timeuuid columns, and binding a NIL or v4 uuid to one is a
+    # Cassandra InvalidRequest the driver raised straight through to a live
+    # 500 (found 2026-09-05 on GET /posts/<nil>, POST .../comments, GET /cases/<nil>).
+    for non_v1 in ("00000000000000000000000000000000", str(uuid_module.uuid4())):
+        assert cassandra_store.get_post(non_v1) is None
+        assert cassandra_store.list_comments(non_v1, limit=10) == []
+        assert cassandra_store.get_reaction_totals(non_v1) == ReactionTotals()
+        assert cassandra_store.get_case(non_v1) is None
+
+
+def _capture_gate_kwargs(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+    """Replace the route module's payment gate with one that records its kwargs and returns a bare 402 -- enough to inspect what a route declares without a facilitator."""
+    captured: dict[str, Any] = {}
+
+    def _gate(_request: Request, **kwargs: object) -> x402_guard.PaymentResult:
+        captured.update(kwargs)
+        return x402_guard.PaymentResult(
+            error=Response(status_code=402, headers={}, description="{}")
+        )
+
+    monkeypatch.setattr(social_routes, "require_paid_request", _gate)
+    return captured
+
+
+def _validates_as_a_post(extensions: dict[str, Any]) -> bool:
+    """Run the declaration through the same method enrichment the resource server applies at request time, then the facilitator's own validator."""
+    enriched = bazaar_resource_server_extension.enrich_declaration(
+        extensions["bazaar"], SimpleNamespace(method="POST")
+    )
+    return validate_discovery_extension(enriched).valid
+
+
+@pytest.mark.usefixtures("fake_redis")
+def test_follow_declares_a_template_url_and_a_body_extension_that_validates_for_a_post(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """POST .../agents/{wallet}/follow takes no body, but as a POST it must still declare a body-shaped extension: a query-shaped one fails the facilitator's validator and the route is never catalogued (found live 2026-09-05)."""
+    captured = _capture_gate_kwargs(monkeypatch)
+
+    response = social_routes.x402_social_follow(
+        _request(path_params={"wallet": _PAYER}, path=f"/api/v1/x402/social/agents/{_PAYER}/follow")
+    )
+
+    assert response.status_code == 402
+    assert captured["resource_path"] == "/api/v1/x402/social/agents/{wallet}/follow"
+    assert _validates_as_a_post(captured["extensions"])
+
+
+@pytest.mark.usefixtures("fake_redis")
+def test_group_join_declares_a_template_url_and_a_body_extension_that_validates_for_a_post(
+    store: InMemorySocialStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Same rule as follow, for the other body-less paid POST in this module."""
+    group_service_ = GroupService(store, is_registered=_always_registered)
+    monkeypatch.setattr(social_routes, "group_service", group_service_)
+    group = group_service_.create(
+        owner=_PAYER, name="join-declaration", description="", settlement_tx_id="TX-J402"
+    )
+    captured = _capture_gate_kwargs(monkeypatch)
+
+    response = social_routes.x402_social_group_join(
+        _request(
+            path_params={"group_id": group.group_id},
+            path=f"/api/v1/x402/social/groups/{group.group_id}/join",
+        )
+    )
+
+    assert response.status_code == 402
+    assert captured["resource_path"] == "/api/v1/x402/social/groups/{group_id}/join"
+    assert _validates_as_a_post(captured["extensions"])
 
 
 def test_new_post_or_comment_id_does_not_embed_a_real_mac_address() -> None:
@@ -3518,10 +3653,11 @@ def test_agent_search_route_is_paid_and_returns_ranked_matches(
     assert fulfilled == [("TX-SEARCH", social_routes._AGENT_SEARCH_RESOURCE)]
 
 
+@pytest.mark.usefixtures("fake_redis")
 def test_agent_search_route_requires_interests_as_a_free_400(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A missing ?interests= is a free 400 -- require_paid_request must never be called."""
+    """A missing ?interests= is a free 400 -- require_paid_request must never be called; the circuit breaker now runs before this validation, like every other paid route, so the fake Redis keeps it closed."""
 
     def _fail_if_called(*_a: object, **_kw: object) -> Never:
         raise AssertionError(
@@ -3564,6 +3700,77 @@ def test_agent_search_route_never_forwards_promo_params(
 
     assert "promo_code" not in captured
     assert "promo_wallet" not in captured
+
+
+@pytest.mark.usefixtures("fake_redis")
+def test_agent_search_preview_never_touches_the_real_directory(
+    store: InMemorySocialStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """?preview=true goes through the real gate (is_preview=True), never calls profile_service.search_by_interests, and comes back as a fake exemplar hit with sentinel wallet/settlement_tx_id -- not even a real match count leaks for free."""
+    profile_service_ = ProfileService(store)
+    monkeypatch.setattr(social_routes, "profile_service", profile_service_)
+    monkeypatch.setattr(
+        profile_service_,
+        "search_by_interests",
+        lambda *_a, **_kw: pytest.fail("the real directory must not be queried for a preview"),
+    )
+    captured: dict = {}
+
+    def _spy_require_paid_request(*_a: object, **kwargs: object) -> x402_guard.PaymentResult:
+        captured.update(kwargs)
+        return x402_guard.PaymentResult(error=None, is_preview=True)
+
+    monkeypatch.setattr(social_routes, "require_paid_request", _spy_require_paid_request)
+    fulfilled: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        social_routes,
+        "mark_fulfilled",
+        lambda txid, *, resource: fulfilled.append((txid, resource)),
+    )
+
+    response = social_routes.x402_social_agent_search(
+        _request(
+            method="GET",
+            query={"interests": "defi,nft", "preview": "true"},
+            path="/api/v1/x402/social/agents/search",
+        )
+    )
+
+    assert response.status_code == 200
+    assert captured["preview"] is True
+    body = json.loads(response.description)
+    assert body["settlement_tx_id"] == "<preview>"
+    assert body["query"] == {
+        "interests": ["defi", "nft"],
+        "limit": social_routes.AGENT_SEARCH_DEFAULT_LIMIT,
+    }
+    assert len(body["agents"]) == 1
+    hit = body["agents"][0]
+    assert hit["wallet"] == "<preview>"
+    assert hit["settlement_tx_id"] == "<preview>"
+    assert set(hit) == set(social_routes._AGENT_OUTPUT_EXAMPLE) | {"matched_interests"}
+    assert "PAYMENT-RESPONSE" not in response.headers
+    assert fulfilled == []
+
+
+@pytest.mark.usefixtures("fake_redis")
+def test_agent_search_preview_still_gets_the_free_400_for_missing_interests(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A malformed query is a free 400 whether or not ?preview=true is present -- validation runs before the gate either way."""
+
+    def _fail_if_called(*_a: object, **_kw: object) -> x402_guard.PaymentResult:
+        raise AssertionError(
+            "require_paid_request must not be called for a missing interests param"
+        )
+
+    monkeypatch.setattr(social_routes, "require_paid_request", _fail_if_called)
+
+    response = social_routes.x402_social_agent_search(
+        _request(method="GET", query={"preview": "true"}, path="/api/v1/x402/social/agents/search")
+    )
+
+    assert response.status_code == 400
 
 
 def test_search_by_interests_ranks_by_match_count_then_recency(store: InMemorySocialStore) -> None:
@@ -3675,3 +3882,972 @@ def test_edit_removes_stale_interest_rows_and_adds_new_ones(store: InMemorySocia
     assert [w for w, _at in store.list_agents_by_interest("defi", limit=10)] == [_PAYER]
     assert [w for w, _at in store.list_agents_by_interest("gaming", limit=10)] == [_PAYER]
     assert store.list_agents_by_interest("nft", limit=10) == []  # dropped tag's row is gone
+
+
+# --------------------------------------------------------------------------- #
+# Group Discovery by tag (added 2026-09-06)
+# --------------------------------------------------------------------------- #
+def test_group_service_list_by_tag_filters_and_ranks_newest_first(
+    store: InMemorySocialStore,
+) -> None:
+    """Only groups carrying the (normalized) tag come back, newest first; an untagged/other-tagged group and an unknown tag are excluded."""
+    service = GroupService(store, is_registered=_always_registered)
+    older = service.create(
+        owner=_PAYER,
+        name="defi-signals",
+        description="",
+        settlement_tx_id="TX-GT1",
+        tags=["DeFi", "Liquidity"],
+        now=datetime(2026, 1, 1, tzinfo=UTC),
+    )
+    newer = service.create(
+        owner=_OTHER_PAYER,
+        name="defi-alerts",
+        description="",
+        settlement_tx_id="TX-GT2",
+        tags=["defi"],
+        now=datetime(2026, 1, 2, tzinfo=UTC),
+    )
+    service.create(
+        owner=_PAYER,
+        name="nft-corner",
+        description="",
+        settlement_tx_id="TX-GT3",
+        tags=["nft"],
+    )
+
+    matches = service.list_by_tag("defi", limit=10)
+    assert [g.group_id for g in matches] == [newer.group_id, older.group_id]
+    assert [g.group_id for g in service.list_by_tag("liquidity", limit=10)] == [older.group_id]
+    assert service.list_by_tag("unknown-tag", limit=10) == []
+
+
+def test_group_service_create_normalizes_tags_the_same_way_a_posts_tags_are(
+    store: InMemorySocialStore,
+) -> None:
+    """Group tags are trimmed/lowercased/deduped via post_service.normalize_tags -- the same normalization a post's own tags already get, no second scheme."""
+    service = GroupService(store, is_registered=_always_registered)
+    group = service.create(
+        owner=_PAYER,
+        name="caps-test",
+        description="",
+        settlement_tx_id="TX-GT4",
+        tags=[" DeFi ", "defi", "NFT"],
+    )
+    assert group.tags == ["defi", "nft"]
+    assert [g.group_id for g in service.list_by_tag("nft", limit=10)] == [group.group_id]
+
+
+def test_group_service_create_rejects_too_many_tags(store: InMemorySocialStore) -> None:
+    """The same settings.x402_social_max_tags bound a post's own tags are held to applies to a group's tags."""
+    service = GroupService(store, is_registered=_always_registered)
+    too_many = [f"tag{i}" for i in range(settings.x402_social_max_tags + 1)]
+    with pytest.raises(SocialError) as exc_info:
+        service.create(
+            owner=_PAYER,
+            name="too-many-tags",
+            description="",
+            settlement_tx_id="TX-GT5",
+            tags=too_many,
+        )
+    assert exc_info.value.code == "invalid_request"
+
+
+def test_group_service_list_by_tag_excludes_hidden_platform_groups(
+    store: InMemorySocialStore,
+) -> None:
+    """A platform-hidden group (Phase S2) is filtered out of ?tag= the same way it is filtered out of list_recent -- the tag lookup always point-reads the fresh canonical row."""
+    service = GroupService(store, is_registered=_always_registered)
+    group = service.create(
+        owner=_PAYER, name="to-hide", description="", settlement_tx_id="TX-GT6", tags=["defi"]
+    )
+    store.mark_group_hidden_platform(group)
+    assert service.list_by_tag("defi", limit=10) == []
+
+
+@pytest.mark.usefixtures("fake_redis")
+def test_groups_list_route_tag_query_filters_and_validates(
+    store: InMemorySocialStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """GET /groups?tag= filters to matching groups (case/whitespace-normalized); an over-long tag is a free 400; a blank ?tag= (query_param already trims) is treated the same as no ?tag= at all -- the plain, unfiltered browse."""
+    group_service_ = GroupService(store, is_registered=_always_registered)
+    monkeypatch.setattr(social_routes, "group_service", group_service_)
+    tagged = group_service_.create(
+        owner=_PAYER, name="tagged-group", description="", settlement_tx_id="TX-GT7", tags=["DeFi"]
+    )
+    group_service_.create(
+        owner=_OTHER_PAYER, name="untagged-group", description="", settlement_tx_id="TX-GT8"
+    )
+
+    filtered = social_routes.x402_social_groups_list(
+        _request(method="GET", query={"tag": " DeFi "}, path="/api/v1/x402/social/groups")
+    )
+    assert [g["group_id"] for g in filtered["groups"]] == [tagged.group_id]
+    assert filtered["groups"][0]["tags"] == ["defi"]
+
+    unfiltered = social_routes.x402_social_groups_list(
+        _request(method="GET", path="/api/v1/x402/social/groups")
+    )
+    assert len(unfiltered["groups"]) == 2
+
+    blank = social_routes.x402_social_groups_list(
+        _request(method="GET", query={"tag": "   "}, path="/api/v1/x402/social/groups")
+    )
+    assert len(blank["groups"]) == 2  # trims to "", same as omitted -- not a 400
+
+    too_long = social_routes.x402_social_groups_list(
+        _request(method="GET", query={"tag": "x" * 40}, path="/api/v1/x402/social/groups")
+    )
+    assert too_long.status_code == 400
+    assert json.loads(too_long.description)["error"]["code"] == "invalid_request"
+
+
+@pytest.mark.usefixtures("fake_redis")
+def test_group_create_route_accepts_tags_and_they_become_searchable(
+    store: InMemorySocialStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """POST /groups' optional `tags` field flows through to GET /groups?tag= end to end."""
+    monkeypatch.setattr(
+        social_routes, "group_service", GroupService(store, is_registered=_always_registered)
+    )
+    monkeypatch.setattr(
+        social_routes,
+        "require_paid_request",
+        lambda *_a, **_kw: _settled_result(payer=_PAYER, txid="TX-GCT1"),
+    )
+    fulfilled: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        social_routes,
+        "mark_fulfilled",
+        lambda txid, *, resource: fulfilled.append((txid, resource)),
+    )
+
+    body = json.dumps({"name": "tag-flow", "description": "", "tags": [" DeFi ", "defi"]}).encode()
+    response = social_routes.x402_social_group_create(
+        _request(body=body, path="/api/v1/x402/social/groups")
+    )
+    assert response.status_code == 200
+    payload = json.loads(response.description)
+    assert payload["group"]["tags"] == ["defi"]
+
+    listing = social_routes.x402_social_groups_list(
+        _request(method="GET", query={"tag": "defi"}, path="/api/v1/x402/social/groups")
+    )
+    assert [g["group_id"] for g in listing["groups"]] == [payload["group"]["group_id"]]
+    assert fulfilled == [("TX-GCT1", social_routes._GROUP_CREATE_RESOURCE)]
+
+
+@pytest.mark.usefixtures("fake_redis")
+def test_group_create_route_rejects_too_many_tags_as_a_free_400_before_the_gate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An oversized tags list is caught before require_paid_request is ever called -- a free 400, nothing charged."""
+
+    def _fail_if_called(*_a: object, **_kw: object) -> Never:
+        raise AssertionError("require_paid_request must not be called for an invalid tags list")
+
+    monkeypatch.setattr(social_routes, "require_paid_request", _fail_if_called)
+
+    too_many_tags = [f"tag{i}" for i in range(settings.x402_social_max_tags + 1)]
+    body = json.dumps({"name": "too-many-tags", "tags": too_many_tags}).encode()
+    response = social_routes.x402_social_group_create(
+        _request(body=body, path="/api/v1/x402/social/groups")
+    )
+    assert response.status_code == 400
+    assert json.loads(response.description)["error"]["code"] == "invalid_request"
+
+
+# --------------------------------------------------------------------------- #
+# Spend-weighted agent leaderboard (added 2026-09-06)
+# --------------------------------------------------------------------------- #
+class _AscendingLimitThenReverseSettlementStore:
+    """A hypothetical store whose LIMIT keeps the OLDEST rows of a day, then reverses to look newest-first.
+
+    NOT how CassandraSettlementStore actually behaves: it was briefly
+    believed to (a same-night review found `list_for_day`'s docstring wrongly
+    claimed the table defaulted to ascending clustering order, when
+    `x402_settlements` is actually `CLUSTERING ORDER BY (settled_at DESC,
+    ...)` -- migration 090), and `list_for_day` was fixed at the source in
+    app/modules/x402/settlement.py 2026-09-06 to stop reversing an
+    already-correct newest-first page. This fake keeps the ORIGINAL
+    (mis-)behavior alive here on purpose, as a defensive regression test:
+    leaderboard_service's filter-before-cap logic should not structurally
+    depend on `list_for_day` getting its ordering right, since a future
+    store implementation could get it wrong again the same way this one
+    briefly did. `InMemorySettlementStore` (the fake normally used by these
+    tests) sorts descending before slicing and cannot exercise this path.
+    """
+
+    def __init__(self, settlements: list[SettlementRecord]) -> None:
+        self.settlements = settlements
+
+    def list_for_day(self, day: str, *, limit: int) -> list[SettlementRecord]:
+        day_rows = [
+            s
+            for s in self.settlements
+            if datetime.fromtimestamp(s.settled_at_epoch, tz=UTC).strftime("%Y-%m-%d") == day
+        ]
+        day_rows.sort(key=lambda s: s.settled_at_epoch)  # ascending, like the table's default
+        oldest_n = day_rows[:limit]  # the real bug: the raw LIMIT bites the ascending scan
+        oldest_n.reverse()  # the real store's own "make it look newest-first" step
+        return oldest_n
+
+    def record_settlement(self, item: SettlementRecord) -> None:  # pragma: no cover - unused
+        raise NotImplementedError
+
+    def get_settlement(self, tx_id: str) -> SettlementRecord | None:  # pragma: no cover - unused
+        raise NotImplementedError
+
+    def mark_fulfilled(self, tx_id: str) -> bool:  # pragma: no cover - unused
+        raise NotImplementedError
+
+    def record_refund(  # pragma: no cover - unused
+        self, tx_id: str, *, refund_tx_id: str | None, refund_status: str
+    ) -> bool:
+        raise NotImplementedError
+
+
+def test_aggregate_real_spend_by_payer_keeps_the_newest_settlements_within_the_per_day_cap() -> (
+    None
+):
+    """Defensive regression (finding #8): even against a store whose LIMIT keeps a day's oldest rows (see `_AscendingLimitThenReverseSettlementStore` -- not how the real store behaves, since its `list_for_day` was fixed at the source 2026-09-06), this module's filter-before-cap logic must still surface the NEWEST settlements of an over-cap day, not the oldest."""
+    cap = 200
+    total_real = cap + 50
+    base_epoch = int(
+        datetime.now(tz=UTC).replace(hour=1, minute=0, second=0, microsecond=0).timestamp()
+    )
+    payers = [encode_address(bytes([i]) + bytes(31)) for i in range(total_real)]
+    settlements = [
+        SettlementRecord(
+            tx_id=f"TX-ORDER-{i}",
+            asset_id="10458941",
+            amount_atomic="1000000",
+            payer=payers[i],
+            resource="x402-directory-list",
+            network=ALGORAND_TESTNET_CAIP2,
+            settled_at_epoch=base_epoch + i,  # strictly increasing: higher i == newer
+            eur_value=1.0,
+        )
+        for i in range(total_real)
+    ]
+    fake_store = _AscendingLimitThenReverseSettlementStore(settlements)
+
+    totals = leaderboard_service.aggregate_real_spend_by_payer(
+        window_days=1, store=fake_store, now=datetime.fromtimestamp(base_epoch, tz=UTC)
+    )
+
+    oldest_dropped = payers[: total_real - cap]
+    newest_kept = payers[total_real - cap :]
+    assert len(totals) == cap
+    assert all(p not in totals for p in oldest_dropped)
+    assert all(p in totals for p in newest_kept)
+
+
+def test_aggregate_real_spend_by_payer_does_not_let_probe_rows_crowd_out_real_ones_within_the_cap(
+    ledger: InMemorySettlementStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression for finding #8's second half: probe-payer settlements must be filtered out BEFORE the per-day real cap is applied, not after. Here 5 probe settlements are all NEWER than 3 real ones and a tiny cap of 3 -- under the pre-fix code (which capped the raw store read at the real limit itself), those 3 newest-of-the-day rows would ALL be probes and every real payer would be invisible to the leaderboard."""
+    monkeypatch.setattr(settings, "x402_probe_payers", _PROBE_PAYER)
+    monkeypatch.setattr(leaderboard_service, "LEADERBOARD_SETTLEMENTS_PER_DAY_CAP", 3)
+    base = datetime.now(tz=UTC).replace(hour=2, minute=0, second=0, microsecond=0)
+    real_payers = [_PAYER, _OTHER_PAYER, _VOTER_A]
+    for i, payer in enumerate(real_payers):
+        ledger.record_settlement(
+            SettlementRecord(
+                tx_id=f"TX-REAL-{i}",
+                asset_id="10458941",
+                amount_atomic="1000000",
+                payer=payer,
+                resource="x402-directory-list",
+                network=ALGORAND_TESTNET_CAIP2,
+                settled_at_epoch=int((base + timedelta(seconds=i)).timestamp()),
+                eur_value=1.0,
+            )
+        )
+    for i in range(5):
+        ledger.record_settlement(
+            SettlementRecord(
+                tx_id=f"TX-PROBE-{i}",
+                asset_id="10458941",
+                amount_atomic="1000000",
+                payer=_PROBE_PAYER,
+                resource="x402-directory-list",
+                network=ALGORAND_TESTNET_CAIP2,
+                settled_at_epoch=int((base + timedelta(seconds=100 + i)).timestamp()),
+                eur_value=1.0,
+            )
+        )
+
+    totals = leaderboard_service.aggregate_real_spend_by_payer(window_days=1, now=base)
+
+    assert _PROBE_PAYER not in totals
+    assert len(totals) == 3
+    for payer in real_payers:
+        assert totals[payer].total_eur_spent == pytest.approx(1.0)
+
+
+def test_aggregate_real_spend_by_payer_sums_real_settlements_excludes_probe_and_other_network(
+    ledger: InMemorySettlementStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Real settlements for the SAME payer sum; an unpriceable one still counts toward settlement_count but not the EUR total; a probe payer and a different-network settlement are excluded entirely."""
+    monkeypatch.setattr(settings, "x402_probe_payers", _PROBE_PAYER)
+    _settled(ledger, payer=_PAYER, eur_value=1.5, tx_id="TX-S1")
+    _settled(ledger, payer=_PAYER, eur_value=2.5, tx_id="TX-S2")
+    _settled(ledger, payer=_PAYER, eur_value=EUR_VALUE_UNAVAILABLE, tx_id="TX-S3")
+    _settled(ledger, payer=_OTHER_PAYER, eur_value=0.5, tx_id="TX-S4")
+    _settled(ledger, payer=_PROBE_PAYER, eur_value=100.0, tx_id="TX-S5")
+    _settled(ledger, payer=_VOTER_A, eur_value=9.0, tx_id="TX-S6", network=ALGORAND_MAINNET_CAIP2)
+
+    totals = leaderboard_service.aggregate_real_spend_by_payer(window_days=1)
+
+    assert totals[_PAYER].total_eur_spent == pytest.approx(4.0)
+    assert totals[_PAYER].settlement_count == 3
+    assert totals[_OTHER_PAYER].total_eur_spent == pytest.approx(0.5)
+    assert _PROBE_PAYER not in totals
+    assert _VOTER_A not in totals
+
+
+def test_aggregate_real_spend_by_payer_respects_the_window(
+    ledger: InMemorySettlementStore,
+) -> None:
+    """A settlement older than the window is excluded; widening the window picks it back up."""
+    old = datetime.now(tz=UTC) - timedelta(days=40)
+    ledger.record_settlement(
+        SettlementRecord(
+            tx_id="TX-OLD",
+            asset_id="10458941",
+            amount_atomic="1000000",
+            payer=_PAYER,
+            resource="x402-directory-list",
+            network=ALGORAND_TESTNET_CAIP2,
+            settled_at_epoch=int(old.timestamp()),
+            eur_value=5.0,
+        )
+    )
+
+    assert _PAYER not in leaderboard_service.aggregate_real_spend_by_payer(window_days=30)
+    within = leaderboard_service.aggregate_real_spend_by_payer(window_days=45)
+    assert within[_PAYER].total_eur_spent == pytest.approx(5.0)
+
+
+def test_aggregate_real_spend_by_payer_respects_the_per_day_settlement_cap(
+    ledger: InMemorySettlementStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only up to the per-day cap of real settlements is read per UTC day -- monkeypatched to 2 so the test does not need to write hundreds of rows to prove it."""
+    monkeypatch.setattr(leaderboard_service, "LEADERBOARD_SETTLEMENTS_PER_DAY_CAP", 2)
+    _settled(ledger, payer=_PAYER, eur_value=1.0, tx_id="TX-CAP1")
+    _settled(ledger, payer=_PAYER, eur_value=1.0, tx_id="TX-CAP2")
+    _settled(ledger, payer=_PAYER, eur_value=1.0, tx_id="TX-CAP3")
+
+    totals = leaderboard_service.aggregate_real_spend_by_payer(window_days=1)
+    assert totals[_PAYER].settlement_count == 2
+
+
+def test_rank_registered_agents_by_spend_orders_excludes_zero_spend_and_unregistered(
+    store: InMemorySocialStore, ledger: InMemorySettlementStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Ranked highest-spend-first; a registered agent with zero real spend and a real spender who never registered on the social network are both excluded."""
+    monkeypatch.setattr(settings, "x402_probe_payers", _PROBE_PAYER)
+    profile_service_ = ProfileService(store)
+    for wallet, name in (
+        (_PAYER, "BigSpender"),
+        (_OTHER_PAYER, "SmallSpender"),
+        (_VOTER_A, "NeverPaid"),
+    ):
+        profile_service_.register(
+            wallet=wallet,
+            name=name,
+            bio="",
+            mission="",
+            location="",
+            interests=[],
+            emoji="",
+            settlement_tx_id=f"TX-REG-{name}",
+        )
+
+    _settled(ledger, payer=_PAYER, eur_value=10.0, tx_id="TX-R1")
+    _settled(ledger, payer=_OTHER_PAYER, eur_value=1.0, tx_id="TX-R2")
+    # Real spend, but never registered on the social network -- must not appear.
+    _settled(ledger, payer=_VOTER_B, eur_value=50.0, tx_id="TX-R3")
+    # Our own probe wallet -- excluded even though it "spent" the most.
+    _settled(ledger, payer=_PROBE_PAYER, eur_value=1000.0, tx_id="TX-R4")
+
+    ranked = leaderboard_service.rank_registered_agents_by_spend(
+        limit=10, profile_lookup=profile_service_.get
+    )
+
+    assert [profile.wallet for profile, _spend in ranked] == [_PAYER, _OTHER_PAYER]
+    assert ranked[0][1].total_eur_spent == pytest.approx(10.0)
+    assert ranked[1][1].total_eur_spent == pytest.approx(1.0)
+
+
+def test_rank_registered_agents_by_spend_respects_limit(
+    store: InMemorySocialStore, ledger: InMemorySettlementStore
+) -> None:
+    """The `limit` cap is honored regardless of how many registered agents have real spend."""
+    profile_service_ = ProfileService(store)
+    for i, wallet in enumerate((_PAYER, _OTHER_PAYER, _VOTER_A)):
+        profile_service_.register(
+            wallet=wallet,
+            name=f"Agent{i}",
+            bio="",
+            mission="",
+            location="",
+            interests=[],
+            emoji="",
+            settlement_tx_id=f"TX-LIM-{i}",
+        )
+        _settled(ledger, payer=wallet, eur_value=float(i + 1), tx_id=f"TX-LIM-S{i}")
+
+    ranked = leaderboard_service.rank_registered_agents_by_spend(
+        limit=2, profile_lookup=profile_service_.get
+    )
+    assert len(ranked) == 2
+
+
+@pytest.mark.usefixtures("fake_redis")
+def test_agent_leaderboard_route_is_paid_and_ranks_by_real_spend_with_limit_clamped(
+    store: InMemorySocialStore, ledger: InMemorySettlementStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """GET /agents/leaderboard is wired through require_paid_request/run_with_refund; a requested limit above LEADERBOARD_MAX_LIMIT is clamped, and mark_fulfilled runs exactly once."""
+    profile_service_ = ProfileService(store)
+    monkeypatch.setattr(social_routes, "profile_service", profile_service_)
+    profile_service_.register(
+        wallet=_PAYER,
+        name="BigSpender",
+        bio="",
+        mission="",
+        location="",
+        interests=[],
+        emoji="",
+        settlement_tx_id="TX-REGL1",
+    )
+    profile_service_.register(
+        wallet=_OTHER_PAYER,
+        name="SmallSpender",
+        bio="",
+        mission="",
+        location="",
+        interests=[],
+        emoji="",
+        settlement_tx_id="TX-REGL2",
+    )
+    _settled(ledger, payer=_PAYER, eur_value=10.0, tx_id="TX-RL1")
+    _settled(ledger, payer=_OTHER_PAYER, eur_value=1.0, tx_id="TX-RL2")
+
+    captured: dict = {}
+
+    def _spy_require_paid_request(*_a: object, **kwargs: object) -> x402_guard.PaymentResult:
+        captured.update(kwargs)
+        return _settled_result(payer=_VOTER_A, txid="TX-LEADERBOARD")
+
+    monkeypatch.setattr(social_routes, "require_paid_request", _spy_require_paid_request)
+    fulfilled: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        social_routes,
+        "mark_fulfilled",
+        lambda txid, *, resource: fulfilled.append((txid, resource)),
+    )
+
+    response = social_routes.x402_social_agent_leaderboard(
+        _request(
+            method="GET",
+            query={"limit": str(LEADERBOARD_MAX_LIMIT + 10)},
+            path="/api/v1/x402/social/agents/leaderboard",
+        )
+    )
+
+    assert response.status_code == 200
+    assert captured["price"] == settings.x402_social_agent_leaderboard_price
+    assert captured["resource"] == social_routes._AGENT_LEADERBOARD_RESOURCE
+    body = json.loads(response.description)
+    assert body["limit"] == LEADERBOARD_MAX_LIMIT
+    assert body["window_days"] == leaderboard_service.LEADERBOARD_WINDOW_DAYS
+    assert [a["wallet"] for a in body["agents"]] == [_PAYER, _OTHER_PAYER]
+    assert body["agents"][0]["total_eur_spent"] == pytest.approx(10.0)
+    assert fulfilled == [("TX-LEADERBOARD", social_routes._AGENT_LEADERBOARD_RESOURCE)]
+
+
+@pytest.mark.usefixtures("fake_redis")
+def test_agent_leaderboard_route_rejects_a_non_integer_limit_as_a_free_400(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A malformed ?limit= never reaches require_paid_request -- a free 400, nothing charged."""
+
+    def _fail_if_called(*_a: object, **_kw: object) -> Never:
+        raise AssertionError("require_paid_request must not be called for an invalid limit")
+
+    monkeypatch.setattr(social_routes, "require_paid_request", _fail_if_called)
+
+    response = social_routes.x402_social_agent_leaderboard(
+        _request(
+            method="GET",
+            query={"limit": "not-a-number"},
+            path="/api/v1/x402/social/agents/leaderboard",
+        )
+    )
+    assert response.status_code == 400
+    assert json.loads(response.description)["error"]["code"] == "invalid_request"
+
+
+# --------------------------------------------------------------------------- #
+# Private messages (DMs, migration 122, operator ask 2026-09-07)
+# --------------------------------------------------------------------------- #
+def test_dm_conversation_id_is_order_independent() -> None:
+    """conversation_id_for(a, b) == conversation_id_for(b, a) -- both participants resolve to the same partition regardless of call order."""
+    assert conversation_id_for(_PAYER, _OTHER_PAYER) == conversation_id_for(_OTHER_PAYER, _PAYER)
+    assert conversation_id_for(_PAYER, _OTHER_PAYER) != conversation_id_for(_PAYER, _REPORTER)
+
+
+def test_dm_send_and_list_conversation_round_trip(store: InMemorySocialStore) -> None:
+    """A -> send -> B is readable by BOTH participants via list_conversation, newest-first, and shows up in both wallets' list_conversations."""
+    _register(store, _PAYER)
+    _register(store, _OTHER_PAYER)
+    service = DmService(store, is_registered=lambda w: store.get_agent(w) is not None)
+
+    # Explicit, distinct timestamps -- ties on created_at_epoch break by
+    # message_id ascending (same tie-break shape LIST_POSTS_BY_AUTHOR's own
+    # in-memory mirror uses), which is not the same thing as send order, so
+    # a same-second pair would make this assertion flaky.
+    first = service.send(
+        sender=_PAYER,
+        recipient=_OTHER_PAYER,
+        body="hello",
+        now=datetime(2026, 9, 7, 12, 0, 0, tzinfo=UTC),
+    )
+    second = service.send(
+        sender=_OTHER_PAYER,
+        recipient=_PAYER,
+        body="hi back",
+        now=datetime(2026, 9, 7, 12, 0, 1, tzinfo=UTC),
+    )
+
+    # Both participants see the SAME two messages in the SAME conversation,
+    # newest-first, regardless of which side calls list_conversation.
+    from_payer_side = service.list_conversation(_PAYER, _OTHER_PAYER, limit=10)
+    from_other_side = service.list_conversation(_OTHER_PAYER, _PAYER, limit=10)
+    assert [m.message_id for m in from_payer_side] == [second.message_id, first.message_id]
+    assert [m.message_id for m in from_other_side] == [second.message_id, first.message_id]
+    assert from_payer_side[0].body == "hi back"
+    assert from_payer_side[0].sender == _OTHER_PAYER
+
+    payer_conversations = service.list_conversations(_PAYER, limit=10)
+    assert len(payer_conversations) == 1
+    assert payer_conversations[0].peer_wallet == _OTHER_PAYER
+    assert payer_conversations[0].last_sender == _OTHER_PAYER
+    assert payer_conversations[0].last_message_preview == "hi back"
+
+    other_conversations = service.list_conversations(_OTHER_PAYER, limit=10)
+    assert len(other_conversations) == 1
+    assert other_conversations[0].peer_wallet == _PAYER
+
+
+def test_dm_send_rejects_self_message(store: InMemorySocialStore) -> None:
+    """A wallet cannot DM itself -- cannot_message_self, 400, mirroring GraphService.follow's self-follow refusal."""
+    _register(store, _PAYER)
+    service = DmService(store, is_registered=lambda w: store.get_agent(w) is not None)
+    with pytest.raises(SocialError) as exc_info:
+        service.send(sender=_PAYER, recipient=_PAYER, body="talking to myself")
+    assert exc_info.value.code == "cannot_message_self"
+    assert exc_info.value.http_status == 400
+
+
+def test_dm_send_requires_both_sender_and_recipient_registered(store: InMemorySocialStore) -> None:
+    """An unregistered sender OR an unregistered recipient is refused as not_registered (finding-4-style fail closed), unlike GraphService.follow which only checks the follower."""
+    service = DmService(store, is_registered=lambda w: store.get_agent(w) is not None)
+
+    # Neither registered.
+    with pytest.raises(SocialError) as exc_info:
+        service.send(sender=_PAYER, recipient=_OTHER_PAYER, body="hi")
+    assert exc_info.value.code == "not_registered"
+
+    # Sender registered, recipient not.
+    _register(store, _PAYER)
+    with pytest.raises(SocialError) as exc_info:
+        service.send(sender=_PAYER, recipient=_OTHER_PAYER, body="hi")
+    assert exc_info.value.code == "not_registered"
+
+    # Recipient registered, sender not.
+    _register(store, _OTHER_PAYER)
+    store2 = InMemorySocialStore()
+    service2 = DmService(store2, is_registered=lambda w: store2.get_agent(w) is not None)
+    _register(store2, _OTHER_PAYER)
+    with pytest.raises(SocialError) as exc_info:
+        service2.send(sender=_PAYER, recipient=_OTHER_PAYER, body="hi")
+    assert exc_info.value.code == "not_registered"
+
+
+def test_dm_send_rejects_oversized_and_html_bodies(store: InMemorySocialStore) -> None:
+    """DM bodies go through the same markdown_guard.validate_markdown_body every comment already does -- reused, not a new validator."""
+    _register(store, _PAYER)
+    _register(store, _OTHER_PAYER)
+    service = DmService(store, is_registered=lambda w: store.get_agent(w) is not None)
+
+    with pytest.raises(SocialError) as exc_info:
+        service.send(sender=_PAYER, recipient=_OTHER_PAYER, body="x" * 5000)
+    assert exc_info.value.code == "invalid_request"
+
+    with pytest.raises(SocialError) as exc_info:
+        service.send(sender=_PAYER, recipient=_OTHER_PAYER, body="hi <script>evil()</script>")
+    assert exc_info.value.code == "embedded_html_rejected"
+
+
+def test_dm_conversation_list_preview_is_truncated(store: InMemorySocialStore) -> None:
+    """The conversation-list row's preview is capped, never the full body -- GET /dm/{wallet} is the only surface serving a full body."""
+    _register(store, _PAYER)
+    _register(store, _OTHER_PAYER)
+    service = DmService(store, is_registered=lambda w: store.get_agent(w) is not None)
+    long_body = "a" * 500
+    service.send(sender=_PAYER, recipient=_OTHER_PAYER, body=long_body)
+
+    conversations = service.list_conversations(_PAYER, limit=10)
+    assert len(conversations[0].last_message_preview) < len(long_body)
+
+    messages = service.list_conversation(_PAYER, _OTHER_PAYER, limit=10)
+    assert messages[0].body == long_body
+
+
+@pytest.mark.usefixtures("fake_redis")
+def test_dm_send_route_end_to_end(
+    store: InMemorySocialStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """POST /dm, session-authenticated, stores the message under the SESSION wallet as sender (never a body field); GET /dm/{peer} and GET /dm read it back."""
+    monkeypatch.setattr(social_routes, "profile_service", ProfileService(store))
+    monkeypatch.setattr(
+        social_routes, "dm_service", DmService(store, is_registered=_always_registered)
+    )
+    _register(store, _PAYER)
+    _register(store, _OTHER_PAYER)
+
+    token, _expires = social_routes.issue_session_token(_PAYER)
+    send_response = social_routes.x402_social_dm_send(
+        _request(
+            method="POST",
+            path="/api/v1/x402/social/dm",
+            headers={"authorization": f"Bearer {token}"},
+            body=json.dumps({"recipient": _OTHER_PAYER, "body": "hello agent"}).encode(),
+        )
+    )
+    assert isinstance(send_response, dict)
+    assert send_response["message"]["sender"] == _PAYER
+    assert send_response["message"]["recipient"] == _OTHER_PAYER
+    assert send_response["message"]["body"] == "hello agent"
+
+    conversation = social_routes.x402_social_dm_conversation(
+        _request(
+            method="GET",
+            path=f"/api/v1/x402/social/dm/{_OTHER_PAYER}",
+            path_params={"wallet": _OTHER_PAYER},
+            headers={"authorization": f"Bearer {token}"},
+        )
+    )
+    assert isinstance(conversation, dict)
+    assert conversation["peer_wallet"] == _OTHER_PAYER
+    assert len(conversation["messages"]) == 1
+    assert conversation["messages"][0]["body"] == "hello agent"
+
+    conversations = social_routes.x402_social_dm_conversations(
+        _request(
+            method="GET",
+            path="/api/v1/x402/social/dm",
+            headers={"authorization": f"Bearer {token}"},
+        )
+    )
+    assert isinstance(conversations, dict)
+    assert [c["peer_wallet"] for c in conversations["conversations"]] == [_OTHER_PAYER]
+
+    # The recipient's own session can read the SAME conversation too.
+    other_token, _ = social_routes.issue_session_token(_OTHER_PAYER)
+    other_view = social_routes.x402_social_dm_conversation(
+        _request(
+            method="GET",
+            path=f"/api/v1/x402/social/dm/{_PAYER}",
+            path_params={"wallet": _PAYER},
+            headers={"authorization": f"Bearer {other_token}"},
+        )
+    )
+    assert isinstance(other_view, dict)
+    assert len(other_view["messages"]) == 1
+
+
+@pytest.mark.usefixtures("fake_redis")
+def test_dm_send_requires_a_valid_session(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No/invalid bearer token is a 401, and dm_service.send is never reached."""
+    called = []
+    monkeypatch.setattr(
+        social_routes, "dm_service", SimpleNamespace(send=lambda **_kw: called.append(1))
+    )
+
+    no_token = social_routes.x402_social_dm_send(
+        _request(
+            method="POST",
+            path="/api/v1/x402/social/dm",
+            body=json.dumps({"recipient": _OTHER_PAYER, "body": "hi"}).encode(),
+        )
+    )
+    assert no_token.status_code == 401
+
+    bad_token = social_routes.x402_social_dm_send(
+        _request(
+            method="POST",
+            path="/api/v1/x402/social/dm",
+            headers={"authorization": "Bearer not-a-real-token"},
+            body=json.dumps({"recipient": _OTHER_PAYER, "body": "hi"}).encode(),
+        )
+    )
+    assert bad_token.status_code == 401
+    assert called == []
+
+
+@pytest.mark.usefixtures("fake_redis")
+def test_dm_conversation_and_conversations_routes_require_a_valid_session() -> None:
+    """GET /dm/{wallet} and GET /dm both 401 without a valid bearer session -- DMs are never readable by an unauthenticated caller."""
+    conversation = social_routes.x402_social_dm_conversation(
+        _request(
+            method="GET",
+            path=f"/api/v1/x402/social/dm/{_OTHER_PAYER}",
+            path_params={"wallet": _OTHER_PAYER},
+        )
+    )
+    assert conversation.status_code == 401
+
+    conversations = social_routes.x402_social_dm_conversations(
+        _request(method="GET", path="/api/v1/x402/social/dm")
+    )
+    assert conversations.status_code == 401
+
+
+@pytest.mark.usefixtures("fake_redis")
+def test_dm_send_route_rejects_self_message_as_a_400(
+    store: InMemorySocialStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The route surfaces DmService's cannot_message_self as a clean 400, not an unhandled exception."""
+    monkeypatch.setattr(
+        social_routes, "dm_service", DmService(store, is_registered=_always_registered)
+    )
+    token, _expires = social_routes.issue_session_token(_PAYER)
+    response = social_routes.x402_social_dm_send(
+        _request(
+            method="POST",
+            path="/api/v1/x402/social/dm",
+            headers={"authorization": f"Bearer {token}"},
+            body=json.dumps({"recipient": _PAYER, "body": "hi"}).encode(),
+        )
+    )
+    assert response.status_code == 400
+    assert json.loads(response.description)["error"]["code"] == "cannot_message_self"
+
+
+@pytest.mark.usefixtures("fake_redis")
+def test_dm_send_route_rejects_a_malformed_recipient_address(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A syntactically invalid recipient wallet is a free 400 before dm_service.send is ever called."""
+    called = []
+    monkeypatch.setattr(
+        social_routes, "dm_service", SimpleNamespace(send=lambda **_kw: called.append(1))
+    )
+    token, _expires = social_routes.issue_session_token(_PAYER)
+    response = social_routes.x402_social_dm_send(
+        _request(
+            method="POST",
+            path="/api/v1/x402/social/dm",
+            headers={"authorization": f"Bearer {token}"},
+            body=json.dumps({"recipient": "not-a-wallet", "body": "hi"}).encode(),
+        )
+    )
+    assert response.status_code == 400
+    assert called == []
+
+
+@pytest.mark.usefixtures("fake_redis")
+def test_dm_send_route_is_rate_limited_per_wallet(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A sender over its hourly DM-send budget gets a free 429 -- dm_service.send is never reached."""
+    called = []
+    monkeypatch.setattr(
+        social_routes, "dm_service", SimpleNamespace(send=lambda **_kw: called.append(1))
+    )
+    monkeypatch.setattr(social_routes, "dm_send_wallet_rate_limited", lambda **_kw: True)
+    monkeypatch.setattr(social_routes, "dm_send_ip_rate_limited", lambda *_a, **_kw: False)
+    token, _expires = social_routes.issue_session_token(_PAYER)
+
+    response = social_routes.x402_social_dm_send(
+        _request(
+            method="POST",
+            path="/api/v1/x402/social/dm",
+            headers={"authorization": f"Bearer {token}"},
+            body=json.dumps({"recipient": _OTHER_PAYER, "body": "hi"}).encode(),
+        )
+    )
+    assert response.status_code == 429
+    assert json.loads(response.description)["error"]["code"] == "rate_limited"
+    assert called == []
+
+
+@pytest.mark.usefixtures("fake_redis")
+def test_dm_send_route_is_rate_limited_per_ip(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A sender behind an IP over its hourly DM-send budget gets a free 429 even with wallet budget untouched."""
+    called = []
+    monkeypatch.setattr(
+        social_routes, "dm_service", SimpleNamespace(send=lambda **_kw: called.append(1))
+    )
+    monkeypatch.setattr(social_routes, "dm_send_wallet_rate_limited", lambda **_kw: False)
+    monkeypatch.setattr(social_routes, "dm_send_ip_rate_limited", lambda *_a, **_kw: True)
+    token, _expires = social_routes.issue_session_token(_PAYER)
+
+    response = social_routes.x402_social_dm_send(
+        _request(
+            method="POST",
+            path="/api/v1/x402/social/dm",
+            headers={"authorization": f"Bearer {token}"},
+            body=json.dumps({"recipient": _OTHER_PAYER, "body": "hi"}).encode(),
+        )
+    )
+    assert response.status_code == 429
+    assert called == []
+
+
+def test_dm_send_wallet_rate_limit_fails_open_on_a_redis_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Same fail-open contract as every other Redis-backed gate in this module (CLAUDE.md section 2 invariant 9) -- a Redis blip must not block DM sending."""
+    monkeypatch.setattr(rate_limit_core, "get_redis", lambda: _BrokenRedis())
+    assert social_rate_limit.dm_send_wallet_rate_limited(wallet=_PAYER) is False
+
+
+def test_dm_send_ip_rate_limit_fails_open_on_a_redis_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Same fail-open contract, per-IP axis."""
+    monkeypatch.setattr(rate_limit_core, "get_redis", lambda: _BrokenRedis())
+    request = _request(
+        method="POST",
+        path="/api/v1/x402/social/dm",
+        headers={"x-real-ip": "203.0.113.7"},
+    )
+    assert social_rate_limit.dm_send_ip_rate_limited(request) is False
+
+
+@pytest.mark.usefixtures("fake_redis")
+def test_dm_send_wallet_rate_limit_actually_trips_after_the_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """dm_send_wallet_rate_limited flips True once the hourly per-wallet budget is exceeded, using the real shared incr_with_expiry primitive."""
+    monkeypatch.setattr(settings, "x402_social_dm_send_rate_limit_per_hour", 2)
+    assert social_rate_limit.dm_send_wallet_rate_limited(wallet=_PAYER) is False
+    assert social_rate_limit.dm_send_wallet_rate_limited(wallet=_PAYER) is False
+    assert social_rate_limit.dm_send_wallet_rate_limited(wallet=_PAYER) is True
+    # A different wallet has its OWN budget, untouched by _PAYER's.
+    assert social_rate_limit.dm_send_wallet_rate_limited(wallet=_OTHER_PAYER) is False
+
+
+@pytest.mark.usefixtures("fake_redis")
+def test_dm_conversations_route_orders_most_recently_active_first(
+    store: InMemorySocialStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """GET /dm returns the caller's conversations most-recently-active first, not insertion order."""
+    monkeypatch.setattr(
+        social_routes, "dm_service", DmService(store, is_registered=_always_registered)
+    )
+    service = social_routes.dm_service
+    peer_a = _OTHER_PAYER
+    peer_b = _REPORTER
+    service.send(
+        sender=_PAYER, recipient=peer_a, body="first", now=datetime(2026, 9, 1, tzinfo=UTC)
+    )
+    service.send(
+        sender=_PAYER, recipient=peer_b, body="second", now=datetime(2026, 9, 2, tzinfo=UTC)
+    )
+
+    token, _expires = social_routes.issue_session_token(_PAYER)
+    response = social_routes.x402_social_dm_conversations(
+        _request(
+            method="GET",
+            path="/api/v1/x402/social/dm",
+            headers={"authorization": f"Bearer {token}"},
+        )
+    )
+    assert isinstance(response, dict)
+    assert [c["peer_wallet"] for c in response["conversations"]] == [peer_b, peer_a]
+
+
+def test_cassandra_dm_store_round_trip_binds_the_expected_params(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """insert_dm_message/upsert_dm_conversation/list_dm_messages/list_dm_conversations bind params in the column order the migration 122 tables declare, and map rows back to the right dataclass fields."""
+    session = patch_cassandra(monkeypatch)
+    # patch_cassandra alone patches app.core.cassandra.get_cassandra_session,
+    # but stores/cassandra.py imported that name directly at module load
+    # time -- same "also patch the module's own bound reference" precedent
+    # test_cassandra_home_feed_fanout_is_one_batched_call_per_half_not_a_loop
+    # already uses.
+    monkeypatch.setattr(social_cassandra_store, "get_cassandra_session", lambda: session)
+    cassandra_store = social_cassandra_store.CassandraSocialStore()
+    now = datetime(2026, 9, 7, 12, 0, 0, tzinfo=UTC)
+    conversation_id = conversation_id_for(_PAYER, _OTHER_PAYER)
+    message_id = str(uuid_module.uuid1())
+
+    cassandra_store.insert_dm_message(
+        StoredDmMessage(
+            conversation_id=conversation_id,
+            message_id=message_id,
+            sender=_PAYER,
+            recipient=_OTHER_PAYER,
+            body="hello",
+            created_at_epoch=int(now.timestamp()),
+        )
+    )
+    insert_call = session.execute.call_args_list[-1]
+    assert insert_call.args[0] == X402SocialStmts.INSERT_DM_MESSAGE
+    assert insert_call.args[1][0] == conversation_id
+    assert insert_call.args[1][3] == _PAYER
+    assert insert_call.args[1][4] == _OTHER_PAYER
+    assert insert_call.args[1][5] == "hello"
+
+    cassandra_store.upsert_dm_conversation(
+        StoredDmConversation(
+            wallet=_PAYER,
+            peer_wallet=_OTHER_PAYER,
+            conversation_id=conversation_id,
+            last_message_at_epoch=int(now.timestamp()),
+            last_sender=_PAYER,
+            last_message_preview="hello",
+        )
+    )
+    upsert_call = session.execute.call_args_list[-1]
+    assert upsert_call.args[0] == X402SocialStmts.UPSERT_DM_CONVERSATION
+    assert upsert_call.args[1][0] == _PAYER
+    assert upsert_call.args[1][1] == _OTHER_PAYER
+
+    class _Row:
+        def __init__(self, **kw: object) -> None:
+            self.__dict__.update(kw)
+
+    session.execute.return_value = [
+        _Row(
+            conversation_id=conversation_id,
+            created_at=now.replace(tzinfo=None),
+            message_id=uuid_module.UUID(message_id),
+            sender=_PAYER,
+            recipient=_OTHER_PAYER,
+            body="hello",
+        )
+    ]
+    messages = cassandra_store.list_dm_messages(conversation_id, limit=10)
+    assert len(messages) == 1
+    assert messages[0].message_id == message_id
+    assert messages[0].body == "hello"
+    assert messages[0].created_at_epoch == int(now.timestamp())
+
+    session.execute.return_value = [
+        _Row(
+            wallet=_PAYER,
+            peer_wallet=_OTHER_PAYER,
+            conversation_id=conversation_id,
+            last_message_at=now.replace(tzinfo=None),
+            last_sender=_PAYER,
+            last_message_preview="hello",
+        )
+    ]
+    conversations = cassandra_store.list_dm_conversations(_PAYER, limit=10)
+    assert len(conversations) == 1
+    assert conversations[0].peer_wallet == _OTHER_PAYER
+    assert conversations[0].last_message_preview == "hello"

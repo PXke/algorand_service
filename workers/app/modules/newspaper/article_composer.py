@@ -6,7 +6,6 @@ import logging
 from dataclasses import dataclass
 
 from app.core import config
-from app.core.config import mistral_configured
 from app.modules.ai.llm_compose import (
     compose_assignment_article,
     compose_recap_from_transcript,
@@ -16,7 +15,7 @@ from app.modules.ai.llm_compose import (
     compose_scrape_article as _llm_compose_scrape_article,
 )
 from app.modules.ai.llm_provider import LLMError
-from app.modules.ai.llm_purpose_router import PeakHoursBlockedError
+from app.modules.ai.llm_purpose_router import PeakHoursBlockedError, purpose_provider_configured
 from app.modules.newspaper.admin_source_store import AdminSource
 from app.modules.newspaper.peak_hours import is_off_peak_now, next_off_peak_at
 from app.modules.newspaper.publish_policy import PublishKind, PublishTopic, trim_text_to_chars
@@ -54,10 +53,12 @@ class ArticleComposeResult:
     regrade_unconfirmed_hold_reason: str = ""
 
 
-def _require_mistral() -> None:
-    """No template fallback exists (owner decision 2026-07-14: a lesser, robotic article is worse than no article) — Mistral or nothing. Callers must handle the resulting LLMError as "no article this cycle"; see publish_from_queued_row/recompose_review/recompose_published for the established skip-cleanly pattern (all three already catch LLMError and return a {"status": ...} dict before any DB write happens)."""
-    if not mistral_configured():
-        raise LLMError("MISTRAL_ENABLED and MISTRAL_API_KEY required — no template fallback")
+def _require_writer_provider() -> None:
+    """No template fallback exists (owner decision 2026-07-14: a lesser, robotic article is worse than no article) — the writer purpose's configured provider or nothing. Checks purpose_provider_configured("writer") (DeepSeek by default, see CLAUDE.md/llm_purpose_router.py — this used to hardcode mistral_configured() even after Mistral was retired as the live writer provider, which meant removing the by-then-unused MISTRAL_API_KEY would have silently blocked every compose). Callers must handle the resulting LLMError as "no article this cycle"; see publish_from_queued_row/recompose_review/recompose_published for the established skip-cleanly pattern (all three already catch LLMError and return a {"status": ...} dict before any DB write happens)."""
+    if not purpose_provider_configured("writer"):
+        raise LLMError(
+            "writer purpose's configured LLM provider is not set up — no template fallback"
+        )
 
 
 def _require_off_peak() -> None:
@@ -120,7 +121,7 @@ def compose_scrape_article(
     """
     del mistral_only  # see docstring above
     topic = publish_topic or PublishTopic.GENERIC
-    _require_mistral()
+    _require_writer_provider()
     _require_off_peak()
 
     # COMMUNITY_RECAP gets the full transcript via compose_recap_from_transcript
@@ -217,7 +218,7 @@ def compose_weekly_digest(
 ) -> ArticleComposeResult:
     """Weekly digest: CoinGecko snapshot + recent feed articles, via the digest-tier LLM."""
     del mistral_only  # see compose_scrape_article
-    _require_mistral()
+    _require_writer_provider()
     _require_off_peak()
     fields = compose_weekly_digest_article(context)
     body = trim_text_to_chars(fields.body, config.WEEKLY_DIGEST_MAX_BODY_CHARS)

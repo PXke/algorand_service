@@ -172,6 +172,20 @@ def validate_category(raw: str) -> str:
     return category
 
 
+def _boosted_first(items: list[StoredListing], cutoff: int) -> list[StoredListing]:
+    """Stable-sort a newest-first page so a boosted listing sorts before every non-boosted one.
+
+    A currently-boosted listing (roadmap item 3's boost, ListingService.renew()) sorts before
+    every non-boosted one, without disturbing newest-first order WITHIN either group --
+    Python's sort is stable, so this is exactly equivalent to "boosted, newest first, then
+    non-boosted, newest first."
+
+    Never applied to probe_leaderboard(): that ranking is measured-data-only and must stay
+    unbuyable, see its own docstring.
+    """
+    return sorted(items, key=lambda item: item.boosted_until_epoch <= cutoff)
+
+
 def url_hash(normalized_url: str) -> str:
     """Partition key for a listing: a hex SHA-256 of the normalized URL.
 
@@ -230,7 +244,9 @@ class ListingService:
         states a fact about a real third-party endpoint -- letting any payer
         take over any listing by paying the fee would let anyone quietly
         misrepresent someone else's endpoint. An empty existing payer
-        (pre-migration data) is unowned and gets claimed by whoever relists it
+        (pre-migration data, OR a free auto-discovered stub imported by
+        discovery_import.py -- see StoredListing.source -- which also always
+        carries payer="") is unowned and gets claimed by whoever relists it
         next, so old listings aren't locked forever -- and the same must hold
         for a listing whose term_end_epoch has already passed: the payer only
         bought protection for the term they paid for, not forever, so an
@@ -341,6 +357,15 @@ class ListingService:
     ) -> list[StoredListing]:
         """Return listings whose term is still running, newest-first, clamped.
 
+        Within every "real paid listings" tier below (tag, category, and the
+        plain-browse case), a currently-boosted listing (boosted_until_epoch
+        > now, bought via ListingService.renew(), roadmap item 3) sorts
+        before every non-boosted one, newest-first within each group
+        (_boosted_first, a stable sort so this never disturbs relative
+        recency order). Never applied to the auto-discovered tier -- an
+        unclaimed stub cannot be boosted -- and never to probe_leaderboard(),
+        which stays unbuyable by design.
+
         With `tag` (raw, as received -- normalized here with the same rule
         create() stores tags under), only listings carrying that tag are
         returned, read from the by-tag projection (migration 096) instead of
@@ -353,7 +378,26 @@ class ListingService:
         reserved `category:<name>` partition (migration 099). `tag` and
         `category` together are refused (invalid_request): each is one
         partition, and intersecting two would mean reading one and filtering
-        the other in memory, which turns the LIMIT into a lie.
+        the other in memory, which turns the LIMIT into a lie. Both of these
+        filtered reads are PAID-listings-only: an auto-discovered stub (see
+        below) has no tags and no declared category to match.
+
+        With NEITHER `tag` nor `category` (the plain browse case), results
+        are PAID listings first, newest-first as always, and only once every
+        live paid listing has been returned does this fill any REMAINING
+        room (up to `clamped`) with free, auto-discovered ("unclaimed")
+        listings imported from a public x402 facilitator feed (2026-09-06 --
+        see services/discovery_import.py), also newest-imported-first. This
+        ordering is deliberate and load-bearing, not incidental: CLAUDE.md
+        section 9's "no wash volume" principle only holds if a real payment
+        still means something, so an auto-discovered entry must never
+        outrank, or be interleaved by recency with, a real paid one -- it can
+        only ever occupy space a paid listing left empty. The two groups come
+        from separate, independently-bounded store reads
+        (list_recent()/list_auto_discovered()) rather than one shared feed,
+        so this ordering holds structurally, not just by sort key (see
+        CassandraListingStore's class docstring for why they are separate
+        tables).
 
         The name stays `search` rather than becoming `search_active`: for a
         search endpoint, live results are what a caller already expects, and it
@@ -363,18 +407,21 @@ class ListingService:
         sells "List one x402 endpoint ... for N days" and one payment bought
         one term, not permanent presence in the directory. Before this filter
         existed, nothing on the read path looked at term_end_epoch at all, so a
-        single payment listed a URL forever.
+        single payment listed a URL forever. The same filter, and the same
+        reasoning, applies to an auto-discovered listing's own
+        (non-payment-backed) term_end_epoch, which discovery_import.py
+        re-stamps on every re-import that still sees the url.
 
         Mirrors x402_board's BoardService.list_active(), including its
         tradeoff: expired rows are dropped HERE rather than in each store, so
         the rule applies identically to Cassandra and memory, and the filter
         runs after the LIMITed read rather than as a CQL predicate -- so a page
         can come back short when the front of the feed is full of expired
-        listings. Accepted for the same reason it is accepted there: the feed
-        is a single bounded partition (DIRECTORY_PARTITION) and every read
-        stays LIMITed, whereas filtering in CQL on a non-key column would mean
-        ALLOW FILTERING, which CLAUDE.md section 4 forbids. A Cassandra TTL on
-        the projection, or a sweep, is the real fix and is not built here.
+        listings. Accepted for the same reason it is accepted there: each feed
+        is a single bounded partition and every read stays LIMITed, whereas
+        filtering in CQL on a non-key column would mean ALLOW FILTERING, which
+        CLAUDE.md section 4 forbids. A Cassandra TTL on the projection, or a
+        sweep, is the real fix and is not built here.
         """
         moment = now or datetime.now(tz=UTC)
         cutoff = int(moment.timestamp())
@@ -385,11 +432,26 @@ class ListingService:
             )
         if tag is not None:
             items = self.store.list_by_tag(search_tag(tag), limit=clamped)
-        elif category is not None:
+            live = [item for item in items if item.term_end_epoch > cutoff]
+            return _boosted_first(live, cutoff)
+        if category is not None:
             items = self.store.list_by_tag(category_tag(validate_category(category)), limit=clamped)
-        else:
-            items = self.store.list_recent(limit=clamped)
-        return [item for item in items if item.term_end_epoch > cutoff]
+            live = [item for item in items if item.term_end_epoch > cutoff]
+            return _boosted_first(live, cutoff)
+
+        paid = [
+            item for item in self.store.list_recent(limit=clamped) if item.term_end_epoch > cutoff
+        ]
+        paid = _boosted_first(paid, cutoff)
+        remaining = clamped - len(paid)
+        if remaining <= 0:
+            return paid
+        discovered = [
+            item
+            for item in self.store.list_auto_discovered(limit=remaining)
+            if item.term_end_epoch > cutoff
+        ]
+        return paid + discovered[:remaining]
 
     def renew(
         self,
@@ -399,34 +461,53 @@ class ListingService:
         settlement_tx_id: str,
         now: datetime | None = None,
     ) -> StoredListing:
-        """Extend a listing's term by one more configured term and return it.
+        """Boost a listing to the top of search results for one more boost window, and return it.
 
-        Only the wallet that paid for the listing's current term may renew
-        it, whether or not that term has ended. A renewal keeps everything
-        the listing says about the endpoint (price, description, assets,
-        tags, schema, category) exactly as it was, so letting a different
-        wallet renew an expired listing would put the previous payer's
-        description of the endpoint under the new wallet's name. A live
-        listing renewed by another wallet is refused with
-        listing_owned_by_another_payer (403); an expired or unowned (empty
-        payer) listing renewed by a different wallet is refused with
-        renew_requires_relist (409): the url is free to take, but only via
-        POST /list, which makes the new owner state its own price and
-        description. Like create(), no `and payer` guard on the new side:
-        an unattributable payment cannot prove it is the owner. The payer
-        is only known after settlement, so either refusal comes with the
-        payment already taken -- the same accepted tradeoff as create() and
-        the board's renew, stated in the 402 offer.
+        Repurposed 2026-09-06 (owner decision, competitive pricing study):
+        this used to extend the listing's SURVIVAL (term_end_epoch); a
+        listing now survives for as long as it keeps passing health probes
+        (see workers/app/modules/x402_probe and term_end_epoch's own history
+        in StoredListing), so paying here no longer touches term_end_epoch
+        at all -- it buys PRIORITY PLACEMENT instead, stacking a window onto
+        boosted_until_epoch. The name stays `renew` (not `boost`) because
+        the ownership-check logic below is unchanged from what a term
+        renewal used to need, and CLAUDE.md section 3 prefers extending
+        existing logic in place over forking a copy for a cosmetic rename.
 
-        The new term runs from max(now, current term_end): renewing early
-        adds a full term on top of what is left, renewing after expiry
-        starts a fresh one from now, and neither shortens what was already
-        paid for. created_at is NOT re-stamped -- a renewal buys time, not a
-        jump back to the front of the newest-first feed (that is what a
-        relist buys). settlement_tx_id is replaced so the listing traces to
-        the payment that bought its current term; payer and the verified
-        badge (097) are unchanged, since the payer is by construction the
-        same wallet.
+        Only the wallet that owns the listing may boost it, whether or not
+        its term has ended. A live listing boosted by another wallet is
+        refused with listing_owned_by_another_payer (403); an expired or
+        unowned (empty payer) listing boosted by a different wallet is
+        refused with renew_requires_relist (409): the url is free to take,
+        but only via POST /list, which makes the new owner state its own
+        price and description -- paying to boost a listing you do not own
+        must not be a side-channel way to detect or squat one.
+
+        `not payer` is checked explicitly (not just `existing.payer !=
+        payer`): an unattributable payment (empty payer) can never match
+        ownership, EVEN against an unowned listing whose own payer also
+        reads back empty (an auto-discovered stub, or a pre-094 row) --
+        two empty strings being equal is not proof either side owns
+        anything. Without this, an unattributable boost payment could
+        silently boost -- and, by association, look like it had claimed --
+        a listing it has no more standing over than any other stranger's
+        payment does; it hits the same renew_requires_relist refusal as any
+        other non-owner boosting an unowned listing. This mirrors
+        x402_board's BoardService.renew(), whose `not attributed or
+        attributed != placement.payer` guard already gets this right.
+        Same "payer only known after settlement" tradeoff as create() and
+        the board's own boost either way: a refusal still comes with the
+        payment already taken, stated in the 402 offer.
+
+        The new boost window runs from max(now, existing.boosted_until_epoch):
+        boosting early adds a full window on top of what is left, boosting
+        after a previous boost lapsed starts a fresh one from now, and
+        neither shortens what was already paid for. Nothing else about the
+        listing changes -- not term_end_epoch, not created_at, not price,
+        description, tags, schema or category. settlement_tx_id IS replaced
+        so the listing traces to the payment that bought its current boost;
+        payer and the verified badge (097) are unchanged, since the payer is
+        by construction the same wallet.
 
         Raises not_found if the url is not listed; the route checks this
         before the gate, this is the guard for any other caller.
@@ -436,28 +517,28 @@ class ListingService:
         if existing is None:
             raise DirectoryError("not_found", "No listing for that url")
         cutoff = int(moment.timestamp())
-        if existing.payer != payer:
+        if not payer or existing.payer != payer:
             if existing.payer and existing.term_end_epoch > cutoff:
                 raise DirectoryError(
                     "listing_owned_by_another_payer",
-                    "Only the wallet that listed this url may renew it. Payment has "
+                    "Only the wallet that listed this url may boost it. Payment has "
                     "settled but the existing listing was not changed.",
                 )
             raise DirectoryError(
                 "renew_requires_relist",
-                "This listing has expired (or has no owner) and can only be renewed by "
+                "This listing has expired (or has no owner) and can only be boosted by "
                 "the wallet that listed it. POST /api/v1/x402/list to relist the url "
                 "under your wallet. Payment has settled but the existing listing was "
                 "not changed.",
                 http_status=409,
             )
-        base = max(cutoff, existing.term_end_epoch)
+        base = max(cutoff, existing.boosted_until_epoch)
         renewed = replace(
             existing,
-            term_end_epoch=int(
+            boosted_until_epoch=int(
                 (
                     datetime.fromtimestamp(base, tz=UTC)
-                    + timedelta(days=settings.x402_listing_term_days)
+                    + timedelta(days=settings.x402_listing_boost_days)
                 ).timestamp()
             ),
             settlement_tx_id=settlement_tx_id,

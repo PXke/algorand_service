@@ -327,6 +327,26 @@ def _vision_followup_message(
     }
 
 
+# Local bookkeeping keys stamped onto conversation-history message dicts
+# (per-call wall-clock timing, see _OpenAIToolLoopAdapter.send_round /
+# llm_compose._append_stage2_debug_turn). They exist ONLY for the persisted
+# compose_sessions transcript -- they must never reach a provider's API, so
+# every outgoing request path strips them via _strip_local_annotations below
+# (a stricter provider can reject unknown message fields, the same class of
+# replay failure the tool_call_id backfill above already guards against).
+_LOCAL_ANNOTATION_KEYS = ("started_at_ms", "ended_at_ms")
+
+
+def _strip_local_annotations(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Copies of `messages` with the local bookkeeping keys removed, for building an outgoing API request. Messages without any annotation are passed through by reference (the common case costs nothing)."""
+    return [
+        {k: v for k, v in m.items() if k not in _LOCAL_ANNOTATION_KEYS}
+        if any(k in m for k in _LOCAL_ANNOTATION_KEYS)
+        else m
+        for m in messages
+    ]
+
+
 def _for_conversation_history(message: dict[str, Any]) -> dict[str, Any]:
     """A copy of an assistant message safe to append to `convo` for resending in later rounds — strips `reasoning_content` (DeepSeek's separate thinking-trace field, sibling to `content`).
 
@@ -683,7 +703,7 @@ class OpenAICompatibleProvider(LLMProvider):
 
         payload: dict[str, Any] = {
             "model": self._model,
-            "messages": messages,
+            "messages": _strip_local_annotations(messages),
             self._max_tokens_field_name(): self._effective_max_tokens(max_tokens),
         }
         if self._supports_temperature():
@@ -753,58 +773,92 @@ class OpenAICompatibleProvider(LLMProvider):
             raise LLMError(f"{self._provider} returned non-JSON content: {raw[:200]}")
         return parsed
 
+    def _backfill_tool_call_ids(self, convo: list[dict[str, Any]]) -> None:
+        """Belt-and-suspenders alongside _ensure_tool_call_ids' per-round backfill: root-caused 2026-08-13 (LumiRogue recompose, ed06b874) that the revision pass's OWN chat_with_tools call — not the research pass that generated the merged prior — can still hit "messages[N]: missing field `id`" against Mistral's stricter API despite the per-round backfill existing since 2026-08-13's earlier fix. Static + synthetic testing of the per-round path couldn't reproduce a gap in isolation, so rather than leave the exact mechanism unresolved, re-assert the invariant on the WHOLE merged transcript right here — the one place every later-stage call's outgoing `messages` passes through before a request is ever built, regardless of which round or pass originally produced a given tool_calls entry.
+
+        Extracted (2026-09-06) so both `_merged_convo_with_prior_debug` merge
+        modes — the default full-history prepend and the bounded
+        `prior_override` seed a revision pass uses instead — share this one
+        pairing pass rather than each having its own copy (CLAUDE.md: no new
+        copies of existing logic).
+        """
+        for idx, m in enumerate(convo):
+            tcs = m.get("tool_calls")
+            if not tcs:
+                continue
+            _ensure_tool_call_ids(tcs)
+            # A tool-role message's own tool_call_id is a SEPARATE field
+            # on a SEPARATE message, set once at generation time
+            # (llm_tool_loop._execute_tool_call / llm_compose's synthetic
+            # _debug_tool_turn) and never revisited by the backfill
+            # above, which only touches the assistant side. Root-caused
+            # 2026-08-15: a synthetic debug-transcript entry (the
+            # deterministic grader's bookkeeping turn) built its
+            # tool-role pair with no tool_call_id at all; the id backfill
+            # above gave the assistant side a fresh id but left the
+            # paired tool message pointing at nothing, so a later replay
+            # through a stricter provider rejected it ("messages with
+            # role 'tool' must have a 'tool_call_id'", GPT-5.6-luna,
+            # confirmed live). Re-pairing by position here (the same 1:1
+            # ordering _OpenAIToolLoopAdapter.append_tool_results already produces for a real
+            # multi-tool-call round) closes this generically, not just
+            # for the one call site that happened to trigger it.
+            for offset, call in enumerate(tcs):
+                pos = idx + 1 + offset
+                if pos >= len(convo):
+                    break
+                tool_msg = convo[pos]
+                if tool_msg.get("role") != "tool":
+                    break
+                if not tool_msg.get("tool_call_id"):
+                    tool_msg["tool_call_id"] = call.get("id", "")
+
     def _merged_convo_with_prior_debug(
-        self, messages: list[dict[str, Any]], debug: dict[str, Any] | None
+        self,
+        messages: list[dict[str, Any]],
+        debug: dict[str, Any] | None,
+        *,
+        prior_override: list[dict[str, Any]] | None = None,
     ) -> list[dict[str, Any]]:
-        """Prepend any prior chat_with_tools round's transcript stashed on a shared debug dict, so a multi-pass compose (initial research, RESEARCH_FLOOR nudge, digest gap-fill) keeps every round's tool calls in the persisted transcript instead of a later pass silently overwriting it with its own fresh 2-message start."""
+        """Prepend any prior chat_with_tools round's transcript stashed on a shared debug dict, so a multi-pass compose (initial research, RESEARCH_FLOOR nudge, digest gap-fill) keeps every round's tool calls in the persisted transcript instead of a later pass silently overwriting it with its own fresh 2-message start.
+
+        ``prior_override`` (2026-09-06 cost fix, see llm_compose.py's
+        ``_compact_revision_prior``): when given, THIS call's outgoing
+        request is seeded with ``prior_override`` instead of the full
+        accumulated ``debug["messages"]`` — e.g. the tool-enabled revision
+        pass, which was measured spending ~65% of a real compose's
+        uncached token cost resending every earlier research round verbatim
+        even though revise_user already restates the digest and flagged
+        issues; only the current draft was missing from that prompt, so
+        that's all ``prior_override`` needs to carry (see
+        ``_compact_revision_prior``). The REAL, full history in
+        ``debug["messages"]`` is left completely untouched here except for
+        appending this call's own two starting messages onto it — it is
+        deliberately NOT replaced with ``prior_override`` — so the admin
+        Sessions view still shows one continuous transcript. Every later
+        round this call makes (tool calls + results) is mirrored onto that
+        same growing object by `_OpenAIToolLoopAdapter`'s `_storage_convo`,
+        not just at the very end, so a live checkpoint mid-pass still
+        reflects genuine accumulated progress.
+        """
+        if prior_override is not None:
+            convo = list(prior_override) + list(messages)
+            self._backfill_tool_call_ids(convo)
+            if debug is not None:
+                stored = debug.get("messages")
+                if not isinstance(stored, list):
+                    stored = []
+                    debug["messages"] = stored
+                stored.extend(messages)  # this pass's own real turns, appended in place
+                debug["model"] = self._model
+            return convo
+
         convo = list(messages)
         if debug is not None:
             prior = debug.get("messages")
             if isinstance(prior, list) and prior:
                 convo = prior + convo
-            # Belt-and-suspenders alongside _ensure_tool_call_ids' per-round
-            # backfill: root-caused 2026-08-13 (LumiRogue recompose,
-            # ed06b874) that the revision pass's OWN chat_with_tools call —
-            # not the research pass that generated `prior` — can still hit
-            # "messages[N]: missing field `id`" against Mistral's stricter
-            # API despite the per-round backfill existing since 2026-08-13's
-            # earlier fix. Static + synthetic testing of the per-round path
-            # couldn't reproduce a gap in isolation, so rather than leave the
-            # exact mechanism unresolved, re-assert the invariant on the
-            # WHOLE merged transcript right here — the one place every
-            # later-stage call's outgoing `messages` passes through before a
-            # request is ever built, regardless of which round or pass
-            # originally produced a given tool_calls entry.
-            for idx, m in enumerate(convo):
-                tcs = m.get("tool_calls")
-                if not tcs:
-                    continue
-                _ensure_tool_call_ids(tcs)
-                # A tool-role message's own tool_call_id is a SEPARATE field
-                # on a SEPARATE message, set once at generation time
-                # (llm_tool_loop._execute_tool_call / llm_compose's synthetic
-                # _debug_tool_turn) and never revisited by the backfill
-                # above, which only touches the assistant side. Root-caused
-                # 2026-08-15: a synthetic debug-transcript entry (the
-                # deterministic grader's bookkeeping turn) built its
-                # tool-role pair with no tool_call_id at all; the id backfill
-                # above gave the assistant side a fresh id but left the
-                # paired tool message pointing at nothing, so a later replay
-                # through a stricter provider rejected it ("messages with
-                # role 'tool' must have a 'tool_call_id'", GPT-5.6-luna,
-                # confirmed live). Re-pairing by position here (the same 1:1
-                # ordering _OpenAIToolLoopAdapter.append_tool_results already produces for a real
-                # multi-tool-call round) closes this generically, not just
-                # for the one call site that happened to trigger it.
-                for offset, call in enumerate(tcs):
-                    pos = idx + 1 + offset
-                    if pos >= len(convo):
-                        break
-                    tool_msg = convo[pos]
-                    if tool_msg.get("role") != "tool":
-                        break
-                    if not tool_msg.get("tool_call_id"):
-                        tool_msg["tool_call_id"] = call.get("id", "")
+            self._backfill_tool_call_ids(convo)
             debug["messages"] = convo  # mutated in place → full transcript
             debug["model"] = self._model
         return convo
@@ -852,8 +906,9 @@ class OpenAICompatibleProvider(LLMProvider):
         # would resend round 1's note, round 3 both, etc. A fresh, correct
         # note is cheap to recompute every round; a stale one accumulating
         # in the transcript is not.
+        base = _strip_local_annotations(convo)
         messages = (
-            [*convo, {"role": "user", "content": round_budget_note}] if round_budget_note else convo
+            [*base, {"role": "user", "content": round_budget_note}] if round_budget_note else base
         )
         payload: dict[str, Any] = {
             "model": self._model,
@@ -923,8 +978,20 @@ class OpenAICompatibleProvider(LLMProvider):
         finalize_on_exhaustion: bool = True,
         on_round: Callable[[], None] | None = None,
         show_round_budget: bool = False,
+        prior_override: list[dict[str, Any]] | None = None,
     ) -> str:
         """Agentic loop: let the model call the provided tools, execute them, feed results back, and return the final assistant message content. Tools are real functions the writer invokes on demand (live price, chain stats, platform search, recent articles). Pass ``debug`` to capture the full transcript (it tracks ``convo`` live + records the round count). ``on_round``, if given, fires after every round (whether or not it made tool calls) — callers use this to checkpoint compose_sessions live, since ``trace``/``debug`` are mutated in place round by round but nothing previously re-persisted them until the whole multi-round call returned, leaving the admin Sessions tab showing zero progress for the entire length of a long research pass. Never allowed to abort the loop — a checkpoint failure is swallowed, not raised.
+
+        ``prior_override``, when given, bounds what this call's OUTGOING
+        requests carry as prior context to exactly this list instead of the
+        full accumulated ``debug["messages"]`` transcript — see
+        ``_merged_convo_with_prior_debug``'s docstring for why (the
+        tool-enabled revision pass, currently the only caller). The stored
+        ``debug["messages"]`` still accumulates this call's real turns in
+        full; only the request this provider actually sends is bounded.
+        Default None preserves the existing full-merge behavior for every
+        other caller (research, RESEARCH_FLOOR, gap-fill, special-edition
+        deepening) unchanged.
 
         ``show_round_budget``: inject a live "round N of M, K remain" note
         into each outgoing request (never persisted into the transcript —
@@ -950,7 +1017,12 @@ class OpenAICompatibleProvider(LLMProvider):
         self._log_task_context("chat_with_tools")
 
         adapter = _OpenAIToolLoopAdapter(
-            self, messages, handlers=handlers, context_tokens=context_tokens, max_tokens=max_tokens
+            self,
+            messages,
+            handlers=handlers,
+            context_tokens=context_tokens,
+            max_tokens=max_tokens,
+            prior_override=prior_override,
         )
         return run_tool_loop(
             adapter,
@@ -1020,11 +1092,22 @@ class _OpenAIToolLoopAdapter(ToolLoopAdapter):
         handlers: dict[str, Any],
         context_tokens: int | None,
         max_tokens: int | None,
+        prior_override: list[dict[str, Any]] | None = None,
     ) -> None:
         self._provider = provider
         self._messages = messages
         self._handlers = handlers
         self._convo: list[dict[str, Any]] = []
+        self._prior_override = prior_override
+        # Set by `prepare()` only when `prior_override` decouples the
+        # OUTGOING `self._convo` from the REAL, full `debug["messages"]` --
+        # every append below then mirrors onto this too, so the persisted
+        # transcript keeps accumulating in order even though the requests
+        # this provider actually sends stay bounded. None (the default,
+        # every other caller) means self._convo IS debug["messages"]
+        # already (same object, see _merged_convo_with_prior_debug), so no
+        # mirroring is needed or performed.
+        self._storage_convo: list[dict[str, Any]] | None = None
         self._response_reserve = provider._effective_max_tokens(max_tokens)
         # Leave room for the model's reply plus a safety pad below the
         # window. An explicit context_tokens always wins; otherwise prefer
@@ -1038,7 +1121,19 @@ class _OpenAIToolLoopAdapter(ToolLoopAdapter):
         self._convo_budget = window - self._response_reserve - LLM_CONTEXT_SAFETY_TOKENS
 
     def prepare(self, debug: dict[str, Any] | None) -> None:
-        self._convo = self._provider._merged_convo_with_prior_debug(self._messages, debug)
+        self._convo = self._provider._merged_convo_with_prior_debug(
+            self._messages, debug, prior_override=self._prior_override
+        )
+        if self._prior_override is not None and debug is not None:
+            stored = debug.get("messages")
+            self._storage_convo = stored if isinstance(stored, list) else None
+        else:
+            self._storage_convo = None
+
+    def _mirror_to_storage(self, entries: list[dict[str, Any]]) -> None:
+        """Echo entries just appended to the OUTGOING `self._convo` onto the REAL, full `debug["messages"]` too, when `prior_override` decoupled the two (see `prepare`). A no-op for every other caller: there `self._storage_convo` is None because `self._convo` already IS `debug["messages"]` (appending once already updates it, so mirroring again would duplicate every entry)."""
+        if self._storage_convo is not None and self._storage_convo is not self._convo:
+            self._storage_convo.extend(entries)
 
     def send_round(
         self,
@@ -1051,18 +1146,34 @@ class _OpenAIToolLoopAdapter(ToolLoopAdapter):
         del max_tokens  # self._response_reserve (from __init__) is what governs the request, computed once like the original loop did
         # Token-aware trim: keep tool results generous, but if many rounds
         # have accumulated and the conversation nears the context window,
-        # elide the OLDEST tool results (in place) so the request never
-        # overflows.
-        if self._convo_budget > 0:
-            fit_messages_to_budget(self._convo, self._convo_budget)
+        # elide the OLDEST tool results so the request never overflows.
+        # `fit_messages_to_budget` returns a NEW list for this one outgoing
+        # request -- `self._convo` (the same list object as `debug["messages"]`,
+        # see `_merged_convo_with_prior_debug`) is deliberately left untouched
+        # so the persisted transcript keeps the real, un-elided content the
+        # model actually received. Root-caused 2026-09-05/06: the old in-place
+        # version permanently laundered stored tool-result content, which the
+        # admin Sessions UI and the compose-session-interrogation feature then
+        # replayed as ground truth.
+        outgoing = (
+            fit_messages_to_budget(self._convo, self._convo_budget)[0]
+            if self._convo_budget > 0
+            else self._convo
+        )
         payload = self._provider._tool_round_payload(
-            self._convo,
+            outgoing,
             tools=tools,
             response_reserve=self._response_reserve,
             temperature=temperature,
             round_budget_note=round_budget_note,
         )
+        # Real request/response wall-clock boundary for this round's LLM call
+        # (including _post's own internal retries, so the window matches the
+        # elapsed time an operator sees) -- stamped onto the assistant turn in
+        # append_assistant_turn and persisted with the compose transcript.
+        started_at_ms = int(time.time() * 1000)
         data = self._provider._post(payload)
+        ended_at_ms = int(time.time() * 1000)
         msg = self._provider._extract_message(data)
         text = _message_text(msg)
         raw_tool_calls = msg.get("tool_calls") or []
@@ -1079,10 +1190,25 @@ class _OpenAIToolLoopAdapter(ToolLoopAdapter):
             normalized.append(
                 NormalizedToolCall(id=call.get("id", ""), name=name, args=args, raw_args=raw_args)
             )
-        return RoundResult(text=text, tool_calls=normalized, raw=msg)
+        return RoundResult(
+            text=text,
+            tool_calls=normalized,
+            raw=msg,
+            started_at_ms=started_at_ms,
+            ended_at_ms=ended_at_ms,
+        )
 
     def append_assistant_turn(self, round_result: RoundResult) -> None:
-        self._convo.append(_for_conversation_history(round_result.raw))
+        # A copy, so the timing annotation never mutates round_result.raw --
+        # the keys are stripped from every outgoing request by
+        # _strip_local_annotations; they exist for the persisted transcript.
+        entry = dict(_for_conversation_history(round_result.raw))
+        if round_result.started_at_ms is not None:
+            entry["started_at_ms"] = round_result.started_at_ms
+        if round_result.ended_at_ms is not None:
+            entry["ended_at_ms"] = round_result.ended_at_ms
+        self._convo.append(entry)
+        self._mirror_to_storage([entry])
 
     def append_tool_results(self, entries: list[tuple[NormalizedToolCall, dict[str, Any]]]) -> None:
         # Every tool_call in this round gets its tool-role response appended
@@ -1093,6 +1219,7 @@ class _OpenAIToolLoopAdapter(ToolLoopAdapter):
         # run, so a strict provider never sees a user-role turn interleaved
         # between two tool-role ones.
         vision_followups: list[dict[str, Any]] = []
+        new_messages: list[dict[str, Any]] = []
         for call, result in entries:
             message = {
                 "role": "tool",
@@ -1104,22 +1231,25 @@ class _OpenAIToolLoopAdapter(ToolLoopAdapter):
                 "content": serialize_tool_result(result, LLM_TOOL_RESULT_MAX_CHARS),
             }
             self._convo.append(message)
+            new_messages.append(message)
             vision_followup = self._provider._maybe_vision_followup(call.name, call.id, result)
             if vision_followup is not None:
                 vision_followups.append(vision_followup)
         self._convo.extend(vision_followups)
+        new_messages.extend(vision_followups)
+        self._mirror_to_storage(new_messages)
 
     def append_require_tool_nudge(self, require_tool: str) -> None:
-        self._convo.append(
-            {
-                "role": "user",
-                "content": (
-                    f"Before finishing you MUST call the `{require_tool}` tool "
-                    "once on your current draft (title + full body) and address "
-                    "its feedback. Do that now, then output the final JSON article."
-                ),
-            }
-        )
+        entry = {
+            "role": "user",
+            "content": (
+                f"Before finishing you MUST call the `{require_tool}` tool "
+                "once on your current draft (title + full body) and address "
+                "its feedback. Do that now, then output the final JSON article."
+            ),
+        }
+        self._convo.append(entry)
+        self._mirror_to_storage([entry])
 
     def try_salvage(self, round_result: RoundResult) -> str | None:
         # Some models emit their final JSON article as a bogus tool call
@@ -1136,11 +1266,16 @@ class _OpenAIToolLoopAdapter(ToolLoopAdapter):
         # Fit it now, and pass the caller's own max_tokens through (a caller
         # that explicitly capped its answer size, e.g. the LLM quality
         # rubric's small max_tokens=800, wants that honored here too, not
-        # silently reset to the provider default).
-        if self._convo_budget > 0:
-            fit_messages_to_budget(self._convo, self._convo_budget)
+        # silently reset to the provider default). As in send_round, this
+        # trims a fresh list for the outgoing request only -- `self._convo`/
+        # `debug["messages"]` keeps the real, un-elided content.
+        outgoing = (
+            fit_messages_to_budget(self._convo, self._convo_budget)[0]
+            if self._convo_budget > 0
+            else self._convo
+        )
         return self._provider.chat_completion(
-            [*self._convo, {"role": "user", "content": "Now write the final JSON article."}],
+            [*outgoing, {"role": "user", "content": "Now write the final JSON article."}],
             json_object=True,
             temperature=temperature,
             max_tokens=max_tokens,

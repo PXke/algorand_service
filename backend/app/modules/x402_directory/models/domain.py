@@ -15,6 +15,27 @@ from app.core.errors import PlatformError, http_status_for_code
 # why the whole feed lives in one partition and when to shard it.
 DIRECTORY_PARTITION = "default"
 
+# Constant partition key for x402_listings_auto_discovered_by_recency
+# (migration 113) -- the SEPARATE recency feed for auto-discovered listings,
+# never x402_listings_by_recency's DIRECTORY_PARTITION. See
+# CassandraListingStore's class docstring for why the two feeds must never
+# share a partition: mixing them would let an import of hundreds of free
+# stubs bury real paid listings under newer `created_at` timestamps.
+AUTO_DISCOVERED_PARTITION = "auto_discovered"
+
+# StoredListing.source: distinguishes a real PAID listing (someone actually
+# paid the listing fee) from a FREE stub imported from a public x402
+# facilitator discovery feed (roadmap: "unclaimed listing" import,
+# 2026-09-06 -- see services/discovery_import.py). Only listing_service.create()
+# ever writes SOURCE_PAID; only discovery_import.py ever writes
+# SOURCE_AUTO_DISCOVERED. Kept as a real field on the stored row, not just an
+# API response shape, so a later accidental query cannot confuse the two
+# (CLAUDE.md section 9: no wash volume, and this data model choice is what
+# makes that hold even for a bug in a future reader).
+SOURCE_PAID = "paid"
+SOURCE_AUTO_DISCOVERED = "auto_discovered"
+LISTING_SOURCES: tuple[str, ...] = (SOURCE_PAID, SOURCE_AUTO_DISCOVERED)
+
 # Fixed listing categories (migration 099). A closed enum rather than free
 # text so `?category=` is a browsable facet of at most this many partitions,
 # not a second, uncontrolled tag namespace. Validated BEFORE the payment gate
@@ -99,11 +120,38 @@ class StoredListing:
     # fabricated claim.
     reimburses: bool = False
     contact: str = ""
+    # Auto-discovery (migration 113, 2026-09-06). One of LISTING_SOURCES; a
+    # pre-113 row reads back null, which is SOURCE_PAID by definition --
+    # every row before this migration was, without exception, a real paid
+    # listing. See LISTING_SOURCES' own comment for who writes which value.
+    source: str = SOURCE_PAID
+    # Attribution for an auto-discovered row: which public feed it was
+    # imported from (discovery_import.DISCOVERY_SOURCE_LABEL). Empty for a
+    # real paid listing -- never free text a caller can set, only
+    # discovery_import.py writes a non-empty value here, and only alongside
+    # source == SOURCE_AUTO_DISCOVERED.
+    discovered_from: str = ""
+    # Priority-placement window (migration 114, 2026-09-06). 0 means not
+    # boosted. Written only by ListingService.renew() -- repurposed that day
+    # from extending survival (removed: a listing now survives on probe
+    # health alone, see term_end_epoch's own history) to buying search-
+    # ranking priority for settings.x402_listing_boost_days at a time,
+    # max(now, existing.boosted_until_epoch) so an early boost stacks rather
+    # than being wasted. Read only by ListingService.search()'s paid-first
+    # tier (boosted_until_epoch > now sorts before everything else in that
+    # tier) -- NEVER by probe_leaderboard(), which ranks purely on measured
+    # probe data and must stay unbuyable (see that method's own docstring).
+    boosted_until_epoch: int = 0
 
     @property
     def is_verified(self) -> bool:
         """True when the badge is set AND still belongs to the current payer."""
         return bool(self.verified_wallet) and self.verified_wallet == self.payer
+
+    @property
+    def is_auto_discovered(self) -> bool:
+        """True for a free stub imported from a public facilitator feed, never a real paid listing."""
+        return self.source == SOURCE_AUTO_DISCOVERED
 
     def projection_tags(self) -> list[str]:
         """Every by-tag partition this listing has a row in: its real tags plus the reserved category tag.

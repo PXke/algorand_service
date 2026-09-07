@@ -35,6 +35,7 @@ from algorand_shared.crawler_statements import (
     URL_QUEUE_INSERT,
     URL_QUEUE_INSERT_PENDING,
 )
+from algorand_shared.ecosystem_statements import EcosystemStmts as EcosystemStmts
 from algorand_shared.platform_statements import (
     CLASSIFIER_FEEDBACK_INSERT_BY_TIME,
     DOMAIN_TRACKING_INSERT,
@@ -393,7 +394,8 @@ class ToolInsightStmts:
     # Reaper + outcome finalizer share this scan: cheap enough to list without
     # paging — compose_sessions has a 7-day TTL, so the table never grows large.
     LIST_ALL_SUMMARY = _Stmt(
-        "SELECT created_at, session_id, status, source_url FROM algorand_platform.compose_sessions "
+        "SELECT created_at, session_id, status, source_url, duration_ms "
+        "FROM algorand_platform.compose_sessions "
         "WHERE bucket = ? LIMIT 1000"
     )
     MARK_STALE = _Stmt(
@@ -464,7 +466,8 @@ class InvestigationStmts:
     """Prepared statements for investigative-tool findings."""
 
     LIST = _Stmt(
-        "SELECT tool, arguments, result_json FROM algorand_platform.investigation_findings "
+        "SELECT created_at, tool, arguments, result_json "
+        "FROM algorand_platform.investigation_findings "
         "WHERE service_id = ? LIMIT ?"
     )
     INSERT = _Stmt(
@@ -472,7 +475,6 @@ class InvestigationStmts:
         "service_id, created_at, finding_id, source_url, tool, arguments, result_json"
         ") VALUES (?, ?, ?, ?, ?, ?, ?)"
     )
-
 
 
 # --------------------------------------------------------------------------- #
@@ -483,7 +485,6 @@ class ChainStmts:
 
     CONDUIT_HEAD = CHAIN_CONDUIT_HEAD
     TXNS_BY_ROUND = CHAIN_TXNS_BY_ROUND
-
 
 
 # --------------------------------------------------------------------------- #
@@ -616,8 +617,7 @@ class GlossaryStmts:
     """Prepared statements the workers side needs for the glossary."""
 
     LIST_ALL = _Stmt(
-        "SELECT slug, term, definition, aliases, status "
-        "FROM algorand_platform.glossary_terms"
+        "SELECT slug, term, definition, aliases, status FROM algorand_platform.glossary_terms"
     )
     GET = _Stmt("SELECT slug FROM algorand_platform.glossary_terms WHERE slug = ?")
     GET_FOR_TRANSLATE = _Stmt(

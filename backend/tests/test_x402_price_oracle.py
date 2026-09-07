@@ -20,6 +20,7 @@ from app.modules.x402 import price_oracle
 
 _EURQ = "quantoz-eurq"
 _USDQ = "quantoz-usdq"
+_GOBTC = "gobtc"
 _USDC = price_oracle.USDC_COINGECKO_ID
 
 
@@ -202,6 +203,7 @@ def test_fetch_parses_the_real_coingecko_shape() -> None:
                 "algorand": {"usd": 0.08694, "eur": 0.0745},
                 "quantoz-eurq": {"usd": 1.12, "eur": 1.0},
                 "quantoz-usdq": {"usd": 0.998693, "eur": 0.8912},
+                "gobtc": {"usd": 77990.0, "eur": 71822.0},
                 "usd-coin": {"usd": 1.0, "eur": 0.8924},
             },
         )
@@ -210,15 +212,17 @@ def test_fetch_parses_the_real_coingecko_shape() -> None:
 
     assert rates["usd"][_EURQ] == Decimal("1.12")
     assert rates["usd"][_USDQ] == Decimal("0.998693")
+    assert rates["usd"][_GOBTC] == Decimal("77990.0")
     assert rates["eur"][_EURQ] == Decimal("1.0")
     assert rates["eur"][_USDQ] == Decimal("0.8912")
+    assert rates["eur"][_GOBTC] == Decimal("71822.0")
     # USDC is fetched for its EUR quote only (the ledger needs it); it stays
     # oracle-free for the 402 offer.
     assert rates["eur"][_USDC] == Decimal("0.8924")
     # One request, carrying every priced id and both quote currencies.
     assert len(seen) == 1
     requested = seen[0].url.params["ids"].split(",")
-    assert set(requested) == {_EURQ, _USDQ, _USDC}
+    assert set(requested) == {_EURQ, _USDQ, _GOBTC, _USDC}
     assert set(seen[0].url.params["vs_currencies"].split(",")) == {"usd", "eur"}
 
 

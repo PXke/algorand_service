@@ -30,6 +30,23 @@ _NEWS_WINDOW_SECONDS = 48 * 3600
 _NEWS_SITEMAP_MAX_URLS = 1000
 # Google's hard cap is 50k URLs / 50MB per file; split well before that.
 MAX_URLS_PER_SITEMAP = 5000
+# A second, independent split trigger: pure URL COUNT never catches a small
+# site whose entries are individually heavy. Measured live 2026-09-05: this
+# site's sitemap was a single ~1.01MB urlset across 745 <url> entries -- 600
+# of them article-locale variants averaging ~1.67KB each, because every
+# entry embeds the FULL hreflang cluster (see _hreflang_link) for all 8
+# translation languages, not just its own locale. That's nowhere near the
+# 5000-URL count cap above, so the count check alone never fired, even
+# though the file was already slow and heavy for a crawler/tool to fetch
+# and parse (the real complaint -- this is well under the 50MB/50k hard
+# protocol ceiling, so it was never at risk of being spec-invalid).
+# 400KB is ~125x under that 50MB ceiling (a fetch/parse-speed target, not
+# spec-risk mitigation) and, at this site's measured ~1.67KB/article-entry
+# weight, splits today's ~600 article entries into 3 evenly-sized chunks --
+# enough to actually matter, not so small it fragments into near-empty
+# files. Chunk count scales with the corpus automatically as more articles
+# publish; this constant shouldn't need retuning for ordinary growth.
+MAX_BYTES_PER_SITEMAP = 400_000
 
 _URLSET_NS = 'xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"'
 _XHTML_NS = 'xmlns:xhtml="http://www.w3.org/1999/xhtml"'
@@ -165,8 +182,28 @@ def _iso_date(epoch: int) -> str:
     return datetime.fromtimestamp(epoch, tz=UTC).date().isoformat()
 
 
-def _chunk(entries: list[_UrlEntry], size: int) -> list[list[_UrlEntry]]:
-    return [entries[i : i + size] for i in range(0, len(entries), size)]
+def _chunk(entries: list[_UrlEntry], *, max_count: int, max_bytes: int) -> list[list[_UrlEntry]]:
+    """Greedily pack entries into chunks, splitting on whichever cap fires first.
+
+    Closes the current chunk once EITHER cap -- URL count or serialized byte
+    size -- would be exceeded by the next entry. A single entry heavier than
+    `max_bytes` on its own still gets its own chunk rather than being dropped
+    or endlessly deferred.
+    """
+    chunks: list[list[_UrlEntry]] = []
+    current: list[_UrlEntry] = []
+    current_bytes = 0
+    for entry in entries:
+        entry_bytes = len(_url_xml(entry).encode("utf-8"))
+        if current and (len(current) >= max_count or current_bytes + entry_bytes > max_bytes):
+            chunks.append(current)
+            current = []
+            current_bytes = 0
+        current.append(entry)
+        current_bytes += entry_bytes
+    if current:
+        chunks.append(current)
+    return chunks
 
 
 def _hreflang_link(hreflang: str, href: str) -> str:
@@ -320,9 +357,7 @@ def _article_entries(
             if loc in seen_locs:
                 continue
             seen_locs.add(loc)
-            entries.append(
-                _UrlEntry(loc=loc, lastmod=lastmod, alternates=alternates, image=image)
-            )
+            entries.append(_UrlEntry(loc=loc, lastmod=lastmod, alternates=alternates, image=image))
     return entries
 
 
@@ -330,17 +365,28 @@ def build_sitemaps(
     items: list[ArticleFeedItem],
     translations_by_id: dict[str, list[str]],
 ) -> SitemapBuild:
-    """Build the full urlset, splitting into a sitemap index plus chunked files once it exceeds the URL cap."""
+    """Build the full urlset, splitting into a sitemap index plus chunked files once EITHER the URL count exceeds MAX_URLS_PER_SITEMAP OR the serialized byte size exceeds MAX_BYTES_PER_SITEMAP.
+
+    The byte check exists because a few heavy entries (this site's per-article
+    8-language hreflang cluster) can make a file slow to fetch/parse long
+    before the URL count alone would ever trip the split.
+    """
     static = _static_entries(items)
     articles = _article_entries(items, translations_by_id)
     all_entries = static + articles
     newest = _iso_date(max((i.published_at_epoch for i in items), default=int(time.time())))
 
-    if len(all_entries) <= MAX_URLS_PER_SITEMAP:
-        return SitemapBuild(is_index=False, root_xml=_urlset_xml(all_entries), parts={})
+    combined_xml = _urlset_xml(all_entries)
+    if (
+        len(all_entries) <= MAX_URLS_PER_SITEMAP
+        and len(combined_xml.encode("utf-8")) <= MAX_BYTES_PER_SITEMAP
+    ):
+        return SitemapBuild(is_index=False, root_xml=combined_xml, parts={})
 
     parts: dict[str, str] = {"sitemap-pages.xml": _urlset_xml(static)}
-    for i, chunk in enumerate(_chunk(articles, MAX_URLS_PER_SITEMAP), 1):
+    for i, chunk in enumerate(
+        _chunk(articles, max_count=MAX_URLS_PER_SITEMAP, max_bytes=MAX_BYTES_PER_SITEMAP), 1
+    ):
         parts[f"sitemap-articles-{i}.xml"] = _urlset_xml(chunk)
 
     return SitemapBuild(

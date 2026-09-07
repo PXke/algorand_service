@@ -387,8 +387,22 @@ def test_x402_receipt_detail_requires_a_receipt_id() -> None:
 # Catalog: supports_receipts reflects whether the signing key is configured
 # --------------------------------------------------------------------------- #
 def _route(catalog: dict, resource: str) -> dict:
+    """One route for `resource`, tolerating the ux-audit's renamed-path aliases.
+
+    Since 2026-09-07 (docs/x402-marketplace-ux-audit.md section 3.3/3.5), a
+    renamed path is a second CatalogRoute entry derived via _renamed() --
+    same resource id, same everything except `path` (by design: aliases
+    settle under the identical ledger/resource id, never a new one). So more
+    than one match is now expected for an aliased route; every match must
+    still agree on every field except `path`.
+    """
     matches = [r for r in catalog["routes"] if r.get("resource") == resource]
-    assert len(matches) == 1, f"expected exactly one route for resource={resource!r}"
+    assert matches, f"expected at least one route for resource={resource!r}"
+    first = {k: v for k, v in matches[0].items() if k != "path"}
+    for other in matches[1:]:
+        assert {k: v for k, v in other.items() if k != "path"} == first, (
+            f"alias routes for resource={resource!r} disagree on a field other than path"
+        )
     return matches[0]
 
 

@@ -163,6 +163,12 @@ def _settled_result(payer: str = _PAYER, txid: str = "TX123") -> x402_guard.Paym
 # --------------------------------------------------------------------------- #
 # Fixtures
 # --------------------------------------------------------------------------- #
+@pytest.fixture(autouse=True)
+def _already_paid(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Skip the pre-parse 402 for header-less requests: every route test here models a request that already carries a payment (the gate is stubbed), so the unpaid challenge is out of scope. Its ordering has its own tests in tests/test_x402_unpaid_challenge.py."""
+    monkeypatch.setattr(kyc_routes, "challenge_if_unpaid", lambda *_a, **_kw: None)
+
+
 @pytest.fixture
 def fake_redis(monkeypatch: pytest.MonkeyPatch) -> _FakeRedis:
     """Swap both Redis seams for one in-process fake shared by replay and rate limiting."""

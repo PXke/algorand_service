@@ -359,6 +359,44 @@ def test_tag_stats_aggregates_counts_and_last_epoch() -> None:
     assert by_tag["defi"]["count"] == 1
 
 
+def test_tag_stats_deduplicates_article_ids_before_bulk_view_lookup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An article tagged N times must reach get_views_bulk exactly once.
+
+    tag_summary() samples article ids per tag, so a multi-tagged article
+    appears in more than one tag's sample; unioning those samples without
+    dedup fed get_views_bulk (one concurrent Cassandra point-read per id) a
+    list with as many duplicate reads as the article has tags. At this
+    platform's real tag/article ratio that turned a handful of articles into
+    several hundred redundant reads on every tag_stats() cache miss.
+    """
+    from app.modules.news.stores import view_counts
+
+    store = InMemoryArticleStore()
+    # a1 carries three tags; a2 carries one. Deduplicated, get_views_bulk
+    # should only ever see {"a1", "a2"} -- two ids, not four.
+    store.insert(_story("a1", 100, ["nft", "algorand", "defi"]))
+    store.insert(_story("a2", 200, ["nft"]))
+
+    seen_ids: list[str] = []
+
+    def fake_bulk(ids: list[str]) -> dict[str, int]:
+        seen_ids.extend(ids)
+        return {"a1": 5, "a2": 7}
+
+    monkeypatch.setattr(view_counts, "get_views_bulk", fake_bulk)
+    stats = NewsService(store=store).tag_stats()
+
+    assert len(seen_ids) == len(set(seen_ids)), f"duplicate ids sent to get_views_bulk: {seen_ids}"
+    assert set(seen_ids) == {"a1", "a2"}
+
+    by_tag = {entry["tag"]: entry for entry in stats["tags"]}
+    assert by_tag["nft"]["views"] == 12  # a1 (5) + a2 (7)
+    assert by_tag["algorand"]["views"] == 5
+    assert by_tag["defi"]["views"] == 5
+
+
 def test_hot_feed_velocity_vs_alltime(monkeypatch: pytest.MonkeyPatch) -> None:
     """Ranks "hot" by views-per-day velocity but "top" by lifetime view count."""
     import time

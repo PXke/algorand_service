@@ -3,6 +3,7 @@
   import { messages, t, activeLocale } from '../lib/i18n'
   import { navigate } from '../lib/router'
   import StoryRow from '../components/StoryRow.svelte'
+  import SectionRule from '../components/SectionRule.svelte'
   import PageMeta from '../components/PageMeta.svelte'
   import FeedSkeleton from '../components/FeedSkeleton.svelte'
   import { ApiException } from '../lib/api/client'
@@ -40,24 +41,22 @@
     }
   })
 
-  const pageTitle = $derived(rank === 'top' ? t($messages, 'navTop') : t($messages, 'hotTitle'))
-  const pagePath = $derived(rank === 'top' ? '/top' : '/hot')
+  const isTop = $derived(rank === 'top')
+  const kicker = $derived(isTop ? t($messages, 'navTop') : t($messages, 'navHot'))
+  const pageTitle = $derived(isTop ? t($messages, 'navTop') : t($messages, 'hotTitle'))
+  const lead = $derived(isTop ? t($messages, 'hotTabAllTime') : t($messages, 'hotLead'))
+  const ruleLabel = $derived(isTop ? t($messages, 'hotTabAllTime') : t($messages, 'hotTabHot'))
+  const pagePath = $derived(isTop ? '/top' : '/hot')
 </script>
 
-<PageMeta
-  title={pageTitle}
-  description={rank === 'top' ? t($messages, 'hotTabAllTime') : t($messages, 'hotLead')}
-  path={pagePath}
-  ogLocale={ogLocaleFor($activeLocale)}
-/>
+<PageMeta title={pageTitle} description={lead} path={pagePath} ogLocale={ogLocaleFor($activeLocale)} />
 
 <div class="page stack">
-  <header>
+  <header class="page-head">
     <span class="accent-slug"></span>
+    <p class="kicker">{kicker}</p>
     <h1>{pageTitle}</h1>
-    <p class="lead muted">
-      {rank === 'top' ? t($messages, 'hotTabAllTime') : t($messages, 'hotLead')}
-    </p>
+    <p class="lead muted">{lead}</p>
   </header>
 
   {#if loading}
@@ -78,31 +77,24 @@
       </div>
     </div>
   {:else}
-    <div class="ledger">
+    <SectionRule label={ruleLabel} />
+    <!-- Same rows as /news, plus the rank column: the ledger is the feed
+         re-sorted by read tally, not a different kind of page. -->
+    <div class="feed">
       {#each items as article, i (article.article_id)}
-        <StoryRow
-          {article}
-          dense
-          rank={i + 1}
-          enterIndex={feedEnterIndex(enterAt, article.article_id)}
-        />
+        <StoryRow {article} rank={i + 1} enterIndex={feedEnterIndex(enterAt, article.article_id)} />
       {/each}
     </div>
   {/if}
 </div>
 
 <style>
-  h1 {
-    margin: 8px 0 0;
-    font-size: clamp(28px, 4vw, 34px);
+  .feed :global(.row:last-child) {
+    border-bottom: 0;
   }
-  .lead {
-    margin: 8px 0 0;
-    max-width: 42rem;
-  }
-  .ledger {
-    display: flex;
-    flex-direction: column;
+  .empty {
+    padding: 28px 0;
+    text-align: start;
   }
   .empty h2 {
     margin: 0 0 8px;

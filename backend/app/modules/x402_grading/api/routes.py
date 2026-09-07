@@ -21,7 +21,12 @@ from app.core.query_params import query_param
 from app.modules.admin.auth import require_admin_wallet
 from app.modules.x402 import circuit_breaker
 from app.modules.x402.discovery import describe_json_endpoint
-from app.modules.x402.paid_request import mark_fulfilled, require_paid_request, run_with_refund
+from app.modules.x402.paid_request import (
+    challenge_if_unpaid,
+    mark_fulfilled,
+    require_paid_request,
+    run_with_refund,
+)
 from app.modules.x402.preview import preview_requested
 from app.modules.x402.promo import promo_request_params
 
@@ -297,6 +302,35 @@ def _unattributable_payer_response(payment_txid: str, settlement_headers: dict) 
     )
 
 
+def _prepare_submission(
+    request: Request,
+) -> tuple[X402GradeSubmission, str, str, str, bool, str] | Response:
+    """Every free, pre-gate check of a grade submission in order, or the Response that ends it.
+
+    Decodes and resolves the body (_decode_and_resolve), applies the
+    usage-proof rate limit, then verifies the cited txid on-chain
+    (_validate_and_prove_usage). Returns (payload, normalized_url, hashed,
+    tx_id, proof_verified, proof_sender). Extracted from x402_grade_submit
+    so the route's own control flow stays within the complexity budget once
+    the unpaid-challenge branch was added ahead of these checks.
+    """
+    decoded = _decode_and_resolve(request)
+    if isinstance(decoded, Response):
+        return decoded
+    payload, normalized_url, hashed = decoded
+
+    if grading_usage_proof_rate_limited(request):
+        return json_error_response(
+            429, "rate_limited", "Too many grade-submission requests — please try again later"
+        )
+
+    proof = _validate_and_prove_usage(payload.tx_id, normalized_url)
+    if isinstance(proof, Response):
+        return proof
+    tx_id, proof_verified, proof_sender = proof
+    return payload, normalized_url, hashed, tx_id, proof_verified, proof_sender
+
+
 def _reject_if_sender_mismatched(
     *,
     proof_verified: bool,
@@ -403,32 +437,13 @@ def x402_grade_submit(request: Request) -> Response:
             "Try again later.",
         )
 
-    decoded = _decode_and_resolve(request)
-    if isinstance(decoded, Response):
-        return decoded
-    payload, normalized_url, hashed = decoded
-
-    if grading_usage_proof_rate_limited(request):
-        return json_error_response(
-            429, "rate_limited", "Too many grade-submission requests — please try again later"
-        )
-
-    proof = _validate_and_prove_usage(payload.tx_id, normalized_url)
-    if isinstance(proof, Response):
-        return proof
-    tx_id, proof_verified, proof_sender = proof
-
-    promo_code, promo_wallet = promo_request_params(request)
-    result = require_paid_request(
-        request,
-        price=settings.x402_grading_grade_price,
-        resource="x402-grading-submit",
-        promo_code=promo_code,
-        promo_wallet=promo_wallet,
+    offer = {
+        "price": settings.x402_grading_grade_price,
+        "resource": "x402-grading-submit",
         # Reaches the payer as the 402's resource.description, before they
         # commit. It states the overwrite rule and how the grade will be
         # weighted, because neither is derivable from the price.
-        description=(
+        "description": (
             "Grade any x402 endpoint 1-5 stars, with an optional one-line opinion. "
             "Any http(s) URL can be graded -- it does not have to be listed with us. "
             "Requires tx_id: a real payment YOU made to the graded endpoint's own payTo, "
@@ -437,7 +452,7 @@ def x402_grade_submit(request: Request) -> Response:
             "a second one. Your grade is weighted in the published average by how much "
             "your wallet has paid this marketplace in total (unrelated to tx_id)."
         ),
-        extensions=describe_json_endpoint(
+        "extensions": describe_json_endpoint(
             # POST carries its input as a JSON body, so this must declare a
             # BODY discovery extension. Without body_type the package builds a
             # query-params one, which would describe this route's input
@@ -466,6 +481,22 @@ def x402_grade_submit(request: Request) -> Response:
                 "settlement_tx_id": "...",
             },
         ),
+    }
+    # An unpaid request sees the offer before its body is ever parsed (see
+    # challenge_if_unpaid); with a payment attached, every check below still
+    # runs before the gate so a doomed request is never charged.
+    challenge = challenge_if_unpaid(request, **offer)
+    if challenge is not None:
+        return challenge
+
+    prepared = _prepare_submission(request)
+    if isinstance(prepared, Response):
+        return prepared
+    payload, normalized_url, hashed, tx_id, proof_verified, proof_sender = prepared
+
+    promo_code, promo_wallet = promo_request_params(request)
+    result = require_paid_request(
+        request, **offer, promo_code=promo_code, promo_wallet=promo_wallet
     )
     if result.error:
         return result.error
@@ -553,6 +584,48 @@ def x402_grade_score(request: Request) -> Response:
             "Try again later.",
         )
 
+    offer = {
+        "price": settings.x402_grading_score_price,
+        "resource": "x402-grading-score",
+        "description": (
+            "Read the aggregate grade for one x402 endpoint: the credibility-weighted "
+            "mean, the plain unweighted mean, the grader count, the full 1-5 distribution, "
+            "and every grader's score, opinion and weight. Each grade is weighted by how "
+            "much that wallet has paid this marketplace in total, so a wallet with a long "
+            "spending record counts for more than a fresh one. Supports ?preview=true "
+            "(redacted, unpaid, rate-limited)."
+        ),
+        # GET takes its input in the query string, not a JSON body, so no
+        # body_type here -- the package's default query-params declaration is
+        # the right shape (see describe_json_endpoint's docstring).
+        "extensions": describe_json_endpoint(
+            input={"url": _GRADE_EXAMPLE["url"]},
+            input_schema={
+                "type": "object",
+                "properties": {"url": {"type": "string", "maxLength": MAX_URL_LENGTH}},
+                "required": ["url"],
+            },
+            output_example={
+                "url_hash": "0" * 64,
+                "url": _GRADE_EXAMPLE["url"],
+                "count": 3,
+                "weighted_mean": 4.612,
+                "mean": 4.333,
+                "total_weight": 930000,
+                "weights_resolved": True,
+                "distribution": {"1": 0, "2": 0, "3": 1, "4": 0, "5": 2},
+                "grades": [],
+                "truncated": False,
+            },
+        ),
+    }
+    # An unpaid request sees the offer before its query string is validated
+    # (see challenge_if_unpaid); with a payment attached, the two free checks
+    # below still run before the gate so nobody pays for an empty aggregate.
+    challenge = challenge_if_unpaid(request, **offer)
+    if challenge is not None:
+        return challenge
+
     raw_url = query_param(request.query_params.get("url", ""))
     if not raw_url:
         return json_error_response(400, "invalid_request", "url is required")
@@ -574,41 +647,9 @@ def x402_grade_score(request: Request) -> Response:
     promo_code, promo_wallet = promo_request_params(request)
     result = require_paid_request(
         request,
-        price=settings.x402_grading_score_price,
-        resource="x402-grading-score",
+        **offer,
         promo_code=promo_code,
         promo_wallet=promo_wallet,
-        description=(
-            "Read the aggregate grade for one x402 endpoint: the credibility-weighted "
-            "mean, the plain unweighted mean, the grader count, the full 1-5 distribution, "
-            "and every grader's score, opinion and weight. Each grade is weighted by how "
-            "much that wallet has paid this marketplace in total, so a wallet with a long "
-            "spending record counts for more than a fresh one. Supports ?preview=true "
-            "(redacted, unpaid, rate-limited)."
-        ),
-        # GET takes its input in the query string, not a JSON body, so no
-        # body_type here -- the package's default query-params declaration is
-        # the right shape (see describe_json_endpoint's docstring).
-        extensions=describe_json_endpoint(
-            input={"url": _GRADE_EXAMPLE["url"]},
-            input_schema={
-                "type": "object",
-                "properties": {"url": {"type": "string", "maxLength": MAX_URL_LENGTH}},
-                "required": ["url"],
-            },
-            output_example={
-                "url_hash": "0" * 64,
-                "url": _GRADE_EXAMPLE["url"],
-                "count": 3,
-                "weighted_mean": 4.612,
-                "mean": 4.333,
-                "total_weight": 930000,
-                "weights_resolved": True,
-                "distribution": {"1": 0, "2": 0, "3": 1, "4": 0, "5": 2},
-                "grades": [],
-                "truncated": False,
-            },
-        ),
         preview=preview_requested(request),
     )
     if result.error:
@@ -770,19 +811,10 @@ def x402_grade_top(request: Request) -> Response:
         return json_error_response(
             429, "rate_limited", "Too many leaderboard requests — please try again later"
         )
-    resolved = _resolve_leaderboard_tag(request)
-    if isinstance(resolved, Response):
-        return resolved
-    raw_tag, candidates = resolved
-
-    promo_code, promo_wallet = promo_request_params(request)
-    result = require_paid_request(
-        request,
-        price=settings.x402_grading_score_price,
-        resource="x402-grading-top",
-        promo_code=promo_code,
-        promo_wallet=promo_wallet,
-        description=(
+    offer = {
+        "price": settings.x402_grading_score_price,
+        "resource": "x402-grading-top",
+        "description": (
             f"Read the top graded x402 endpoints listed under one directory tag, ranked "
             f"by credibility-weighted mean grade, with each endpoint's plain mean and "
             f"grader count. Considers at most {TOP_CANDIDATE_LIMIT} listings per tag; an "
@@ -793,7 +825,7 @@ def x402_grade_top(request: Request) -> Response:
             f"rate-limited)."
         ),
         # GET with query-string input, so no body_type (see x402_grade_score).
-        extensions=describe_json_endpoint(
+        "extensions": describe_json_endpoint(
             input={"tag": "pricing"},
             input_schema={
                 "type": "object",
@@ -819,6 +851,25 @@ def x402_grade_top(request: Request) -> Response:
                 "settlement_tx_id": "...",
             },
         ),
+    }
+    # An unpaid request sees the offer before the tag is resolved (see
+    # challenge_if_unpaid); with a payment attached, the free candidate check
+    # below still runs before the gate so nobody pays for an empty board.
+    challenge = challenge_if_unpaid(request, **offer)
+    if challenge is not None:
+        return challenge
+
+    resolved = _resolve_leaderboard_tag(request)
+    if isinstance(resolved, Response):
+        return resolved
+    raw_tag, candidates = resolved
+
+    promo_code, promo_wallet = promo_request_params(request)
+    result = require_paid_request(
+        request,
+        **offer,
+        promo_code=promo_code,
+        promo_wallet=promo_wallet,
         preview=preview_requested(request),
     )
     if result.error:
@@ -917,10 +968,22 @@ def x402_admin_delete_grade(request: Request) -> Response | dict:
 
 
 def register_x402_grading_routes(app: Router) -> None:
-    """Register the paid routes (grade, score, tag leaderboard), the free ones (index, summary) and the admin delete."""
+    """Register the paid routes (grade, score, tag leaderboard), the free ones (index, summary) and the admin delete.
+
+    x402-marketplace-ux-audit.md section 3.3 "trust / grades": `summary` is
+    renamed to `lookup` and `top` moves into the shared trust leaderboards
+    namespace (N4 -- three unrelated paid "leaderboards", three names). Each
+    new path is a second direct registration against the identical old
+    handler; the old paths are never removed (section 3.5). `score` is left
+    alone here -- the doc's proposed merge of `score` into `lookup` via a
+    `?score=true` flag is a behavior change, not a rename, and is out of
+    scope for this pass.
+    """
     app.post("/api/v1/x402/grades")(x402_grade_submit)
     app.get("/api/v1/x402/grades")(x402_grade_index)
     app.get("/api/v1/x402/grades/score")(x402_grade_score)
     app.get("/api/v1/x402/grades/summary")(x402_grade_summary)
+    app.get("/api/v1/x402/grades/lookup")(x402_grade_summary)
     app.get("/api/v1/x402/grades/top")(x402_grade_top)
+    app.get("/api/v1/x402/trust/leaderboards/graded")(x402_grade_top)
     app.delete("/api/v1/admin/x402/grades")(x402_admin_delete_grade)

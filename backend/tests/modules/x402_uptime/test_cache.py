@@ -76,6 +76,60 @@ def test_set_then_get_round_trips(monkeypatch: pytest.MonkeyPatch) -> None:
     assert got.cached_at == cached_at
 
 
+def test_set_cached_without_samples_defaults_to_a_single_sample_list(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A caller that never took multiple samples (e.g. a pre-percentiles test) still round-trips a usable list."""
+    fake = _FakeRedis()
+    monkeypatch.setattr(cache_module, "get_redis", lambda: fake)
+
+    cache_module.set_cached("https://example.com/", _UP)
+    got = cache_module.get_cached("https://example.com/")
+
+    assert got is not None
+    assert got.latency_samples_ms == [_UP.response_time_ms]
+
+
+def test_set_then_get_round_trips_every_percentile_sample(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The FULL sample list from sample_target() round-trips, not just the primary result's own latency."""
+    fake = _FakeRedis()
+    monkeypatch.setattr(cache_module, "get_redis", lambda: fake)
+
+    cache_module.set_cached("https://example.com/", _UP, [90, 100, 110, 120, 130])
+    got = cache_module.get_cached("https://example.com/")
+
+    assert got is not None
+    assert got.latency_samples_ms == [90, 100, 110, 120, 130]
+
+
+def test_a_pre_percentiles_cache_entry_missing_the_samples_field_falls_back_gracefully(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A cache entry written before this field existed must not become a malformed-entry miss."""
+    fake = _FakeRedis()
+    monkeypatch.setattr(cache_module, "get_redis", lambda: fake)
+    key = cache_module.cache_key("https://example.com/")
+    fake.store[key] = cache_module.serialization.dumps(
+        {
+            "final_url": _UP.final_url,
+            "reachable": _UP.reachable,
+            "http_status": _UP.http_status,
+            "response_time_ms": _UP.response_time_ms,
+            "resolved_ip": _UP.resolved_ip,
+            "error": _UP.error,
+            "redirect_chain": _UP.redirect_chain,
+            "cached_at": 1000.0,
+        }
+    )
+
+    got = cache_module.get_cached("https://example.com/")
+
+    assert got is not None
+    assert got.latency_samples_ms == [_UP.response_time_ms]
+
+
 def test_different_urls_hash_to_different_keys() -> None:
     """Two distinct targets never collide on the same cache key."""
     assert cache_module.cache_key("https://a.example/") != cache_module.cache_key(
@@ -136,3 +190,14 @@ def test_5xx_counts_as_down_for_freshness_purposes() -> None:
         redirect_chain=["https://example.com/"],
     )
     assert cache_module.is_down(server_error) is True
+
+
+def test_is_down_fields_is_the_single_source_of_truth_is_down_delegates_to() -> None:
+    """is_down_fields must agree with is_down() on every case.
+
+    history_service.py's aggregation reuses is_down_fields directly (raw
+    Cassandra columns, not a checker.UptimeResult).
+    """
+    assert cache_module.is_down_fields(reachable=False, http_status=0) is True
+    assert cache_module.is_down_fields(reachable=True, http_status=503) is True
+    assert cache_module.is_down_fields(reachable=True, http_status=200) is False

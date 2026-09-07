@@ -327,7 +327,7 @@
           {t($messages, 'articleRemainingLabel', { pct: remainingPct })}
         </span>
       {/if}
-      <ShareBar url={canonicalPath} title={headline} compact />
+      <ShareBar url={canonicalPath} title={headline} tags={article?.tags} compact />
     </div>
   </div>
 {/if}
@@ -433,7 +433,7 @@
             {/each}
           </div>
         {/if}
-        <ShareBar url={canonicalPath} title={headline} compact />
+        <ShareBar url={canonicalPath} title={headline} tags={article?.tags} compact />
       </footer>
     </article>
     {/key}
