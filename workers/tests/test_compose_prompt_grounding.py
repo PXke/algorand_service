@@ -50,7 +50,7 @@ def test_narrative_guidance_bans_a_trailing_caveats_block() -> None:
     assert "UNRESOLVED GAPS ARE A CHECKLIST, NOT A SECTION" in mc._NARRATIVE_GUIDANCE
     assert "Unresolved Gaps" in mc._NARRATIVE_GUIDANCE
     assert "finding, not a gap" in mc._NARRATIVE_GUIDANCE
-    assert "Seven rules:" in mc._NARRATIVE_GUIDANCE
+    assert "Eight rules:" in mc._NARRATIVE_GUIDANCE
 
 
 def test_narrative_guidance_connects_interacting_numbers() -> None:
@@ -59,6 +59,51 @@ def test_narrative_guidance_connects_interacting_numbers() -> None:
     assert "narrow license, not a mandate to compute" in mc._NARRATIVE_GUIDANCE
     assert "SUPPLY-SHARE ARITHMETIC still stands" in mc._NARRATIVE_GUIDANCE
     assert "name it in the sentence" in mc._NARRATIVE_GUIDANCE
+
+
+def test_narrative_guidance_labels_each_figure_in_a_numeric_consequence_sentence() -> None:
+    """AlgoChess recompose (2026-09-08, Fable three-way review): rule 7's showcase sentence in a real draft was garbled -- 'caps any single payout at maxPayoutBps 2000 -- one fifth of a reserve the contract's own figures put at 285.46 ALGO' reads as if the RESERVE were 285.46 ALGO, when that figure is actually the CAP. Extends rule 7 to require each figure carry its own plain-language label."""
+    assert "carries its own plain-language label" in mc._NARRATIVE_GUIDANCE
+    assert "is not a label a reader can use" in mc._NARRATIVE_GUIDANCE
+
+
+def test_narrative_guidance_allows_a_dated_price_conversion_in_rule_seven() -> None:
+    """Fable review, 2026-09-08: rule 7's blanket 'never a unit or decimals conversion' also banned ALGO-to-USD conversions, and landed exactly when every dollar figure vanished from composed drafts (v1 had them, v2/v3 -- both after rule 7 shipped -- had none). Carves out a conversion at a rate the Digest itself supplied."""
+    assert "except a conversion at a rate the Digest itself supplies" in mc._NARRATIVE_GUIDANCE
+    assert "SUPPLY-SHARE ARITHMETIC still stands" in mc._NARRATIVE_GUIDANCE
+
+
+def test_narrative_guidance_has_rule_eight_on_answering_your_own_open_questions() -> None:
+    """AlgoChess recompose, Fable three-way review: a draft found (via grep_frontend_bundle) the exact fact resolving its own 'who holds the wallet key' open question -- a wallet library's own security warning about client-side mnemonics -- and reported it in an unrelated section without ever connecting it back or drawing the conclusion."""
+    assert "Eight rules:" in mc._NARRATIVE_GUIDANCE
+    assert "A FACT THAT ANSWERS YOUR OWN OPEN QUESTION ANSWERS IT WHERE YOU ASKED" in (
+        mc._NARRATIVE_GUIDANCE
+    )
+    assert "State only what the fact actually establishes, never more" in mc._NARRATIVE_GUIDANCE
+
+
+def test_narrative_guidance_numeric_honesty_bans_inferring_a_transactions_type_from_its_size() -> (
+    None
+):
+    """Fable three-way review, 2026-09-08: a draft's lede rested on a real 10.04 ALGO payout framed as 'the winner gets paid', but the amount was more consistent with a stake refund -- nothing in the Digest actually said which. A number's size alone never establishes what kind of settlement it was."""
+    assert "A number's SIZE never tells you what it IS" in mc._NARRATIVE_GUIDANCE
+
+
+def test_gap_extraction_prompts_require_checking_the_whole_trace_first() -> None:
+    """Companion fix to rule 8: the digest's own '### Unresolved Gaps' list is derived from the trace and can lag it -- a gap the extractor lists is never re-checked against tool results that came later in the same trace. Both the raw-mode and synthesis-mode gap extractors must know not to list a question a later result already answered."""
+    assert "already answers, even partially, is not a gap" in mc._GAP_EXTRACTION_PROMPT
+    assert "already answers, even partially, is not a gap" in mc._RESEARCH_DIGEST_SYNTHESIS
+
+
+def test_algo_price_market_rule_carves_out_how_much_is_at_stake_stories() -> None:
+    """Fable three-way review, 2026-09-08: neither of two later AlgoChess recomposes made a single price-lookup tool call, confirmed directly against their stored research traces -- the blanket 'do not add market metrics by default' rule was suppressing exactly the price fetch a 'how much money is at stake' story needs."""
+    assert "how much money is at stake" in mc._METRICS_DISCIPLINE
+
+
+def test_stage2_generation_guidance_bans_attributing_trust_properties_to_algorithms() -> None:
+    """Fable three-way review, 2026-09-08: two of three AlgoChess drafts independently wrote that Glicko-2 (a rating FORMULA) prevents an operator from editing a stored rating -- while the same drafts said ratings are computed server-side by the operator, the actual, weaker trust story."""
+    assert "never a trust property" in mc._STAGE2_GENERATION_GUIDANCE
+    assert "Glicko-2" in mc._STAGE2_GENERATION_GUIDANCE
 
 
 def test_tools_guidance_requires_asset_affiliation_check() -> None:
@@ -356,7 +401,15 @@ def test_stage2_oversized_extras_get_truncated_not_sent_whole(
     )
     assert "[enumeration/outline truncated]" in user or "[digest truncated]" in user
     # The combined digest+extras block actually shrank -- not just annotated.
-    assert user.count("F") + user.count("E") < len(digest) + len(enumeration)
+    # Isolated to the digest+extras span itself (between its own markers) so
+    # this stays independent of _NARRATIVE_GUIDANCE's own (uncapped, always
+    # fully appended) length, which changes independently of this cap.
+    digest_and_extras_span = user.split("ground truth for external facts):\n", 1)[1].split(
+        "\n\nWrite the article strictly from this material above.", 1
+    )[0]
+    assert digest_and_extras_span.count("F") + digest_and_extras_span.count("E") < len(
+        digest
+    ) + len(enumeration)
 
 
 def test_stage2_extras_trims_enumeration_before_touching_the_digest(

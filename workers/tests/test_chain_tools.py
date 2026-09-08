@@ -925,3 +925,13 @@ def test_mainnet_idx_cache_hit_with_reordered_params_skips_second_http_call(
     chain_tools._mainnet_idx_get("/v2/assets", {"limit": 5, "name": "foo"}, cache_ttl=60)
 
     assert calls["n"] == 1
+
+
+def test_lookup_application_schema_warns_about_unlabeled_integer_units() -> None:
+    """Fable three-way review, 2026-09-08: three separate compose runs guessed three different unit conversions (rounds vs seconds) for the same raw settleWindow global-state integer on the same contract. The schema now tells the model integer values are raw and unit-ambiguous rather than staying silent on it."""
+    schema = next(
+        s for s in chain_tools.CHAIN_SCHEMAS if s["function"]["name"] == "lookup_application"
+    )
+    description = schema["function"]["description"]
+    assert "Integer values are RAW" in description
+    assert "never assume a unit from the key name" in description

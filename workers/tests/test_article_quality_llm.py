@@ -213,3 +213,13 @@ def test_rubric_technical_depth_is_relevance_gated() -> None:
     # Fallback issues must not carry the generic add-mechanics instruction.
     joined = " ".join(_FALLBACK_QUALITY["issues"])
     assert "THIS story actually involves" in joined
+
+
+def test_rubric_narrative_synthesis_flags_a_dangling_open_question() -> None:
+    """Companion fix to writer prompt rule 8 (2026-09-08, Fable three-way review): a draft that raises a question in one section and never connects the fact answering it, found elsewhere in the same piece, should be caught here too -- the grader sees the whole draft at once, which the linearly-generating writer does not."""
+    from app.modules.newspaper.article_quality_llm import _QUALITY_RUBRIC
+
+    assert (
+        "raises a question in one section and leaves it open while another "
+        "section states the fact that answers it" in _QUALITY_RUBRIC
+    )

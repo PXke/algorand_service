@@ -39,6 +39,22 @@ def test_fetched_sources_keeps_only_successful_unique() -> None:
     ]
 
 
+def test_fetched_sources_falls_back_to_host_when_title_is_the_url_itself() -> None:
+    """Regression (2026-09-08, AlgoChess): fetch_url's JSON/XML branches stash the url itself in `title` as a display placeholder (no real <title> to extract from raw JSON) -- using that verbatim as a citation label produces a 120-char-truncated URL as the visible link text. Falls back to the host, same as a genuinely absent title."""
+    long_url = (
+        "https://mainnet-idx.algonode.cloud/v2/accounts/"
+        "WULONDKUYGWKID2XSZEGOURROQ76KL24XCJKLKUK34NS4P5HT7VSEHOXEI/transactions?limit=50"
+    )
+    trace = [
+        {
+            "tool": "fetch_url",
+            "arguments": {"url": long_url},
+            "result": {"url": long_url, "title": long_url},
+        },
+    ]
+    assert fetched_sources(trace) == [(long_url, "mainnet-idx.algonode.cloud")]
+
+
 def test_appends_missing_deep_url_under_new_section() -> None:
     """Adds a fetched deep URL to a new Sources section without duplicating the already-cited domain."""
     # Body cites only the main domain (the reported failure mode).

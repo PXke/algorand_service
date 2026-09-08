@@ -1866,7 +1866,13 @@ CHAIN_SCHEMAS: list[dict[str, Any]] = [
                 "vote tallies, admin addresses, parameters). Point it at a governance app id "
                 "to verify what executed on-chain rather than relying on a forum post. This "
                 "(with lookup_account and lookup_asset) is how you query algod/the indexer "
-                "directly — there is no separate raw 'algod' tool."
+                "directly — there is no separate raw 'algod' tool. Integer values are RAW: "
+                "the contract, not the chain, defines whether a field like a 'window' or "
+                "'delay' is rounds, seconds, microALGO, or basis points — never assume a "
+                "unit from the key name alone. Cite the contract's published source/docs for "
+                "the unit, or report the figure with the unit stated as unconfirmed, rather "
+                "than guessing a conversion (2026-09-08: three separate reads of the same "
+                "field on the same contract guessed three different unit conversions)."
             ),
             "parameters": {
                 "type": "object",

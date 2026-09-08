@@ -60,6 +60,14 @@ _LINK_URL_RE = re.compile(r"\]\((https?://[^\s)]+)\)")
 _MAX_SOURCES = 12
 
 
+def _title_or_host_label(title: object, url: str) -> str:
+    """The citation label for one source: the tool's own title, unless that title IS the url (or another url) -- some fetch paths (e.g. fetch_url's JSON/XML branches, which have no real <title> to extract) stash the url itself in the title field as a display placeholder for THEIR OWN purposes. Using that verbatim here produces a citation whose visible text is a 120-char-truncated URL, ending mid-query-string -- confirmed live 2026-09-08 on a raw indexer fetch. Fall back to the host in that case, same as a genuinely absent title."""
+    label = str(title or "").strip()
+    if not label or label.startswith(("http://", "https://")):
+        label = urlparse(url).netloc
+    return label[:120]
+
+
 def fetched_sources(trace: list[dict]) -> list[tuple[str, str]]:
     """(url, label) for each successfully fetched/looked-up research source, deduped in order.
 
@@ -84,8 +92,7 @@ def fetched_sources(trace: list[dict]) -> list[tuple[str, str]]:
         if not url.startswith(("http://", "https://")) or url in seen:
             continue
         seen.add(url)
-        label = (str(result.get("title") or "").strip() or urlparse(url).netloc)[:120]
-        out.append((url, label))
+        out.append((url, _title_or_host_label(result.get("title"), url)))
     return out
 
 
@@ -115,8 +122,7 @@ def _search_result_sources(trace: list[dict]) -> list[tuple[str, str]]:
                 label = str(item.get(key) or "").strip()
                 if label:
                     break
-            label = (label or urlparse(url).netloc)[:120]
-            out.append((url, label))
+            out.append((url, _title_or_host_label(label, url)))
     return out
 
 

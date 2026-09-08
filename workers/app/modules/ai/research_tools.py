@@ -1713,6 +1713,51 @@ def _augment_spa_notfound_warning(result: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
+_BOT_CHALLENGE_TITLES = (
+    "just a moment",
+    "checking your browser",
+    "attention required",
+    "verify you are human",
+    "verifying you are human",
+    "access denied",
+    "enable javascript and cookies to continue",
+)
+_BOT_CHALLENGE_MIN_REAL_TEXT_LEN = 400
+
+
+def _augment_bot_challenge_error(url: str, result: dict[str, Any]) -> dict[str, Any]:
+    """When fetch_url actually lands on an anti-bot challenge page (Cloudflare and similar), turn the "successful" 200 into an explicit error instead of a citable result.
+
+    Root-caused 2026-09-08 (AlgoChess three-way recompose comparison,
+    Fable review): a fetch of allo.info got WAF-challenged, and the
+    challenge page's own <title> ("Just a moment...") got picked up as
+    the citation LABEL by reference_block.py's fetched_sources -- a
+    published article cited a real-looking source whose visible link
+    text was a bot-detection splash screen. JOURNALISM RULES already
+    tells the model a substanceless 200 "is the SAME as an error" --
+    this makes that true at the fetch layer itself, so the model, the
+    citation backfill, and any other downstream consumer all see the
+    same signal (CLAUDE.md invariant 2.8: empty is not "none found").
+    Matched on title AND a short body, not title alone -- a legitimate
+    page could coincidentally share generic wording; a real page also
+    has real length.
+    """
+    title = str(result.get("title") or "").strip().lower()
+    text = result.get("text") if isinstance(result.get("text"), str) else ""
+    if not any(phrase in title for phrase in _BOT_CHALLENGE_TITLES):
+        return result
+    if len(text.strip()) >= _BOT_CHALLENGE_MIN_REAL_TEXT_LEN:
+        return result
+    return {
+        "url": url,
+        "error": (
+            f"bot-detection challenge page (title: {result.get('title')!r}), "
+            "not the real page -- this host blocked the fetch rather than "
+            "serving content"
+        ),
+    }
+
+
 def _augment_fetch_result(url: str, result: dict[str, Any]) -> dict[str, Any]:
     """Apply every fetch_url safety augmentation to an already-publicized result -- github-archived-but-owner-still-shipping (Pera Wallet, 2026-07-20) and SPA-shell-not-found (lumirogue, 2026-08-10/12).
 
@@ -1724,6 +1769,12 @@ def _augment_fetch_result(url: str, result: dict[str, Any]) -> dict[str, Any]:
     these two incident fixes never actually ran; only tests calling
     _tool_fetch_url directly ever exercised them.
     """
+    try:
+        result = _augment_bot_challenge_error(url, result)
+    except Exception:
+        logger.debug("bot-challenge augmentation failed", exc_info=True)
+    if result.get("error"):
+        return result
     try:
         result = _augment_github_archived(url, result)
     except Exception:

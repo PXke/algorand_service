@@ -15,7 +15,9 @@ _QUALITY_RUBRIC = (
     "Score ONLY these dimensions from 1 (poor) to 5 (excellent):\n"
     "- narrative_synthesis: cohesive journalism weaving findings together — NOT "
     "comma-separated feature dumps, NOT generic press-release tone, NOT dictionary "
-    "definitions of curriculum pillars or feature lists.\n"
+    "definitions of curriculum pillars or feature lists, and NOT a draft that "
+    "raises a question in one section and leaves it open while another section "
+    "states the fact that answers it.\n"
     "- technical_depth: when a layer-1 mechanic genuinely played a role in the "
     "story's events, is it named and explained (with the legacy friction it "
     "solves)? RELEVANCE GATES THIS SCORE: a mechanic that did not bear on the "
@@ -181,9 +183,7 @@ def grade_article_quality_llm(
                 "content": (f"Title: {title}\n\nBody:\n{snippet}\n\nReturn JSON only."),
             },
         ]
-        scores, parsed, missing = _graded_scores(
-            llm, messages, temperature=LLM_TEMP_RESEARCH
-        )
+        scores, parsed, missing = _graded_scores(llm, messages, temperature=LLM_TEMP_RESEARCH)
         issues = [str(i).strip() for i in (parsed.get("issues") or []) if str(i).strip()][:6]
         if missing:
             logger.warning("LLM rubric returned partial scores; missing %s", missing)
