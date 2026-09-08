@@ -685,7 +685,29 @@ ADMIN_SOURCE_PROMPT_MAX_CHARS = env_int("ADMIN_SOURCE_PROMPT_MAX_CHARS", 24_000)
 # with no upstream size limit), leaving plenty of room under
 # LLM_CONTEXT_TOKENS for a genuinely deep special edition while making
 # runaway growth a clean truncation instead of a silent empty response.
-LLM_STAGE2_EXTRAS_MAX_CHARS = env_int("MISTRAL_STAGE2_EXTRAS_MAX_CHARS", 160_000)
+#
+# Raised 160_000 -> 600_000 (2026-09-08, AlgoChess recompose investigation):
+# the "already-synthesized (expected-compact)" assumption above stopped being
+# true for every DeepSeek compose back on 2026-08-06, when DeepSeek research
+# was moved onto RAW-MODE digests -- _synthesize_research_digest skips the
+# LLM synthesis pass entirely for provider == "deepseek" and returns the full
+# tool-call trace, only lightly truncated against a single pathological
+# result. That's structurally much larger than a synthesized digest, and this
+# cap was never revisited for it. Confirmed live: an AlgoChess recompose's raw
+# digest hit 198,667 chars (188 tool calls) and got silently tail-truncated at
+# 160,000 -- losing real material (in this case, an identity finding a later
+# review needed) well before anything resembling the 2026-08-07 empty-
+# completion failure this cap exists to prevent. Separately, LLM_CONTEXT_TOKENS
+# itself was corrected 2026-09-06 from a stale smaller figure up to DeepSeek's
+# real documented 1,000,000-token window (see its own comment above) -- the
+# old 160_000-char (~45k token) cap was already using under 5% of that
+# corrected window. 600_000 chars (~170k tokens) still leaves ~700k tokens of
+# real margin under LLM_CONTEXT_TOKENS once DEEPSEEK_MAX_TOKENS output and the
+# rest of the system prompt are accounted for -- comfortably covers this
+# compose's 198,667 chars with room for a genuinely deep special edition,
+# while keeping the cap's original job (a clean truncation instead of a
+# silent empty response on true runaway growth) intact.
+LLM_STAGE2_EXTRAS_MAX_CHARS = env_int("MISTRAL_STAGE2_EXTRAS_MAX_CHARS", 600_000)
 # Periodic re-scrape of ALL monitored sources to detect content diffs and compose
 # updates (MISTRAL_DIFF_POLL_SECONDS, default 600s) is read directly via
 # os.getenv in celery_app.py's beat schedule — not duplicated here, since a

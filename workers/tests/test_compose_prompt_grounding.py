@@ -45,6 +45,22 @@ def test_narrative_guidance_carries_grounding_to_stage_two() -> None:
     assert "play2earn" in mc._NARRATIVE_GUIDANCE
 
 
+def test_narrative_guidance_bans_a_trailing_caveats_block() -> None:
+    """AlgoChess recompose (2026-09-08): the closing section ran ~8 sentences of open questions against ~2 of reassurance, as literally the last prose before the Source list -- root-caused to the Research Digest's own trailing '### Unresolved Gaps' list getting rendered near-verbatim. Rule 6 tells the writer that list is a checklist to distribute, not an outline for the ending."""
+    assert "UNRESOLVED GAPS ARE A CHECKLIST, NOT A SECTION" in mc._NARRATIVE_GUIDANCE
+    assert "Unresolved Gaps" in mc._NARRATIVE_GUIDANCE
+    assert "finding, not a gap" in mc._NARRATIVE_GUIDANCE
+    assert "Seven rules:" in mc._NARRATIVE_GUIDANCE
+
+
+def test_narrative_guidance_connects_interacting_numbers() -> None:
+    """AlgoChess recompose (2026-09-08): the article verified a 200 ALGO stake cap, a x10 ladder multiplier, and a 285 ALGO payout ceiling in three different sections, and never stated that the largest x10 bet the house can actually pay is ~28 ALGO -- every input was in the text, the conclusion never was. Rule 7 requires drawing that conclusion out, narrowly scoped to avoid colliding with the existing fabrication ban."""
+    assert "WHEN TWO VERIFIED FIGURES INTERACT" in mc._NARRATIVE_GUIDANCE
+    assert "narrow license, not a mandate to compute" in mc._NARRATIVE_GUIDANCE
+    assert "SUPPLY-SHARE ARITHMETIC still stands" in mc._NARRATIVE_GUIDANCE
+    assert "name it in the sentence" in mc._NARRATIVE_GUIDANCE
+
+
 def test_tools_guidance_requires_asset_affiliation_check() -> None:
     """Lumi Rogue incident (2026-08-11): two independent composes both cited an unrelated 'LUMI' ASA as the project's own token purely because lookup_asset_by_name matched the name -- Algorand names/tickers are not reserved, so a match is not affiliation. Pins the cross-check-the-creator-address rule."""
     assert "ASSET AFFILIATION CHECK" in mc._TOOLS_GUIDANCE

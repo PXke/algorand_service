@@ -36,7 +36,7 @@ logger = logging.getLogger(__name__)
 # guidelines, _ARTICLE_FORMAT_RULES, recency/profile rules, etc). Stamped onto
 # every stored article so analytics can correlate a prompt edit with a shift in
 # grades/engagement instead of guessing from deploy timestamps.
-PROMPT_VERSION = "2026-09-05"
+PROMPT_VERSION = "2026-09-08"
 
 # Same four counters compose_sessions' INSERT columns carry (prompt_tokens/
 # completion_tokens/total_tokens/cached_tokens) -- the single vocabulary every
@@ -191,9 +191,11 @@ def _writing_guidelines(today: str) -> str:
         "- Honest but empathetic: when a small or early-stage project has real "
         "shortcomings (thin TVL, low adoption, an unfinished feature), report them "
         "plainly — never soften a verified fact — but the goal is to inform readers, "
-        "not to humiliate a small team for shipping something real. Where warranted, "
-        "let the piece close with a fair, honest note of hope or potential rather "
-        "than pure negativity. State a shortcoming as the fact itself, not a punchy "
+        "not to humiliate a small team for shipping something real. The close is "
+        "governed by WEIGH GOOD FAITH below — it reflects the balance of what was "
+        "found; a note of hope or potential belongs there when the findings support "
+        "one, never as a consolation line tacked onto a block of caveats. State a "
+        "shortcoming as the fact itself, not a punchy "
         "summarizing label for it — 'a project running on pocket money' editorializes "
         "where 'a four-figure liquidity pool and weekly volume in the tens of "
         "dollars' lets the reader draw that conclusion themselves (flagged 2026-08-06: "
@@ -205,11 +207,22 @@ def _writing_guidelines(today: str) -> str:
         "consistent with ordinary early-stage testing, a disclosed risk) and "
         "genuine concerns (something unproven, something that doesn't add up, "
         "something withheld). Weigh both, and let the fuller picture — not just "
-        "the single most dramatic fact — set the piece's overall frame and what "
-        "comes first; don't open on the sharpest undercut just because it makes "
-        "the stronger lede. This does not soften a real problem (state it "
-        "plainly, in its own section, once, per NO REPETITION below) — it "
-        "changes the weight and order, not what gets said. The line that "
+        "the single most dramatic fact — set the piece's overall frame, what "
+        "comes first, AND what comes last: don't open on the sharpest undercut "
+        "just because it makes the stronger lede, and don't end on a pile of "
+        "everything you couldn't confirm just because it was what was left over. "
+        "The last prose section a reader sees (before any closing Source list) "
+        "carries the same weight as the first; it should reflect the balance of "
+        "what you actually found, not the balance of what you couldn't check. If "
+        "most of the piece verified, carry that weight by ENDING ON a finding or "
+        "forward fact that earns it — the date/event the whole piece builds to, "
+        "the one mechanism that actually stands behind the headline promise — "
+        "never by a verdict paragraph that restates earlier findings in fresh "
+        "words (a recap is still a repeat under NO REPETITION below, even worded "
+        "differently each time). "
+        "This does not soften a real problem (state it plainly, once, in the "
+        "section where the claim it concerns already lives, per NO REPETITION "
+        "below) — it changes the weight and order, not what gets said. The line that "
         "actually separates good faith from bad faith is DECEPTION, not merely "
         "an unflattering fact: an actor being quiet about something ordinary "
         "(e.g. testing its own product before real users arrive) is not the "
@@ -933,7 +946,7 @@ _NARRATIVE_GUIDANCE = (
     "into cohesive narrative prose. Scale the word count strictly to the volume of "
     "verified facts in the Research Digest — never pad with speculation, generic "
     "industry background, or marketing filler to hit a length target. If the "
-    "verified material is brief, write a dense, brief article. Three rules:\n"
+    "verified material is brief, write a dense, brief article. Seven rules:\n"
     "1. TRANSLATE TECHNICAL FINDINGS: when a finding is technical (an SDK, a token "
     "standard, a protocol like x402, smart-contract/escrow mechanics), don't just "
     "name it — spend 1-2 sentences on what it ENABLES and why it matters to a "
@@ -961,6 +974,56 @@ _NARRATIVE_GUIDANCE = (
     "cannot regenerate or verify new chart numbers, so never re-derive, "
     "reformat, or invent chart JSON yourself. If the Chart section says "
     "'None', do not fabricate a chart.\n"
+    "6. UNRESOLVED GAPS ARE A CHECKLIST, NOT A SECTION: the Research Digest may "
+    "end with an '### Unresolved Gaps' (or '### Coverage Gaps') list. That "
+    "list is the research loop's own to-do list of what it tried to check — "
+    "it is NOT an outline for your ending. Each gap that would change what a "
+    "reader does goes in the ONE section where the claim it qualifies already "
+    "lives (an unaudited contract is stated beside the contract parameters "
+    "you did verify; a missing repository where the code is discussed), at "
+    "the weight DON'T LET A NEUTRAL TONE BECOME A RED FLAG gives it; a gap "
+    "that changes nothing for the reader is simply omitted. That omission "
+    "license covers only what could NOT be checked — a claim you DID check "
+    "and found overstated (a page says X is recorded on-chain, the record "
+    "shows it is not) is a finding, not a gap, and is never omitted: it "
+    "stays, beside the claim it contradicts, with the same rigor as any "
+    "other verified negative. Related risks that genuinely share one story "
+    "(who holds which key, who attests the result, who is the counterparty) "
+    "may be told together in one section that introduces those facts, "
+    "placed by weight — a coherent risk section is not what this rule bans. "
+    "What is banned is a leftover pile of everything unconfirmed dumped at "
+    "the very end: never render the Digest's gap list as a block of caveats "
+    "there, and never let the last section a reader sees be mostly what "
+    "could not be checked when the body of the piece is mostly what did. A "
+    "gap whose claim has no existing section of its own — a genuinely "
+    "standalone open question — still gets its own paragraph, placed where "
+    "it earns its weight in the piece's order; having no natural home is "
+    "never a reason to hold it back for the end or to drop it.\n"
+    "7. WHEN TWO VERIFIED FIGURES INTERACT, SAY WHAT THEY MEAN TOGETHER: when "
+    "the Digest gives you two figures that the subject's own rules tie to "
+    "each other — a stake cap and a payout multiplier against a payout "
+    "ceiling, a threshold and the pace at which it is being approached, a "
+    "fee and the amount it applies to — and putting them side by side "
+    "yields a consequence that neither states alone and that would change "
+    "what a reader does, write that consequence out beside the figure it "
+    "qualifies, with the inputs and the arithmetic visible in the sentence "
+    "('a 200 ALGO stake at the advertised x10 implies a 2,000 ALGO payout, "
+    "but the contract's ceiling is 285 ALGO -- so the largest bet the top "
+    "multiplier can actually honour is about 28 ALGO'). Never leave the "
+    "reader to do that arithmetic. This is a narrow license, not a mandate "
+    "to compute: only simple arithmetic on figures already in the same "
+    "unit, using the relationship the source itself defines, with every "
+    "input still cited to the Digest — never a unit or decimals conversion "
+    "(SUPPLY-SHARE ARITHMETIC still stands), never a projection that rests "
+    "on an assumption the Digest does not supply unless you name it in the "
+    "sentence ('at this week's pace'), and never arithmetic whose result "
+    "changes nothing for the reader. Placement and weight follow the rules "
+    "you already have: the consequence lives in the section where its "
+    "figures live (rule 6 above), and how alarmed it sounds is set by "
+    "DON'T LET A NEUTRAL TONE BECOME A RED FLAG and WEIGH GOOD FAITH — an "
+    "advertised multiplier the contract cannot pay at the advertised stake "
+    "is a finding about what is shown to users; a far-off threshold on a "
+    "project with a week of volume is routine for its stage.\n"
     "This is EXPANSION BY EXPLANATION — never invent external facts, quotes, or "
     "partnerships, and still no generic filler. This includes specific data points "
     "— a named transaction, a price, a date — that are not already in the Research "
@@ -1268,6 +1331,74 @@ def _extract_asset_facts(trace: list[dict]) -> str:
     return "\n".join(lines)
 
 
+_NFD_VERIFIED_FIELDS = (
+    "verified_discord",
+    "verified_github",
+    "verified_x",
+    "verified_bluesky_did",
+    "verified_telegram",
+)
+
+
+def _collect_identity_facts(trace: list[dict]) -> dict[str, dict[str, Any]]:
+    """{nfd_name: {owner/nfd_profile_url/verified_*/linked_algorand_addresses}} for every search_nfd_directory result in the trace that resolved AND carries at least one cryptographically-verified social or linked-address field — a bare name/owner match with nothing verified isn't the independent identity corroboration this appendix exists for (still visible in the raw trace either way, just not force-surfaced)."""
+    facts: dict[str, dict[str, Any]] = {}
+    for entry in trace:
+        if str(entry.get("tool", "")) != "search_nfd_directory":
+            continue
+        result = entry.get("result")
+        if not isinstance(result, dict) or not result.get("found"):
+            continue
+        name = result.get("name")
+        if not name:
+            continue
+        has_verified = any(result.get(f) for f in _NFD_VERIFIED_FIELDS) or result.get(
+            "linked_algorand_addresses"
+        )
+        if not has_verified:
+            continue
+        record = facts.setdefault(name, {})
+        for field in (
+            "owner",
+            "nfd_profile_url",
+            *_NFD_VERIFIED_FIELDS,
+            "linked_algorand_addresses",
+        ):
+            value = result.get(field)
+            if value:
+                record[field] = value
+    return facts
+
+
+def _format_identity_fact_line(name: str, record: dict[str, Any]) -> str:
+    parts = [f'nfd "{name}"']
+    if record.get("owner"):
+        parts.append(f"owner={record['owner']}")
+    for field in _NFD_VERIFIED_FIELDS:
+        value = record.get(field)
+        if value:
+            parts.append(f"{field}={value}")
+    linked = record.get("linked_algorand_addresses")
+    if linked:
+        parts.append(f"linked_addresses={','.join(linked)}")
+    if record.get("nfd_profile_url"):
+        parts.append(f"url={record['nfd_profile_url']}")
+    return "- " + ", ".join(parts)
+
+
+def _extract_identity_facts(trace: list[dict]) -> str:
+    """Every NFD identity with at least one cryptographically-verified social/address link seen in search_nfd_directory results, extracted mechanically (not by an LLM) — the same hard safety net _extract_asset_facts provides for on-chain asset names, for verified identity cross-references specifically. Root-caused 2026-09-08 (AlgoChess recompose): search_nfd_directory returned a domain owner cryptographically verified to an X handle, and that SAME address was the admin/treasury field on the story's own contracts -- present in the raw trace, even referenced in the model's own gap-analysis reasoning, but never reached the published article. Raw-mode digests (provider == deepseek) skip the synthesized digest's own anti-dropping rules (COMPLETE LISTS, NOT SUBSETS / NAMES AND URLS, VERBATIM), so a real identity link a tool was built specifically to surface had no guarantee of surviving into Stage 2's actual prompt otherwise -- same failure class _extract_asset_facts already root-caused for asset names on 2026-08-05, same fix shape."""
+    facts = _collect_identity_facts(trace)
+    if not facts:
+        return ""
+    lines = [
+        "### Verified Identity Links (verbatim — do not drop; cross-reference against "
+        "any address/admin/owner/treasury field mentioned elsewhere in this material)"
+    ]
+    lines.extend(_format_identity_fact_line(name, record) for name, record in facts.items())
+    return "\n".join(lines)
+
+
 def _format_full_research_trace(trace: list[dict]) -> str:
     """Every tool call in the trace, only lightly truncated — the RESEARCH_DIGEST_MODE=raw alternative to an LLM-synthesized digest. Caps exist only to keep one pathological result (a huge page dump) from blowing the prompt, not to compress normal-sized results the way _format_research_digest's tighter caps (25 calls, 1500 chars/result — tuned for feeding INTO a synthesis prompt, not for being Stage 2's ground truth directly) do."""
     import json as _json
@@ -1374,11 +1505,13 @@ def _synthesize_research_digest(
     from app.core.config import DIGEST_GAP_FILL_ENABLED, RESEARCH_DIGEST_MODE
 
     asset_facts = _extract_asset_facts(trace)
+    identity_facts = _extract_identity_facts(trace)
+    extra_facts = "\n\n".join(f for f in (asset_facts, identity_facts) if f)
     if RESEARCH_DIGEST_MODE == "raw" or provider == "deepseek":
         full_trace = _format_full_research_trace(trace)
         if not full_trace.strip():
             return ""
-        digest = f"{full_trace}\n\n{asset_facts}" if asset_facts else full_trace
+        digest = f"{full_trace}\n\n{extra_facts}" if extra_facts else full_trace
         if DIGEST_GAP_FILL_ENABLED:
             gaps_section = _extract_gaps_from_raw_trace(
                 full_trace, research_context, extra_usage=extra_usage, debug=debug
@@ -1412,7 +1545,7 @@ def _synthesize_research_digest(
         text = (digest or "").strip()
         if not text:
             return raw_trace
-        return f"{text}\n\n{asset_facts}" if asset_facts else text
+        return f"{text}\n\n{extra_facts}" if extra_facts else text
     except Exception:
         logger.warning("research digest synthesis failed; using raw trace", exc_info=True)
         return raw_trace
@@ -1843,7 +1976,9 @@ _REVISION_NO_SHRINK_RULE = (
     "There is NO length limit and NO target word count for this revision. Do "
     "not shorten, condense, tighten, or produce a leaner synthesis of the "
     "piece as a side effect of fixing the issues below. PRESERVE every "
-    "verified fact and every section from the draft."
+    "verified fact and every section from the draft. (Moving a fact into the "
+    "section it belongs to, or merging two sections, is not shrinking — "
+    "preservation is about facts, not section count or position.)"
 )
 
 
@@ -1861,7 +1996,12 @@ def _revision_length_rule(*, too_long: bool, needs_depth: bool) -> str:
             "has a conflict of interest (a centralized exchange's product, a reward "
             "structure that incentivizes holding the SAME platform's token, an "
             "unaudited protocol), name the actual risk/tradeoff a reader needs "
-            "instead of just relaying the subject's own marketing framing. Apply "
+            "instead of just relaying the subject's own marketing framing. Put "
+            "each named risk in the section where the claim it qualifies already "
+            "lives — never satisfy this by appending a new caveats block at the "
+            "end, and never leave the piece's last section mostly about what is "
+            "unverified when the rest of the draft is mostly about what verified. "
+            "Apply "
             "the NO REPETITION rule from your instructions here too — a VERBATIM "
             "repeat across sections may be cut to its first mention — but that is "
             "not license to rewrite whole passages into a shorter synthesis just "
@@ -4084,8 +4224,14 @@ supports, never pad with repetition or filler to hit a count, and never cut
 a real finding short to stay brief. The piece should read as a narrative,
 not a list of facts: build it around a clear throughline that connects
 background/context, the current state (with specifics), comparison or
-broader implications, and open questions or what to watch next, so a reader
-comes away with a story, not just a summary.
+broader implications, and open questions or what to watch next — but place
+each open question beside the claim it qualifies as you go (per WEIGH GOOD
+FAITH in your system instructions: what comes last carries the same weight
+as what comes first), not gathered into a trailing "what we don't know"
+movement at the end. "What to watch next" means a real forward fact — a
+date, a pending decision, a threshold this story builds toward — not a
+recap of unresolved items, so a reader comes away with a story, not just a
+summary.
 
 ON-CHAIN VERIFICATION: when the story turns on a specific on-chain figure —
 an asset's supply/holder share, a transaction/transfer count, funds moved
