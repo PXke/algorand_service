@@ -181,17 +181,6 @@
             spellcheck="false"
           />
         </label>
-
-        <a
-          class="btn btn-outlined submit-link"
-          href="/registry/submit"
-          onclick={(e) => {
-            e.preventDefault()
-            navigate('/registry/submit')
-          }}
-        >
-          Submit a project
-        </a>
       </div>
 
       {#if tagOptions.length}
@@ -298,10 +287,12 @@
     gap: 20px;
   }
 
-  /* Toolbar: search + the one call to action, above the reading column
-     only (category selection lives in the floating rail, not here) --
-     replaces the old oversized title (redundant with the product-switcher's
-     own "PXke Algorand Registry" branding above it). */
+  /* Just the search field, above the reading column -- "Submit a project"
+     used to live here too, but the registry build's own top-bar nav
+     (AppShell's REGISTRY_NAV_PAGES moreNav entry) already surfaces that
+     CTA, so this was a redundant second copy of the same link
+     (owner feedback, 2026-09-08). Category selection lives in the
+     floating rail, not here either. */
   .toolbar {
     display: flex;
     flex-wrap: wrap;
@@ -309,8 +300,7 @@
     gap: 12px;
   }
   .search {
-    flex: 1 1 260px;
-    min-width: 200px;
+    flex: 1 1 100%;
   }
   .search input {
     width: 100%;
@@ -329,11 +319,6 @@
   }
   .search input::placeholder {
     color: var(--subtle);
-  }
-
-  .submit-link {
-    flex: 0 0 auto;
-    margin-inline-start: auto;
   }
 
   /* Three tracks, the outer two EQUAL width -- that's what centers the
