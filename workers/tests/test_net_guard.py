@@ -140,6 +140,32 @@ def test_guarded_get_returns_a_usable_response_under_the_cap(
     assert str(resp.url) == "https://example.com/small"
 
 
+def test_guarded_get_handles_a_gzip_compressed_response(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Regression (2026-09-08, AlgoChess recompose -- every algochess.org/terms fetch failing): _read_bounded used to rebuild the returned Response with the ORIGINAL content-encoding header still attached, even though response.iter_bytes() already yields decoded bytes -- httpx then tried to gzip-decode already-plain-text bytes at Response construction time and raised "Error -3 while decompressing data: incorrect header check" on every compressed response through this shared path (confirmed live across youtube/bluesky/forum polling and domain previews, not just this one URL)."""
+    import gzip
+
+    body = b"<html><body>real, decompressible content</body></html>"
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"content-encoding": "gzip", "content-type": "text/html"},
+            content=gzip.compress(body),
+        )
+
+    _patch_shared_client(monkeypatch, httpx.MockTransport(handler))
+
+    resp = guarded_get("https://example.com/compressed")
+
+    assert resp.status_code == 200
+    assert resp.content == body
+    assert resp.text == body.decode()
+    # The stale content-encoding/content-length must not survive onto the
+    # rebuilt Response, or a second decode attempt (e.g. a caller re-reading
+    # .content) would hit the same "incorrect header check" failure.
+    assert "content-encoding" not in resp.headers
+
+
 def test_guarded_get_defaults_the_cap_from_settings(monkeypatch: pytest.MonkeyPatch) -> None:
     """With no explicit max_bytes, the module-level NET_GUARD_MAX_RESPONSE_BYTES setting is what gets enforced."""
     import app.core.net_guard as net_guard_module

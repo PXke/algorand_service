@@ -103,6 +103,19 @@ def _read_bounded(response: httpx.Response, *, max_bytes: int) -> httpx.Response
     `request` still bound so `.url` keeps working) rather than returning the
     streaming response itself, so every existing caller's `.text`/`.json()`/
     `.content`/`.url` access keeps working unchanged.
+
+    Root-caused 2026-09-08 (AlgoChess recompose, "algochess.org/terms" 404
+    fetches all failing): `response.iter_bytes()` yields ALREADY-DECODED bytes
+    -- httpx transparently gunzips/inflates as it streams. Passing those
+    decoded bytes straight into a fresh httpx.Response while leaving the
+    original `content-encoding` header intact made httpx try to gzip-decode
+    already-plain-text bytes the moment the Response was constructed, always
+    failing with "Error -3 while decompressing data: incorrect header check".
+    This was silently breaking every gzip/deflate-compressed fetch through
+    this shared path -- confirmed live across youtube/bluesky/forum polling
+    and arbitrary domain previews, not just this one URL. Strip the
+    content-encoding (and the now-stale content-length, since the decoded
+    byte count differs from the wire count) before reconstructing.
     """
     import httpx
 
@@ -113,9 +126,13 @@ def _read_bounded(response: httpx.Response, *, max_bytes: int) -> httpx.Response
             raise ResponseTooLargeError(
                 f"response body exceeds {max_bytes} byte cap (url={response.url})"
             )
+    headers = httpx.Headers(response.headers)
+    for stale_header in ("content-encoding", "content-length"):
+        if stale_header in headers:
+            del headers[stale_header]
     return httpx.Response(
         response.status_code,
-        headers=response.headers,
+        headers=headers,
         content=bytes(buf),
         request=response.request,
     )
