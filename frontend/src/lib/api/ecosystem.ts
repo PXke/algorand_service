@@ -108,6 +108,7 @@ export type EcosystemEntry = {
   editor_pick: boolean
   last_probed_at_epoch: number
   reachable: boolean | null
+  last_http_status: number
   submitted_at_epoch: number
   reviewed_at_epoch: number
 }

@@ -155,10 +155,15 @@
       <div>
         <dt>Status</dt>
         <dd>
+          <!-- Says what was actually measured (a transport-level response),
+               not a claim about whether the project is genuinely operating
+               -- this check never reads the page (2026-09-08: "Online"
+               overclaimed a site that could be parked, suspended, or
+               otherwise wound down while still answering HTTP 200). -->
           {#if entry.reachable === true}
-            Online{#if entry.last_probed_at_epoch}, checked {stamp(entry.last_probed_at_epoch)}{/if}
+            Site responded{#if entry.last_http_status} (HTTP {entry.last_http_status}){/if}{#if entry.last_probed_at_epoch}, checked {stamp(entry.last_probed_at_epoch)}{/if}
           {:else if entry.reachable === false}
-            <span class="offline">Unreachable</span>{#if entry.last_probed_at_epoch}, last checked {stamp(entry.last_probed_at_epoch)}{/if}
+            <span class="offline">No response</span>{#if entry.last_probed_at_epoch}, last checked {stamp(entry.last_probed_at_epoch)}{/if}
           {:else}
             Not checked yet
           {/if}

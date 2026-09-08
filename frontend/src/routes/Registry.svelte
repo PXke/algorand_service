@@ -349,16 +349,21 @@
     }
   }
 
+  /* Below 700px this used to be display:none with no fallback -- the tag
+     facet simply didn't exist on a phone (2026-09-08 Fable review). Now a
+     horizontally-scrolling chip row instead of the sticky vertical list;
+     same data, same click handler, just a layout that fits a narrow
+     viewport instead of disappearing. */
   .filters {
-    display: none;
+    display: flex;
     flex-direction: column;
-    gap: 10px;
-    position: sticky;
-    top: 16px;
+    gap: 8px;
   }
   @media (min-width: 700px) {
     .filters {
-      display: flex;
+      gap: 10px;
+      position: sticky;
+      top: 16px;
     }
   }
   .filters h2 {
@@ -379,24 +384,52 @@
     margin: 0;
     padding: 0;
     display: flex;
-    flex-direction: column;
-    gap: 2px;
+    flex-direction: row;
+    flex-wrap: nowrap;
+    gap: 8px;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+  }
+  .tag-list::-webkit-scrollbar {
+    display: none;
+  }
+  @media (min-width: 700px) {
+    .tag-list {
+      flex-direction: column;
+      flex-wrap: wrap;
+      gap: 2px;
+      overflow-x: visible;
+    }
   }
   .tag-btn {
     display: flex;
     align-items: baseline;
     justify-content: space-between;
-    gap: 8px;
-    width: 100%;
-    border: 0;
-    border-inline-start: 2px solid transparent;
+    gap: 6px;
+    flex: 0 0 auto;
+    border: 1px solid var(--border);
+    border-radius: 999px;
     background: none;
-    padding: 5px 10px 5px 12px;
+    padding: 6px 12px;
     color: var(--muted);
     font: inherit;
-    font-size: 14px;
+    font-size: 13px;
+    white-space: nowrap;
     text-align: start;
     cursor: pointer;
+  }
+  @media (min-width: 700px) {
+    .tag-btn {
+      width: 100%;
+      flex: initial;
+      border: 0;
+      border-inline-start: 2px solid transparent;
+      border-radius: 0;
+      padding: 5px 10px 5px 12px;
+      font-size: 14px;
+      white-space: normal;
+    }
   }
   .tag-btn:hover {
     color: var(--on-surface);
@@ -404,7 +437,13 @@
   .tag-btn.active {
     color: var(--on-surface);
     font-weight: 600;
-    border-inline-start-color: var(--accent);
+    border-color: var(--accent);
+  }
+  @media (min-width: 700px) {
+    .tag-btn.active {
+      border-inline-start-color: var(--accent);
+      border-block-color: transparent;
+    }
   }
   .tag-count {
     color: var(--subtle);
