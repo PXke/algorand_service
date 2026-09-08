@@ -56,10 +56,6 @@
     navigate(withQuery({ tag: tag === activeTag ? null : tag }), false, false)
   }
 
-  function onCategorySelectChange(e: Event) {
-    selectCategory((e.currentTarget as HTMLSelectElement).value || null)
-  }
-
   // Entries within the active category (or all, if none) -- the base every
   // other facet (tags, then text search) narrows further.
   const inCategory = $derived.by(() =>
@@ -67,7 +63,7 @@
   )
 
   // Only categories that actually have at least one entry are worth showing
-  // in the dropdown -- an "NFTs" option that leads to an empty page is dead
+  // in the rail -- an "NFTs" entry that leads to an empty page is dead
   // weight, not a real choice.
   const categoryOptions = $derived.by(() => {
     const counts = new Map<string, number>()
@@ -141,135 +137,157 @@
 <div class="page page-wide registry">
   <h1 class="sr-only">Algorand Open Registry</h1>
 
-  <div class="toolbar">
-    <label class="search">
-      <span class="sr-only">{t($messages, 'navSearch')}</span>
-      <input
-        type="search"
-        bind:value={query}
-        placeholder="Search by name, description or tag"
-        autocomplete="off"
-        spellcheck="false"
-      />
-    </label>
-
-    <label class="category-select">
-      <span class="sr-only">Category</span>
-      <select value={activeCategory ?? ''} onchange={onCategorySelectChange}>
-        <option value="">All categories</option>
+  <div class="layout">
+    <!-- Floating, not boxed: no border, no fixed track width beyond a cap --
+         this is the "big list of categories" from the original design,
+         brought back per owner feedback (2026-09-08), but living in the
+         page's own left gutter instead of a bordered sidebar that ate into
+         the reading measure. -->
+    <aside class="categories-rail" aria-label="Categories">
+      <ul>
+        <li>
+          <button type="button" class:active={!activeCategory} onclick={() => selectCategory(null)}>
+            <span>All projects</span>
+            <span class="cat-count">{entries.length}</span>
+          </button>
+        </li>
         {#each categoryOptions as opt (opt.slug)}
-          <option value={opt.slug}>{opt.label} ({opt.count})</option>
-        {/each}
-      </select>
-    </label>
-
-    <a
-      class="btn btn-outlined submit-link"
-      href="/registry/submit"
-      onclick={(e) => {
-        e.preventDefault()
-        navigate('/registry/submit')
-      }}
-    >
-      Submit a project
-    </a>
-  </div>
-
-  <div class="body">
-    <aside class="filters" aria-label="Tags">
-      <h2>Tags</h2>
-      {#if !tagOptions.length}
-        <p class="filters-empty">No tags yet.</p>
-      {:else}
-        <ul class="tag-list">
-          {#each tagOptions as [tag, count] (tag)}
-            <li>
-              <button
-                type="button"
-                class="tag-btn"
-                class:active={activeTag === tag && tagIsLive}
-                onclick={() => selectTag(tag)}
-              >
-                <span class="tag-name">#{tag}</span>
-                <span class="tag-count">{count}</span>
-              </button>
-            </li>
-          {/each}
-        </ul>
-      {/if}
-    </aside>
-
-    <section class="results" aria-labelledby="results-heading">
-      <div class="results-head">
-        <h2 id="results-heading">{heading}</h2>
-        {#if !loading && !error && filtered.length}
-          <span class="count" aria-live="polite">
-            {filtered.length === 1 ? '1 project' : `${filtered.length} projects`}
-          </span>
-        {/if}
-      </div>
-
-      {#if loading}
-        <p class="state" role="status">{t($messages, 'loading')}</p>
-      {:else if error}
-        <p class="state err" role="alert">{error}</p>
-      {:else if !entries.length}
-        <div class="state empty">
-          <p>Nothing listed yet.</p>
-          <p>
-            Know a project that belongs here?
-            <a
-              href="/registry/submit"
-              onclick={(e) => {
-                e.preventDefault()
-                navigate('/registry/submit')
-              }}
-            >
-              Submit it
-            </a>
-            and a human will review it, usually within two days.
-          </p>
-        </div>
-      {:else if !filtered.length}
-        <div class="state empty">
-          <p>No projects match this filter{query.trim() ? ` and “${query.trim()}”` : ''}.</p>
-          {#if activeTag || activeCategory || query.trim()}
+          <li>
             <button
               type="button"
-              class="linkish"
-              onclick={() => {
-                query = ''
-                navigate('/registry', false, false)
-              }}
+              class:active={activeCategory === opt.slug}
+              onclick={() => selectCategory(opt.slug)}
             >
-              Clear all filters
+              <span>{opt.label}</span>
+              <span class="cat-count">{opt.count}</span>
             </button>
+          </li>
+        {/each}
+      </ul>
+    </aside>
+
+    <!-- The reading column: capped at 700px and centered on the page by the
+         layout grid's equal-width outer tracks (categories on the left,
+         nothing on the right) -- not by centering this column in isolation. -->
+    <div class="main">
+      <div class="toolbar">
+        <label class="search">
+          <span class="sr-only">{t($messages, 'navSearch')}</span>
+          <input
+            type="search"
+            bind:value={query}
+            placeholder="Search by name, description or tag"
+            autocomplete="off"
+            spellcheck="false"
+          />
+        </label>
+
+        <a
+          class="btn btn-outlined submit-link"
+          href="/registry/submit"
+          onclick={(e) => {
+            e.preventDefault()
+            navigate('/registry/submit')
+          }}
+        >
+          Submit a project
+        </a>
+      </div>
+
+      {#if tagOptions.length}
+        <div class="tag-row" aria-label="Tags">
+          {#each tagOptions as [tag, count] (tag)}
+            <button
+              type="button"
+              class="tag-btn"
+              class:active={activeTag === tag && tagIsLive}
+              onclick={() => selectTag(tag)}
+            >
+              #{tag}
+              <span class="tag-count">{count}</span>
+            </button>
+          {/each}
+        </div>
+      {/if}
+
+      <section class="results" aria-labelledby="results-heading">
+        <div class="results-head">
+          <h2 id="results-heading">{heading}</h2>
+          {#if !loading && !error && filtered.length}
+            <span class="count" aria-live="polite">
+              {filtered.length === 1 ? '1 project' : `${filtered.length} projects`}
+            </span>
           {/if}
         </div>
-      {:else}
-        <ul class="entries">
-          {#each filtered as entry (entry.slug)}
-            <li>
+
+        {#if loading}
+          <p class="state" role="status">{t($messages, 'loading')}</p>
+        {:else if error}
+          <p class="state err" role="alert">{error}</p>
+        {:else if !entries.length}
+          <div class="state empty">
+            <p>Nothing listed yet.</p>
+            <p>
+              Know a project that belongs here?
               <a
-                class="entry"
-                href={`/registry/${encodeURIComponent(entry.slug)}`}
+                href="/registry/submit"
                 onclick={(e) => {
                   e.preventDefault()
-                  navigate(`/registry/${encodeURIComponent(entry.slug)}`)
+                  navigate('/registry/submit')
                 }}
               >
-                <span class="entry-name">
-                  {entry.name}
-                  {#if entry.editor_pick}<span class="pick">Editor's pick</span>{/if}
-                  {#if entry.reachable === false}<span class="offline">Offline</span>{/if}
-                </span>
-                <span class="entry-desc">{stripMarkdownToText(entry.description)}</span>
+                Submit it
               </a>
-            </li>
-          {/each}
-        </ul>
-      {/if}
-    </section>
+              and a human will review it, usually within two days.
+            </p>
+          </div>
+        {:else if !filtered.length}
+          <div class="state empty">
+            <p>No projects match this filter{query.trim() ? ` and “${query.trim()}”` : ''}.</p>
+            {#if activeTag || activeCategory || query.trim()}
+              <button
+                type="button"
+                class="linkish"
+                onclick={() => {
+                  query = ''
+                  navigate('/registry', false, false)
+                }}
+              >
+                Clear all filters
+              </button>
+            {/if}
+          </div>
+        {:else}
+          <ul class="entries">
+            {#each filtered as entry (entry.slug)}
+              <li>
+                <a
+                  class="entry"
+                  href={`/registry/${encodeURIComponent(entry.slug)}`}
+                  onclick={(e) => {
+                    e.preventDefault()
+                    navigate(`/registry/${encodeURIComponent(entry.slug)}`)
+                  }}
+                >
+                  <span class="entry-name">
+                    {entry.name}
+                    {#if entry.editor_pick}<span class="pick">Editor's pick</span>{/if}
+                    {#if entry.reachable === false}<span class="offline">Offline</span>{/if}
+                  </span>
+                  <span class="entry-desc">{stripMarkdownToText(entry.description)}</span>
+                </a>
+              </li>
+            {/each}
+          </ul>
+        {/if}
+      </section>
+    </div>
+
+    <!-- Deliberately empty: this track exists only so the center column's
+         width is set by two EQUAL outer tracks, which is what actually
+         centers it on the page -- a lone left sidebar (the previous layout)
+         pushes the reading column right instead. -->
+    <div class="layout-spacer" aria-hidden="true"></div>
   </div>
 </div>
 
@@ -280,9 +298,10 @@
     gap: 20px;
   }
 
-  /* Toolbar: search + category dropdown + the one call to action, all on
-     one row -- replaces the old oversized title (redundant with the
-     product-switcher's own "PXke Algorand Registry" branding above it). */
+  /* Toolbar: search + the one call to action, above the reading column
+     only (category selection lives in the floating rail, not here) --
+     replaces the old oversized title (redundant with the product-switcher's
+     own "PXke Algorand Registry" branding above it). */
   .toolbar {
     display: flex;
     flex-wrap: wrap;
@@ -312,74 +331,51 @@
     color: var(--subtle);
   }
 
-  .category-select {
-    flex: 0 1 240px;
-    min-width: 160px;
-  }
-  .category-select select {
-    width: 100%;
-    min-height: 44px;
-    padding: 0 12px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-control);
-    background: var(--surface);
-    color: var(--on-surface);
-    font-family: var(--font-sans);
-    font-size: 15px;
-  }
-
   .submit-link {
     flex: 0 0 auto;
     margin-inline-start: auto;
   }
 
-  /* Body: tags on the left, results in the middle -- the same two-column
-     shape the category index used before, just with the left column
-     repurposed (categories moved into the toolbar dropdown above). */
-  .body {
+  /* Three tracks, the outer two EQUAL width -- that's what centers the
+     700px reading column on the page. Categories float in the left
+     gutter; the right gutter stays empty on purpose (owner spec,
+     2026-09-08: "categories | text (700px) | empty", not a boxed
+     two-column sidebar layout). */
+  .layout {
     display: grid;
     grid-template-columns: 1fr;
-    gap: 24px;
+    gap: 20px;
   }
-  @media (min-width: 700px) {
-    .body {
-      grid-template-columns: 200px minmax(0, 1fr);
-      gap: 36px;
+  @media (min-width: 860px) {
+    .layout {
+      grid-template-columns: minmax(0, 1fr) minmax(0, 700px) minmax(0, 1fr);
+      gap: 32px;
       align-items: start;
     }
   }
 
-  /* Below 700px this used to be display:none with no fallback -- the tag
-     facet simply didn't exist on a phone (2026-09-08 Fable review). Now a
-     horizontally-scrolling chip row instead of the sticky vertical list;
-     same data, same click handler, just a layout that fits a narrow
-     viewport instead of disappearing. */
-  .filters {
+  .main {
     display: flex;
     flex-direction: column;
-    gap: 8px;
+    gap: 16px;
+    min-width: 0;
   }
-  @media (min-width: 700px) {
-    .filters {
-      gap: 10px;
-      position: sticky;
-      top: 16px;
+
+  .layout-spacer {
+    display: none;
+  }
+  @media (min-width: 860px) {
+    .layout-spacer {
+      display: block;
     }
   }
-  .filters h2 {
-    margin: 0;
-    font-size: 13px;
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-    color: var(--subtle);
-  }
-  .filters-empty {
-    margin: 0;
-    color: var(--subtle);
-    font-size: 13px;
-  }
-  .tag-list {
+
+  /* Floating list, not a bordered panel -- narrow, right-aligned toward the
+     text column, no background/border of its own. Below 860px there's no
+     gutter to float in, so it becomes a horizontal scrolling chip row
+     instead of disappearing (2026-09-08 Fable review: a facet that only
+     exists on desktop is a bug, not a simplification). */
+  .categories-rail ul {
     list-style: none;
     margin: 0;
     padding: 0;
@@ -391,23 +387,31 @@
     -webkit-overflow-scrolling: touch;
     scrollbar-width: none;
   }
-  .tag-list::-webkit-scrollbar {
+  .categories-rail ul::-webkit-scrollbar {
     display: none;
   }
-  @media (min-width: 700px) {
-    .tag-list {
+  @media (min-width: 860px) {
+    .categories-rail {
+      justify-self: end;
+      width: max-content;
+      max-width: 240px;
+      position: sticky;
+      top: 16px;
+    }
+    .categories-rail ul {
       flex-direction: column;
       flex-wrap: wrap;
       gap: 2px;
       overflow-x: visible;
     }
   }
-  .tag-btn {
+  .categories-rail button {
     display: flex;
     align-items: baseline;
     justify-content: space-between;
-    gap: 6px;
+    gap: 8px;
     flex: 0 0 auto;
+    width: 100%;
     border: 1px solid var(--border);
     border-radius: 999px;
     background: none;
@@ -416,20 +420,62 @@
     font: inherit;
     font-size: 13px;
     white-space: nowrap;
-    text-align: start;
+    text-align: end;
     cursor: pointer;
   }
-  @media (min-width: 700px) {
-    .tag-btn {
-      width: 100%;
-      flex: initial;
+  @media (min-width: 860px) {
+    .categories-rail button {
       border: 0;
-      border-inline-start: 2px solid transparent;
+      border-inline-end: 2px solid transparent;
       border-radius: 0;
-      padding: 5px 10px 5px 12px;
+      padding: 5px 12px 5px 10px;
       font-size: 14px;
       white-space: normal;
     }
+  }
+  .categories-rail button:hover {
+    color: var(--on-surface);
+  }
+  .categories-rail button.active {
+    color: var(--on-surface);
+    font-weight: 600;
+    border-color: var(--accent);
+  }
+  @media (min-width: 860px) {
+    .categories-rail button.active {
+      border-inline-end-color: var(--accent);
+      border-block-color: transparent;
+    }
+  }
+  .cat-count {
+    color: var(--subtle);
+    font-size: 12px;
+    font-variant-numeric: tabular-nums;
+  }
+  .categories-rail button.active .cat-count {
+    color: var(--muted);
+  }
+
+  /* Tags live inside the reading column now (chip row, wraps freely) --
+     they no longer need a dedicated sidebar since the column itself is
+     already narrow enough that a horizontal list reads fine. */
+  .tag-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+  .tag-btn {
+    display: flex;
+    align-items: baseline;
+    gap: 6px;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    background: none;
+    padding: 5px 12px;
+    color: var(--muted);
+    font: inherit;
+    font-size: 13px;
+    cursor: pointer;
   }
   .tag-btn:hover {
     color: var(--on-surface);
@@ -438,12 +484,6 @@
     color: var(--on-surface);
     font-weight: 600;
     border-color: var(--accent);
-  }
-  @media (min-width: 700px) {
-    .tag-btn.active {
-      border-inline-start-color: var(--accent);
-      border-block-color: transparent;
-    }
   }
   .tag-count {
     color: var(--subtle);
