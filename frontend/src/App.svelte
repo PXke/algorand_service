@@ -33,6 +33,7 @@
     | { name: 'registry' }
     | { name: 'registryEntry'; slug: string }
     | { name: 'registrySubmit' }
+    | { name: 'registryRequest'; slug: string }
     | { name: 'search' }
     | { name: 'about' }
     | { name: 'contact' }
@@ -54,6 +55,7 @@
     | 'registry'
     | 'registryEntry'
     | 'registrySubmit'
+    | 'registryRequest'
     | 'search'
     | 'about'
     | 'contact'
@@ -74,6 +76,7 @@
     registry: () => import('./routes/Registry.svelte'),
     registryEntry: () => import('./routes/RegistryEntry.svelte'),
     registrySubmit: () => import('./routes/RegistrySubmit.svelte'),
+    registryRequest: () => import('./routes/RegistryRequest.svelte'),
     search: () => import('./routes/Search.svelte'),
     about: () => import('./routes/About.svelte'),
     contact: () => import('./routes/Contact.svelte'),
@@ -118,6 +121,8 @@
     // Checked before the generic /registry/:slug match below, same
     // "special path before the param route" precedent as /x402/endpoints.
     if (path === '/registry/submit') return { name: 'registrySubmit' }
+    const registryRequest = matchPath('/registry/:slug/request', path)
+    if (registryRequest) return { name: 'registryRequest', slug: registryRequest.slug }
     const registryEntry = matchPath('/registry/:slug', path)
     if (registryEntry) return { name: 'registryEntry', slug: registryEntry.slug }
     const section = matchPath('/section/:slug', path)
@@ -166,6 +171,7 @@
     'registry',
     'registryEntry',
     'registrySubmit',
+    'registryRequest',
     'notfound',
   ])
 
@@ -214,10 +220,7 @@
     | { name: 'mktOverview' }
     | { name: 'mktDirectory' }
     | { name: 'mktListing'; url: string }
-    | { name: 'mktBoard' }
     | { name: 'mktRequests' }
-    | { name: 'mktTrust' }
-    | { name: 'mktServices' }
     | { name: 'mktDevelopers' }
     | { name: 'mktRegister' }
     | { name: 'notfound' }
@@ -225,20 +228,14 @@
   type MarketplaceLazyName =
     | 'mktDirectory'
     | 'mktListing'
-    | 'mktBoard'
     | 'mktRequests'
-    | 'mktTrust'
-    | 'mktServices'
     | 'mktDevelopers'
     | 'mktRegister'
 
   const marketplaceLoaders: Record<MarketplaceLazyName, () => Promise<{ default: Component<any> }>> = {
     mktDirectory: () => import('./routes/marketplace/Directory.svelte'),
     mktListing: () => import('./routes/marketplace/ListingDetail.svelte'),
-    mktBoard: () => import('./routes/marketplace/Board.svelte'),
     mktRequests: () => import('./routes/marketplace/Requests.svelte'),
-    mktTrust: () => import('./routes/marketplace/Trust.svelte'),
-    mktServices: () => import('./routes/marketplace/Services.svelte'),
     mktDevelopers: () => import('./routes/marketplace/Developers.svelte'),
     mktRegister: () => import('./routes/marketplace/Register.svelte'),
   }
@@ -258,6 +255,12 @@
     '/x402/grades': '/trust',
     '/x402/endpoints': '/services',
     '/x402/register': '/list',
+    // 2026-09-07 evening: Board, Trust and Services folded into the one
+    // Endpoints list (PXke's own services are rows there; placements are its
+    // featured strip; probe and grade data live on each listing's page).
+    '/board': '/directory',
+    '/trust': '/directory',
+    '/services': '/directory',
   }
 
   function resolveMarketplaceView(path: string, query: URLSearchParams): MarketplaceView {
@@ -276,10 +279,7 @@
       }
       return { name: 'mktListing', url }
     }
-    if (path === '/board') return { name: 'mktBoard' }
     if (path === '/requests') return { name: 'mktRequests' }
-    if (path === '/trust') return { name: 'mktTrust' }
-    if (path === '/services') return { name: 'mktServices' }
     if (path === '/developers') return { name: 'mktDevelopers' }
     if (path === '/list') return { name: 'mktRegister' }
     return { name: 'notfound' }
@@ -355,6 +355,11 @@
     {:else if view.name === 'registryEntry'}
       {#key view.slug}
         {@const C = lazy.registryEntry!}
+        <C slug={view.slug} />
+      {/key}
+    {:else if view.name === 'registryRequest'}
+      {#key view.slug}
+        {@const C = lazy.registryRequest!}
         <C slug={view.slug} />
       {/key}
     {:else if view.name === 'shared'}

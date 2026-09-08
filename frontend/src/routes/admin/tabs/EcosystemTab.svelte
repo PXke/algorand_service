@@ -34,6 +34,52 @@
   let busy = $state<Set<string>>(new Set())
   let draftHint = $state<string | null>(null)
 
+  // "Suggest a change" queue (owner ask, 2026-09-08) -- a separate, smaller
+  // list with its own status filter, independent of the project queue above.
+  const REQUEST_STATUSES = ['pending', 'resolved', 'dismissed'] as const
+  let requestFilterStatus = $state<(typeof REQUEST_STATUSES)[number]>('pending')
+  let requests: Array<Record<string, unknown>> = $state([])
+  let requestsLoading = $state(true)
+  let requestsError = $state<string | null>(null)
+  let requestsBusy = $state<Set<string>>(new Set())
+  const requestsInflight = new LatestOnly()
+
+  async function loadRequests() {
+    const { signal, stale } = requestsInflight.next()
+    requestsLoading = true
+    requestsError = null
+    try {
+      const res = await admin.listEcosystemRequests(requestFilterStatus, signal)
+      if (stale()) return
+      requests = Array.isArray(res.items) ? (res.items as Array<Record<string, unknown>>) : []
+    } catch (e) {
+      if (stale() || (e instanceof DOMException && e.name === 'AbortError')) return
+      requestsError = e instanceof Error ? e.message : String(e)
+    } finally {
+      if (!stale()) requestsLoading = false
+    }
+  }
+
+  function selectRequestStatus(status: (typeof REQUEST_STATUSES)[number]) {
+    requestFilterStatus = status
+    void loadRequests()
+  }
+
+  async function resolveRequest(requestId: string, status: 'resolved' | 'dismissed') {
+    requestsBusy = new Set(requestsBusy).add(requestId)
+    try {
+      await admin.resolveEcosystemRequest(requestId, status)
+      onmessage?.(`Request ${status}`)
+      await loadRequests()
+    } catch (e) {
+      requestsError = e instanceof Error ? e.message : String(e)
+    } finally {
+      const next = new Set(requestsBusy)
+      next.delete(requestId)
+      requestsBusy = next
+    }
+  }
+
   const inflight = new LatestOnly()
 
   async function load() {
@@ -170,6 +216,10 @@
 
   $effect(() => {
     void load()
+  })
+
+  $effect(() => {
+    void loadRequests()
   })
 </script>
 
@@ -335,6 +385,73 @@
       </article>
     {/each}
   {/if}
+
+  <div class="requests-section">
+    <h2>Suggest a change</h2>
+    <p class="intro">
+      Free, anonymous requests against already-listed entries — a change note or a removal ask.
+      Act through the ordinary edit/delete controls above, then resolve or dismiss the request here.
+    </p>
+
+    <div class="filters">
+      {#each REQUEST_STATUSES as s (s)}
+        <button
+          type="button"
+          class="chip status-{s}"
+          class:active={requestFilterStatus === s}
+          onclick={() => selectRequestStatus(s)}
+        >
+          {s}
+        </button>
+      {/each}
+    </div>
+
+    {#if requestsLoading}
+      <p class="muted">Loading…</p>
+    {:else if requestsError}
+      <p class="err">{requestsError}</p>
+    {:else if !requests.length}
+      <div class="empty panel">
+        <p><strong>No {requestFilterStatus} requests.</strong></p>
+      </div>
+    {:else}
+      {#each requests as r (r.request_id)}
+        {@const requestId = String(r.request_id ?? '')}
+        <article class="panel card">
+          <div class="card-head">
+            <div class="card-title">
+              <strong>{String(r.slug ?? '')}</strong>
+              <span class="category-badge">{String(r.kind ?? '')}</span>
+            </div>
+            {#if requestFilterStatus === 'pending'}
+              <div class="card-actions">
+                <button
+                  class="btn btn-sm"
+                  type="button"
+                  onclick={() => resolveRequest(requestId, 'dismissed')}
+                  disabled={requestsBusy.has(requestId)}
+                >
+                  Dismiss
+                </button>
+                <button
+                  class="btn btn-sm btn-primary"
+                  type="button"
+                  onclick={() => resolveRequest(requestId, 'resolved')}
+                  disabled={requestsBusy.has(requestId)}
+                >
+                  Mark resolved
+                </button>
+              </div>
+            {/if}
+          </div>
+          <p class="request-message">{String(r.message ?? '')}</p>
+          {#if r.contact}
+            <p class="subtle">Private contact (admin-only): {String(r.contact)}</p>
+          {/if}
+        </article>
+      {/each}
+    {/if}
+  </div>
 </div>
 
 <style>
@@ -479,5 +596,25 @@
   .err {
     color: var(--danger);
     margin: 0;
+  }
+
+  .requests-section {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    margin-top: 8px;
+    padding-top: 16px;
+    border-top: 1px solid var(--border);
+  }
+  .requests-section h2 {
+    margin: 0;
+    font-size: 1.05rem;
+  }
+  .request-message {
+    margin: 8px 0 0;
+    font-size: 0.9rem;
+    line-height: 1.5;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
   }
 </style>

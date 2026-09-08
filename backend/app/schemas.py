@@ -873,6 +873,24 @@ class EcosystemUpdateRequest(msgspec.Struct, kw_only=True):
     x402_url: Annotated[str, Meta(max_length=2048)] | None = None
 
 
+class EcosystemRequestSubmitRequest(msgspec.Struct, kw_only=True):
+    """Request body for POST /ecosystem/:slug/request — a free, anonymous "suggest a change" against an already-approved entry (owner ask 2026-09-08)."""
+
+    kind: Literal["change", "removal"]
+    message: Annotated[str, Meta(min_length=10, max_length=1000)]
+    # Optional, private, admin-only, never rendered — same posture as
+    # EcosystemSubmitRequest.contact.
+    contact: Annotated[str, Meta(max_length=254)] = ""
+    # Honeypot: same mechanism as EcosystemSubmitRequest.website.
+    website: Annotated[str, Meta(max_length=254)] = ""
+
+
+class EcosystemRequestResolveRequest(msgspec.Struct, kw_only=True):
+    """Request body for POST /admin/ecosystem/requests/:id/resolve."""
+
+    status: Literal["resolved", "dismissed"]
+
+
 class DomainSetRequest(msgspec.Struct, kw_only=True):
     """Request body for setting a domain's frontier status."""
 

@@ -4,14 +4,16 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from algorand_shared.ecosystem_statements import EcosystemStmts
+from algorand_shared.ecosystem_statements import EcosystemRequestStmts, EcosystemStmts
 
 from app.core.cassandra import get_cassandra_session
 from app.modules.ecosystem.models.domain import (
     DEFAULT_CATEGORY,
     DEFAULT_STAGE,
+    REQUEST_STATUS_PENDING,
     STATUS_APPROVED,
     STATUS_PENDING,
+    EntryRequest,
     StoredProject,
     SubmissionQueueItem,
 )
@@ -282,3 +284,71 @@ class CassandraProjectStore:
         """Update the admin-only draft blurb suggestion."""
         session = get_cassandra_session()
         session.execute(EcosystemStmts.SET_DRAFT_DESCRIPTION, (draft, slug))
+
+
+def _row_to_request(row: object) -> EntryRequest:
+    return EntryRequest(
+        request_id=row.request_id,
+        slug=row.slug or "",
+        kind=row.kind or "",
+        message=row.message or "",
+        contact=getattr(row, "contact", None) or "",
+        status=getattr(row, "status", None) or REQUEST_STATUS_PENDING,
+        created_at_epoch=_epoch(getattr(row, "created_at", None)),
+        resolved_at_epoch=_epoch(getattr(row, "resolved_at", None)),
+        resolved_by=getattr(row, "resolved_by", None) or "",
+    )
+
+
+def _request_params(item: EntryRequest) -> tuple:
+    return (
+        item.request_id,
+        item.slug,
+        item.kind,
+        item.message,
+        item.contact,
+        item.status,
+        _dt(item.created_at_epoch),
+        _dt(item.resolved_at_epoch),
+        item.resolved_by,
+    )
+
+
+class CassandraRequestStore:
+    """Cassandra-backed "suggest a change" request storage. Same store-before-mark, diff-then-move shape as CassandraProjectStore."""
+
+    def insert(self, item: EntryRequest) -> None:
+        """Store a new request: canonical row, then its by-status queue row."""
+        session = get_cassandra_session()
+        session.execute(EcosystemRequestStmts.UPSERT, _request_params(item))
+        session.execute(
+            EcosystemRequestStmts.INSERT_BY_STATUS,
+            (item.status, _dt(item.created_at_epoch), item.request_id, item.slug, item.kind),
+        )
+
+    def get(self, request_id: str) -> EntryRequest | None:
+        """Return one request by id, or None if it does not exist."""
+        session = get_cassandra_session()
+        row = session.execute(EcosystemRequestStmts.GET, (request_id,)).one()
+        return None if row is None else _row_to_request(row)
+
+    def list_by_status(self, status: str, *, limit: int) -> list[EntryRequest]:
+        """Point reads back through GET for every candidate id in the projection, so the served row is always fresh."""
+        session = get_cassandra_session()
+        rows = session.execute(EcosystemRequestStmts.LIST_BY_STATUS, (status, limit))
+        return [item for item in (self.get(row.request_id) for row in rows) if item is not None]
+
+    def upsert(self, item: EntryRequest) -> None:
+        """Replace an existing request, moving its by-status queue row if the status changed."""
+        session = get_cassandra_session()
+        previous = self.get(item.request_id)
+        session.execute(EcosystemRequestStmts.UPSERT, _request_params(item))
+        if previous is not None and previous.status != item.status:
+            session.execute(
+                EcosystemRequestStmts.DELETE_BY_STATUS,
+                (previous.status, _dt(previous.created_at_epoch), item.request_id),
+            )
+            session.execute(
+                EcosystemRequestStmts.INSERT_BY_STATUS,
+                (item.status, _dt(item.created_at_epoch), item.request_id, item.slug, item.kind),
+            )

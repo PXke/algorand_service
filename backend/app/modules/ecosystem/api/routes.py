@@ -16,13 +16,25 @@ from app.modules.admin.auth import require_admin_wallet, verified_admin_wallet
 from app.modules.ecosystem.models.domain import (
     CATEGORIES,
     EcosystemError,
+    EntryRequest,
     StoredProject,
     SubmissionQueueItem,
 )
-from app.modules.ecosystem.services import blurb_service, review_service, submission_service
+from app.modules.ecosystem.services import (
+    blurb_service,
+    request_service,
+    review_service,
+    submission_service,
+)
 from app.modules.ecosystem.services.rate_limit import read_rate_limited, submit_rate_limited
 from app.modules.ecosystem.stores.factory import get_project_store
-from app.schemas import EcosystemDecisionRequest, EcosystemSubmitRequest, EcosystemUpdateRequest
+from app.schemas import (
+    EcosystemDecisionRequest,
+    EcosystemRequestResolveRequest,
+    EcosystemRequestSubmitRequest,
+    EcosystemSubmitRequest,
+    EcosystemUpdateRequest,
+)
 
 
 def _public_project_json(item: StoredProject) -> dict:
@@ -79,6 +91,21 @@ def _queue_item_json(item: SubmissionQueueItem) -> dict:
         "source": item.source,
         "submitted_at_epoch": item.submitted_at_epoch,
         "status": item.status,
+    }
+
+
+def _request_json(item: EntryRequest) -> dict:
+    """Serialize an entry request for the admin queue/detail view. Never a public read -- these are admin-only end to end."""
+    return {
+        "request_id": item.request_id,
+        "slug": item.slug,
+        "kind": item.kind,
+        "message": item.message,
+        "contact": item.contact,
+        "status": item.status,
+        "created_at_epoch": item.created_at_epoch,
+        "resolved_at_epoch": item.resolved_at_epoch,
+        "resolved_by": item.resolved_by,
     }
 
 
@@ -210,6 +237,36 @@ def ecosystem_submission_status(request: Request) -> Response | dict:
     if item.status == "rejected":
         body["reason"] = item.reject_reason
     return body
+
+
+def ecosystem_request_submit(request: Request) -> Response | dict:
+    """Free, unauthenticated: suggest a change or removal against an already-approved entry (owner ask 2026-09-08). Reuses submit's own honeypot/rate-limit gates -- same abuse surface, no reason for a second budget."""
+    slug = request.path_params.get("slug", "").strip().lower()
+    try:
+        payload = serialization.decode(request.body, EcosystemRequestSubmitRequest)
+    except serialization.DecodeError as exc:
+        return json_error_response(400, "invalid_request", str(exc))
+
+    # Honeypot tripped: answer success so the bot learns nothing, store nothing.
+    if payload.website.strip():
+        return {"ok": True, "request_id": ""}
+
+    if submit_rate_limited(request):
+        return json_error_response(
+            429, "rate_limited", "Too many requests — please try again later"
+        )
+
+    try:
+        item = request_service.submit_request(
+            slug=slug,
+            kind=payload.kind,
+            message=payload.message,
+            contact=payload.contact,
+        )
+    except EcosystemError as exc:
+        return json_error_from_platform(exc)
+
+    return {"ok": True, "request_id": item.request_id}
 
 
 _BADGE_TEMPLATE = (
@@ -363,6 +420,47 @@ def admin_ecosystem_delete(request: Request) -> Response | dict:
     return {"deleted": True, "slug": slug}
 
 
+def admin_ecosystem_requests_queue(request: Request) -> Response | dict:
+    """Admin: the "suggest a change" queue for one status partition."""
+    denied = require_admin_wallet(request)
+    if denied is not None:
+        return denied
+
+    from app.modules.ecosystem.models.domain import REQUEST_STATUSES
+
+    status = query_param(request.query_params.get("status", "pending")).strip().lower() or "pending"
+    if status not in REQUEST_STATUSES:
+        return json_error_response(
+            400, "invalid_request", f"status must be one of: {', '.join(REQUEST_STATUSES)}"
+        )
+    limit = _clamped_limit(request)
+    if isinstance(limit, Response):
+        return limit
+    items = request_service.list_requests(status, limit=limit)
+    return {"items": [_request_json(item) for item in items]}
+
+
+def admin_ecosystem_request_resolve(request: Request) -> Response | dict:
+    """Admin: mark a "suggest a change" request resolved or dismissed."""
+    denied = require_admin_wallet(request)
+    if denied is not None:
+        return denied
+    request_id = request.path_params.get("id", "").strip()
+    if not request_id:
+        return json_error_response(400, "invalid_request", "id required")
+    try:
+        payload = serialization.decode(request.body, EcosystemRequestResolveRequest)
+    except serialization.DecodeError as exc:
+        return json_error_response(400, "invalid_request", str(exc))
+
+    wallet = verified_admin_wallet(request)
+    try:
+        item = request_service.resolve_request(request_id, wallet=wallet, status=payload.status)
+    except EcosystemError as exc:
+        return json_error_from_platform(exc)
+    return _request_json(item)
+
+
 def admin_ecosystem_seed(request: Request) -> Response | dict:
     """Admin: one-off, idempotent seed from the crawler's existing ecosystem_listed domains (design doc section 6.3)."""
     denied = require_admin_wallet(request)
@@ -390,11 +488,14 @@ def register_ecosystem_routes(app: Router) -> None:
     app.get("/api/v1/ecosystem/categories")(ecosystem_categories)
     app.get("/api/v1/ecosystem")(ecosystem_list)
     app.get("/api/v1/ecosystem/submissions/:id")(ecosystem_submission_status)
+    app.post("/api/v1/ecosystem/:slug/request")(ecosystem_request_submit)
     app.get("/api/v1/ecosystem/:slug/badge.svg")(ecosystem_badge)
     app.get("/api/v1/ecosystem/:slug")(ecosystem_detail)
 
     app.get("/api/v1/admin/ecosystem")(admin_ecosystem_queue)
     app.post("/api/v1/admin/ecosystem/seed")(admin_ecosystem_seed)
+    app.get("/api/v1/admin/ecosystem/requests")(admin_ecosystem_requests_queue)
+    app.post("/api/v1/admin/ecosystem/requests/:id/resolve")(admin_ecosystem_request_resolve)
     app.get("/api/v1/admin/ecosystem/:slug")(admin_ecosystem_detail)
     app.post("/api/v1/admin/ecosystem/:slug/decision")(admin_ecosystem_decision)
     app.post("/api/v1/admin/ecosystem/:slug/draft-blurb")(admin_ecosystem_draft_blurb)

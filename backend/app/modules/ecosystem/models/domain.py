@@ -67,6 +67,29 @@ REJECT_REASONS: tuple[str, ...] = (
 MAX_TAGS = 5
 MAX_TAG_LENGTH = 40
 
+# "Suggest a change" (owner ask, 2026-09-08: "Yes we need a suggest a
+# change") -- a free, anonymous request against an ALREADY-APPROVED entry,
+# distinct from a fresh submission: no domain dedupe, no liveness check, no
+# category, just a human-reviewed note. `change` asks the reviewer to fix
+# something on the live entry; `removal` asks for it to be taken down
+# (reviewer can act via update_entry's stage=sunset, or delete_entry -- see
+# request_service's own docstring for why this never auto-applies either).
+REQUEST_KIND_CHANGE = "change"
+REQUEST_KIND_REMOVAL = "removal"
+REQUEST_KINDS: tuple[str, ...] = (REQUEST_KIND_CHANGE, REQUEST_KIND_REMOVAL)
+
+REQUEST_STATUS_PENDING = "pending"
+REQUEST_STATUS_RESOLVED = "resolved"
+REQUEST_STATUS_DISMISSED = "dismissed"
+REQUEST_STATUSES: tuple[str, ...] = (
+    REQUEST_STATUS_PENDING,
+    REQUEST_STATUS_RESOLVED,
+    REQUEST_STATUS_DISMISSED,
+)
+
+MAX_REQUEST_MESSAGE_LENGTH = 1000
+MIN_REQUEST_MESSAGE_LENGTH = 10
+
 
 class EcosystemError(PlatformError):
     """A registry-flow error mapped to an HTTP status."""
@@ -139,6 +162,27 @@ class StoredProject:
         return list(self.tags)
 
 
+@dataclass
+class EntryRequest:
+    """One "suggest a change" / removal request against an already-approved entry.
+
+    Anonymous by default (`contact` is optional, private, admin-only --
+    same posture as `StoredProject.contact`). Never mutates the target
+    entry itself; a human reviewer reads the message and acts through the
+    ordinary admin edit/delete path.
+    """
+
+    request_id: str
+    slug: str
+    kind: str
+    message: str
+    contact: str = ""
+    status: str = REQUEST_STATUS_PENDING
+    created_at_epoch: int = 0
+    resolved_at_epoch: int = 0
+    resolved_by: str = ""
+
+
 @dataclass(frozen=True)
 class SubmissionQueueItem:
     """One row of the admin review queue (ecosystem_submissions_by_status)."""
@@ -157,9 +201,18 @@ __all__ = [
     "CATEGORIES",
     "DEFAULT_CATEGORY",
     "DEFAULT_STAGE",
+    "MAX_REQUEST_MESSAGE_LENGTH",
     "MAX_TAGS",
     "MAX_TAG_LENGTH",
+    "MIN_REQUEST_MESSAGE_LENGTH",
     "REJECT_REASONS",
+    "REQUEST_KINDS",
+    "REQUEST_KIND_CHANGE",
+    "REQUEST_KIND_REMOVAL",
+    "REQUEST_STATUSES",
+    "REQUEST_STATUS_DISMISSED",
+    "REQUEST_STATUS_PENDING",
+    "REQUEST_STATUS_RESOLVED",
     "SOURCES",
     "SOURCE_CLAIMED",
     "SOURCE_SEEDED",
@@ -173,6 +226,7 @@ __all__ = [
     "STATUS_PENDING",
     "STATUS_REJECTED",
     "EcosystemError",
+    "EntryRequest",
     "StoredProject",
     "SubmissionQueueItem",
 ]

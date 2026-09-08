@@ -4,7 +4,12 @@ from __future__ import annotations
 
 from dataclasses import replace
 
-from app.modules.ecosystem.models.domain import STATUS_APPROVED, StoredProject, SubmissionQueueItem
+from app.modules.ecosystem.models.domain import (
+    STATUS_APPROVED,
+    EntryRequest,
+    StoredProject,
+    SubmissionQueueItem,
+)
 
 
 class InMemoryProjectStore:
@@ -129,3 +134,29 @@ class InMemoryProjectStore:
         if existing is None:
             return
         self._items[slug] = replace(existing, draft_description=draft)
+
+
+class InMemoryRequestStore:
+    """In-memory "suggest a change" request store for dev and tests."""
+
+    def __init__(self) -> None:
+        """Start with every request empty."""
+        self._items: dict[str, EntryRequest] = {}
+
+    def insert(self, item: EntryRequest) -> None:
+        """Store a new request."""
+        self._items[item.request_id] = item
+
+    def get(self, request_id: str) -> EntryRequest | None:
+        """Return one request by id, or None if it does not exist."""
+        return self._items.get(request_id)
+
+    def list_by_status(self, status: str, *, limit: int) -> list[EntryRequest]:
+        """Return requests in `status`, newest-first, at most `limit`."""
+        matching = [i for i in self._items.values() if i.status == status]
+        ordered = sorted(matching, key=lambda i: (-i.created_at_epoch, i.request_id))
+        return ordered[: max(0, limit)]
+
+    def upsert(self, item: EntryRequest) -> None:
+        """Replace an existing request -- status-partition bookkeeping is a no-op here since list_by_status scans self._items directly, not a separate projection."""
+        self._items[item.request_id] = item

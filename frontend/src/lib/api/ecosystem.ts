@@ -75,6 +75,11 @@ export const ECOSYSTEM_DESCRIPTION_MAX_LENGTH = 500
 export const ECOSYSTEM_MAX_TAGS = 5
 export const ECOSYSTEM_CATEGORY_SUGGESTION_MAX_LENGTH = 60
 
+// "Suggest a change" (owner ask, 2026-09-08: "Yes we need a suggest a
+// change") -- mirrors backend's MIN/MAX_REQUEST_MESSAGE_LENGTH.
+export const ECOSYSTEM_REQUEST_MESSAGE_MIN_LENGTH = 10
+export const ECOSYSTEM_REQUEST_MESSAGE_MAX_LENGTH = 1000
+
 /** Crude markdown-syntax stripper for a compact list preview -- the full render (links, emphasis, multi-line) is reserved for the entry detail page (RegistryEntry.svelte); a dense list of many rows has no room for it. Not a security boundary (that's sanitizeArticleHtml, only used where markdown is actually rendered as HTML) -- this never touches {@html}, so a missed edge case just leaves stray punctuation in a text node, not a vulnerability. */
 export function stripMarkdownToText(source: string): string {
   return source
@@ -144,6 +149,21 @@ export type EcosystemSubmissionStatus = {
   reason?: string
 }
 
+export type EcosystemRequestKind = 'change' | 'removal'
+
+export type EcosystemRequestPayload = {
+  kind: EcosystemRequestKind
+  message: string
+  contact?: string
+  // Honeypot: left empty by a human, sent as-is.
+  website?: string
+}
+
+export type EcosystemRequestResult = {
+  ok: boolean
+  request_id: string
+}
+
 export const ecosystemApi = {
   async fetchCategories(signal?: AbortSignal): Promise<string[]> {
     const body = await api.getJson('/api/v1/ecosystem/categories', { signal })
@@ -183,6 +203,16 @@ export const ecosystemApi = {
       '/api/v1/ecosystem/submit',
       payload,
     )) as unknown as EcosystemSubmitResult
+  },
+
+  async submitRequest(
+    slug: string,
+    payload: EcosystemRequestPayload,
+  ): Promise<EcosystemRequestResult> {
+    return (await api.postJson(
+      `/api/v1/ecosystem/${encodeURIComponent(slug)}/request`,
+      payload,
+    )) as unknown as EcosystemRequestResult
   },
 
   badgeUrl(slug: string): string {

@@ -197,5 +197,17 @@ export function createAdminApi(wallet: string, token: string | null) {
     seedEcosystem: () => api.postJson('/api/v1/admin/ecosystem/seed', {}, h()),
     draftEcosystemBlurb: (slug: string) =>
       api.postJson(`/api/v1/admin/ecosystem/${encodeURIComponent(slug)}/draft-blurb`, {}, h()),
+    // "Suggest a change" queue (owner ask, 2026-09-08).
+    listEcosystemRequests: (status = 'pending', signal?: AbortSignal) =>
+      api.getJson(`/api/v1/admin/ecosystem/requests?status=${encodeURIComponent(status)}`, {
+        headers: h(),
+        signal,
+      }),
+    resolveEcosystemRequest: (requestId: string, status: 'resolved' | 'dismissed') =>
+      api.postJson(
+        `/api/v1/admin/ecosystem/requests/${encodeURIComponent(requestId)}/resolve`,
+        { status },
+        h(),
+      ),
   }
 }

@@ -1054,3 +1054,11 @@ file = "backend/schema/migrations/app/124_ecosystem_category_suggestion.cql"
 tier = "prod"
 status = "active"
 description = "Adds ecosystem_projects.category_suggestion (nullable text, purely additive) -- a free-text, submitter-suggested category name for the Algorand Open Registry (owner ask 2026-09-08: 'allow people to suggest new categories'), admin-review-only, never validated against the closed CATEGORIES enum and never served on a public read. See app/modules/ecosystem/models/domain.py's StoredProject.category_suggestion and services/submission_service.py's normalize_category_suggestion."
+
+[[migrations]]
+stream = "app"
+version = "125"
+file = "backend/schema/migrations/app/125_ecosystem_entry_requests.cql"
+tier = "prod"
+status = "active"
+description = "Adds ecosystem_entry_requests (request_id PK) and ecosystem_entry_requests_by_status (admin queue projection) for the Algorand Open Registry's 'suggest a change' feature (owner ask 2026-09-08: 'Yes we need a suggest a change') -- a free, anonymous change/removal request against an already-approved entry, distinct from ecosystem_projects (a fresh submission). See app/modules/ecosystem/models/domain.py's EntryRequest and services/request_service.py."

@@ -198,8 +198,12 @@ def _is_known_app_path(path: str) -> bool:
         # Algorand Open Registry (roadmap item 26): any non-empty entry
         # slug, same "/topic/:tag" shape/cap above -- design doc section
         # 10's own "Observed, not fixed" flag for this exact prefix.
-        slug = path[len("/registry/") :]
-        return 0 < len(slug) <= 80 and "/" not in slug
+        rest = path[len("/registry/") :]
+        if rest.endswith("/request"):
+            # "Suggest a change" (owner ask, 2026-09-08): /registry/:slug/request.
+            slug = rest[: -len("/request")]
+            return 0 < len(slug) <= 80 and "/" not in slug
+        return 0 < len(rest) <= 80 and "/" not in rest
     if path == "/x402":
         return True
     if path.startswith("/x402/"):

@@ -39,6 +39,13 @@ Five tables (migration 121):
   the admin queue read; a row moves partition on every decision (delete at
   the old status, insert at the new one).
 
+Plus two more (migration 125, `EcosystemRequestStmts`) for the "suggest a
+change" feature: `ecosystem_entry_requests` (request_id PK, the canonical
+row) and `ecosystem_entry_requests_by_status` ((status), created_at DESC,
+request_id) -- same admin-queue shape as `ecosystem_submissions_by_status`,
+for a free, anonymous change/removal request against an already-approved
+entry (backend-only, `app.modules.ecosystem.services.request_service`).
+
 Same `_Stmt` descriptor shape as `x402_statements.py`: preparation is
 delegated to whichever service's `app.core.cassandra.prepare_cached` is
 importing this.
@@ -169,4 +176,31 @@ class EcosystemStmts:
     )
 
 
-__all__ = ["ALL_CATEGORY_PARTITION", "EcosystemStmts"]
+_REQUEST_COLUMNS = "request_id, slug, kind, message, contact, status, created_at, resolved_at, resolved_by"
+
+
+class EcosystemRequestStmts:
+    """Prepared statements for "suggest a change" entry requests (migration 125)."""
+
+    GET = _Stmt(
+        f"SELECT {_REQUEST_COLUMNS} FROM algorand_platform.ecosystem_entry_requests WHERE request_id = ?"
+    )
+    UPSERT = _Stmt(
+        "INSERT INTO algorand_platform.ecosystem_entry_requests "
+        f"({_REQUEST_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+    )
+    INSERT_BY_STATUS = _Stmt(
+        "INSERT INTO algorand_platform.ecosystem_entry_requests_by_status "
+        "(status, created_at, request_id, slug, kind) VALUES (?, ?, ?, ?, ?)"
+    )
+    DELETE_BY_STATUS = _Stmt(
+        "DELETE FROM algorand_platform.ecosystem_entry_requests_by_status "
+        "WHERE status = ? AND created_at = ? AND request_id = ?"
+    )
+    LIST_BY_STATUS = _Stmt(
+        "SELECT created_at, request_id, slug, kind "
+        "FROM algorand_platform.ecosystem_entry_requests_by_status WHERE status = ? LIMIT ?"
+    )
+
+
+__all__ = ["ALL_CATEGORY_PARTITION", "EcosystemRequestStmts", "EcosystemStmts"]

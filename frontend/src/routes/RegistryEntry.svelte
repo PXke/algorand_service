@@ -224,7 +224,12 @@
 
     <p class="correction">
       Something out of date?
-      <a href="/registry/submit" onclick={go('/registry/submit')}>Suggest a change</a>
+      <a
+        href={`/registry/${entry.slug}/request`}
+        onclick={go(`/registry/${entry.slug}/request`)}
+      >
+        Suggest a change
+      </a>
     </p>
   {/if}
 </div>

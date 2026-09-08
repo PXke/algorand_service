@@ -25,10 +25,14 @@ from app.modules.ecosystem.models.domain import (
     EcosystemError,
 )
 from app.modules.ecosystem.services import review_service, submission_service
-from app.modules.ecosystem.stores.factory import set_project_store
-from app.modules.ecosystem.stores.memory import InMemoryProjectStore
+from app.modules.ecosystem.stores.factory import set_project_store, set_request_store
+from app.modules.ecosystem.stores.memory import InMemoryProjectStore, InMemoryRequestStore
 from app.modules.x402_uptime.services.checker import UptimeResult
-from app.schemas import EcosystemDecisionRequest, EcosystemSubmitRequest
+from app.schemas import (
+    EcosystemDecisionRequest,
+    EcosystemRequestSubmitRequest,
+    EcosystemSubmitRequest,
+)
 
 
 # --------------------------------------------------------------------------- #
@@ -59,6 +63,15 @@ def store(monkeypatch: pytest.MonkeyPatch) -> InMemoryProjectStore:
     monkeypatch.setattr(rate_limit_core, "get_redis", lambda **_kw: fake_redis)
     yield project_store
     set_project_store(None)
+
+
+@pytest.fixture(autouse=True)
+def request_store() -> InMemoryRequestStore:
+    """A fresh in-memory "suggest a change" request store for every test."""
+    store = InMemoryRequestStore()
+    set_request_store(store)
+    yield store
+    set_request_store(None)
 
 
 @pytest.fixture(autouse=True)
@@ -472,3 +485,190 @@ def test_decode_ecosystem_decision_request_literal() -> None:
     """An unrecognized `decision` value fails to decode."""
     with pytest.raises(serialization.DecodeError):
         serialization.decode(b'{"decision": "maybe"}', EcosystemDecisionRequest)
+
+
+# --------------------------------------------------------------------------- #
+# "Suggest a change": submit, honeypot, rate limit, target lookup, admin queue
+# --------------------------------------------------------------------------- #
+def _approve_one_entry(store: InMemoryProjectStore) -> str:
+    """Submit and approve one entry, returning its slug."""
+    slug = ecosystem_routes.ecosystem_submit(_request(body=_submit_body()))["submission_id"]
+    with (
+        patch.object(ecosystem_routes, "require_admin_wallet", return_value=None),
+        patch.object(ecosystem_routes, "verified_admin_wallet", return_value="ADMINWALLET"),
+    ):
+        ecosystem_routes.admin_ecosystem_decision(
+            _request(body=_admin_body(), path_params={"slug": slug})
+        )
+    approved = store.get(slug)
+    assert approved is not None
+    assert approved.status == STATUS_APPROVED
+    return slug
+
+
+def _request_body(**overrides: Any) -> bytes:  # noqa: ANN401 -- passthrough JSON payload overrides, any JSON-serializable value
+    payload = {
+        "kind": "change",
+        "message": "The description is out of date, please update it.",
+        **overrides,
+    }
+    return serialization.dumps(payload).encode()
+
+
+def test_suggest_a_change_success(
+    store: InMemoryProjectStore, request_store: InMemoryRequestStore
+) -> None:
+    """A change request against an approved entry lands pending in the request queue."""
+    slug = _approve_one_entry(store)
+    resp = ecosystem_routes.ecosystem_request_submit(
+        _request(body=_request_body(), path_params={"slug": slug})
+    )
+    assert resp["ok"] is True
+    assert resp["request_id"]
+
+    pending = request_store.list_by_status("pending", limit=10)
+    assert len(pending) == 1
+    assert pending[0].slug == slug
+    assert pending[0].kind == "change"
+
+
+def test_suggest_a_removal_success(
+    store: InMemoryProjectStore, request_store: InMemoryRequestStore
+) -> None:
+    """A removal request is stored with kind="removal"."""
+    slug = _approve_one_entry(store)
+    resp = ecosystem_routes.ecosystem_request_submit(
+        _request(body=_request_body(kind="removal"), path_params={"slug": slug})
+    )
+    assert resp["ok"] is True
+    assert request_store.list_by_status("pending", limit=10)[0].kind == "removal"
+
+
+def test_suggest_a_change_honeypot_drops_silently(
+    store: InMemoryProjectStore, request_store: InMemoryRequestStore
+) -> None:
+    """A filled honeypot field answers success but stores nothing."""
+    slug = _approve_one_entry(store)
+    resp = ecosystem_routes.ecosystem_request_submit(
+        _request(body=_request_body(website="http://bot.example"), path_params={"slug": slug})
+    )
+    assert resp["ok"] is True
+    assert resp["request_id"] == ""
+    assert request_store.list_by_status("pending", limit=10) == []
+
+
+def test_suggest_a_change_rate_limited_after_budget(
+    store: InMemoryProjectStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Reuses the submit route's own hourly per-IP budget, not a separate one."""
+    slug = _approve_one_entry(store)
+    # _approve_one_entry already spent one unit of the shared submit budget
+    # (its own ecosystem_submit call) -- budget 2 lets exactly one more
+    # request-submit through before the next one is denied.
+    monkeypatch.setattr("app.core.config.settings.ecosystem_submit_rate_limit_per_hour", 2)
+    first = ecosystem_routes.ecosystem_request_submit(
+        _request(body=_request_body(), path_params={"slug": slug})
+    )
+    assert first["ok"] is True
+    denied = ecosystem_routes.ecosystem_request_submit(
+        _request(body=_request_body(), path_params={"slug": slug})
+    )
+    assert denied.status_code == 429
+
+
+def test_suggest_a_change_against_unknown_slug_404s() -> None:
+    """A request against a slug that doesn't exist (or isn't approved) is refused."""
+    resp = ecosystem_routes.ecosystem_request_submit(
+        _request(body=_request_body(), path_params={"slug": "no-such-entry"})
+    )
+    assert resp.status_code == 404
+
+
+def test_suggest_a_change_against_pending_entry_404s() -> None:
+    """A request against a still-pending (not yet approved) entry is refused -- same "approved only" bar as the public detail read."""
+    slug = ecosystem_routes.ecosystem_submit(_request(body=_submit_body()))["submission_id"]
+    resp = ecosystem_routes.ecosystem_request_submit(
+        _request(body=_request_body(), path_params={"slug": slug})
+    )
+    assert resp.status_code == 404
+
+
+def test_suggest_a_change_message_too_short_rejected(store: InMemoryProjectStore) -> None:
+    """A too-short message is refused before it ever reaches the store."""
+    slug = _approve_one_entry(store)
+    resp = ecosystem_routes.ecosystem_request_submit(
+        _request(body=_request_body(message="short"), path_params={"slug": slug})
+    )
+    assert resp.status_code == 400
+
+
+def test_admin_requests_queue_requires_admin_wallet() -> None:
+    """The admin requests-queue route is refused before doing anything else when require_admin_wallet denies."""
+    with patch.object(ecosystem_routes, "require_admin_wallet") as denied:
+        from app.core.http_errors import json_error_response
+
+        denied.return_value = json_error_response(401, "unauthorized", "nope")
+        resp = ecosystem_routes.admin_ecosystem_requests_queue(_request(method="GET"))
+    assert resp.status_code == 401
+
+
+def test_admin_resolve_requires_admin_wallet() -> None:
+    """The admin resolve route is refused before doing anything else when require_admin_wallet denies."""
+    with patch.object(ecosystem_routes, "require_admin_wallet") as denied:
+        from app.core.http_errors import json_error_response
+
+        denied.return_value = json_error_response(401, "unauthorized", "nope")
+        resp = ecosystem_routes.admin_ecosystem_request_resolve(
+            _request(body=b'{"status": "resolved"}', path_params={"id": "does-not-matter"})
+        )
+    assert resp.status_code == 401
+
+
+def test_admin_resolve_moves_request_out_of_pending(
+    store: InMemoryProjectStore, request_store: InMemoryRequestStore
+) -> None:
+    """Resolving a pending request moves it out of the pending queue and stamps who/when."""
+    slug = _approve_one_entry(store)
+    submit_resp = ecosystem_routes.ecosystem_request_submit(
+        _request(body=_request_body(), path_params={"slug": slug})
+    )
+    request_id = submit_resp["request_id"]
+
+    with (
+        patch.object(ecosystem_routes, "require_admin_wallet", return_value=None),
+        patch.object(ecosystem_routes, "verified_admin_wallet", return_value="ADMINWALLET"),
+    ):
+        resp = ecosystem_routes.admin_ecosystem_request_resolve(
+            _request(body=b'{"status": "resolved"}', path_params={"id": request_id})
+        )
+    assert resp["status"] == "resolved"
+    assert resp["resolved_by"] == "ADMINWALLET"
+    assert request_store.list_by_status("pending", limit=10) == []
+    assert request_store.list_by_status("resolved", limit=10)[0].request_id == request_id
+
+
+def test_admin_resolve_unknown_request_404s() -> None:
+    """Resolving a request id that doesn't exist 404s."""
+    with (
+        patch.object(ecosystem_routes, "require_admin_wallet", return_value=None),
+        patch.object(ecosystem_routes, "verified_admin_wallet", return_value="ADMINWALLET"),
+    ):
+        resp = ecosystem_routes.admin_ecosystem_request_resolve(
+            _request(body=b'{"status": "resolved"}', path_params={"id": "no-such-id"})
+        )
+    assert resp.status_code == 404
+
+
+def test_decode_ecosystem_request_submit_defaults() -> None:
+    """Optional request fields (website honeypot, contact) default to empty."""
+    payload = serialization.decode(_request_body(), EcosystemRequestSubmitRequest)
+    assert payload.website == ""
+    assert payload.contact == ""
+
+
+def test_decode_ecosystem_request_submit_kind_literal() -> None:
+    """An unrecognized `kind` value fails to decode."""
+    with pytest.raises(serialization.DecodeError):
+        serialization.decode(
+            b'{"kind": "delete_everything", "message": "0123456789"}', EcosystemRequestSubmitRequest
+        )

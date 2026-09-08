@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Protocol
 
-from app.modules.ecosystem.models.domain import StoredProject, SubmissionQueueItem
+from app.modules.ecosystem.models.domain import EntryRequest, StoredProject, SubmissionQueueItem
 
 
 class ProjectStore(Protocol):
@@ -60,4 +60,24 @@ class ProjectStore(Protocol):
 
     def set_draft_description(self, slug: str, draft: str) -> None:
         """Update the admin-only draft blurb suggestion (never auto-published)."""
+        ...
+
+
+class RequestStore(Protocol):
+    """Storage interface for "suggest a change" entry requests (design doc-adjacent, owner ask 2026-09-08)."""
+
+    def insert(self, item: EntryRequest) -> None:
+        """Store a new request (canonical row + its by-status queue row)."""
+        ...
+
+    def get(self, request_id: str) -> EntryRequest | None:
+        """Return one request by id, or None if it does not exist."""
+        ...
+
+    def list_by_status(self, status: str, *, limit: int) -> list[EntryRequest]:
+        """Return requests in `status`, newest-first, at most `limit` (the admin queue read)."""
+        ...
+
+    def upsert(self, item: EntryRequest) -> None:
+        """Replace an existing request, moving its by-status queue row if the status changed (mirrors ProjectStore.upsert's diff-then-move shape)."""
         ...
