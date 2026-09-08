@@ -685,6 +685,10 @@ def _github_owner_repos(owner: str) -> dict[str, Any]:
 
     return {
         "owner": owner,
+        # The owner's own profile page -- a citation exists even when the
+        # writer only discusses the org-wide aggregate (total_public_repos/
+        # total_stars_across_all_repos) and never names one specific repo.
+        "url": f"https://github.com/{owner}",
         "total_public_repos": total_repos,
         "total_stars_across_all_repos": total_stars,
         "total_stars_may_be_incomplete": not stars_complete,
@@ -695,6 +699,7 @@ def _github_owner_repos(owner: str) -> dict[str, Any]:
                 "stars": r.get("stargazers_count"),
                 "pushed_at": r.get("pushed_at"),
                 "archived": bool(r.get("archived")),
+                "url": f"https://github.com/{r.get('full_name')}" if r.get("full_name") else "",
             }
             for r in repos
             if isinstance(r, dict)
@@ -779,6 +784,10 @@ def _github_repo_metadata(slug: str) -> dict[str, Any]:
             stars=meta.get("stargazers_count"),
             pushed_at=meta.get("pushed_at"),
             archived=meta.get("archived"),
+            # 2026-09-08: the repo's own page, so a citation exists even when
+            # the writer never prints a release tag or commit sha to link to
+            # instead -- see reference_block.py's _FETCH_TOOLS backfill.
+            url=f"https://github.com/{slug}",
         )
         if meta.get("archived"):
             out["owner_liveness"] = _owner_liveness(slug.split("/")[0], exclude=slug)
@@ -799,6 +808,11 @@ def _github_releases(slug: str, n: int) -> list[dict[str, Any]]:
                 "tag": x.get("tag_name"),
                 "published_at": x.get("published_at"),
                 "notes": (x.get("body") or "")[:500],
+                "url": (
+                    f"https://github.com/{slug}/releases/tag/{x.get('tag_name')}"
+                    if x.get("tag_name")
+                    else ""
+                ),
             }
             for x in rel
             if isinstance(x, dict)
@@ -822,6 +836,8 @@ def _github_recent_commits(slug: str, n: int) -> list[dict[str, Any]]:
                 "message": (c.get("commit", {}).get("message") or "").splitlines()[0][:140],
                 "date": c.get("commit", {}).get("author", {}).get("date"),
                 "author": (c.get("author") or {}).get("login"),
+                "sha": c.get("sha"),
+                "url": f"https://github.com/{slug}/commit/{c.get('sha')}" if c.get("sha") else "",
             }
             for c in commits
             if isinstance(c, dict)
@@ -1905,11 +1921,23 @@ def _tool_get_defi_tvl(protocol: str = "") -> dict[str, Any]:
                     "error": "not found on DeFiLlama — try the slug, e.g. 'tinyman'",
                 }
             resp.raise_for_status()
-            return {"protocol": p, "tvl_usd": resp.json(), "source": "DeFiLlama"}
+            return {
+                "protocol": p,
+                "tvl_usd": resp.json(),
+                "source": "DeFiLlama",
+                # Same slug DeFiLlama's own frontend uses (confirmed live,
+                # 2026-09-08) -- the API and the public page share one slug.
+                "url": f"https://defillama.com/protocol/{p}",
+            }
         chains = _guarded_get("https://api.llama.fi/v2/chains").json()
         for c in chains:
             if isinstance(c, dict) and (c.get("name") or "").lower() == "algorand":
-                return {"chain": "Algorand", "tvl_usd": c.get("tvl"), "source": "DeFiLlama"}
+                return {
+                    "chain": "Algorand",
+                    "tvl_usd": c.get("tvl"),
+                    "source": "DeFiLlama",
+                    "url": "https://defillama.com/chain/Algorand",
+                }
         return {"chain": "Algorand", "error": "Algorand not present in DeFiLlama chains"}
     except Exception as exc:
         return {"protocol": p or "algorand-chain", "error": str(exc)[:200]}
@@ -1960,6 +1988,8 @@ def _tool_lookup_asset_market_data(asset_ids: str) -> dict[str, Any]:
             "market_cap_usd": r.get("market_cap"),
             "tvl_usd": r.get("tvl"),
             "rank": r.get("rank"),
+            # Vestige's own per-asset page (confirmed live 2026-09-08).
+            "url": f"https://vestige.fi/asset/{r.get('id')}" if r.get("id") else "",
         }
         for r in results
     ]
@@ -2055,6 +2085,7 @@ def _tool_get_defi_tvl_history(protocol: str, months: int = 24) -> dict[str, Any
             "peak_tvl_usd": max(values),
             "current_tvl_usd": values[-1],
             "source": "DeFiLlama",
+            "url": f"https://defillama.com/protocol/{p}",
         }
     except Exception as exc:
         return {"protocol": p, "error": str(exc)[:200]}
@@ -2092,7 +2123,14 @@ def _tool_search_nfd_directory(name: str = "", address: str = "") -> dict[str, A
                 "found": True,
                 "owner": data.get("owner"),
                 "deposit_account": data.get("depositAccount"),
+                # The NFD OWNER's self-declared website (a project's own
+                # homepage, if they set one) -- NOT a citation for the NFD
+                # lookup itself. See nfd_profile_url below for that.
                 "url": (data.get("properties") or {}).get("userDefined", {}).get("url"),
+                # The NFD's own profile page (confirmed live 2026-09-08:
+                # app.nf.domains/name/<name> is a real route, distinct from
+                # a bogus-path 404) -- the actual citation for this lookup.
+                "nfd_profile_url": f"https://app.nf.domains/name/{data.get('name', slug)}",
                 "time_created": data.get("timeCreated"),
                 # Cryptographically verified by the NFD owner, not self-reported
                 # free text -- absence of a field means not verified, never
@@ -2115,12 +2153,14 @@ def _tool_search_nfd_directory(name: str = "", address: str = "") -> dict[str, A
         entry = data.get(address) if isinstance(data, dict) else None
         if not entry:
             return {"address": address, "found": False}
+        name = entry.get("name")
         return {
             "address": address,
             "found": True,
-            "name": entry.get("name"),
+            "name": name,
             "state": entry.get("state"),
             "expired": entry.get("expired"),
+            "nfd_profile_url": f"https://app.nf.domains/name/{name}" if name else "",
         }
     except Exception as exc:
         return {"error": str(exc)[:200]}
@@ -2270,6 +2310,9 @@ def _tool_app_store_metrics(term: str = "") -> dict[str, Any]:
             "rating_count": r.get("userRatingCount"),
             "average_rating": r.get("averageUserRating"),
             "current_version_rating_count": r.get("userRatingCountForCurrentVersion"),
+            # The App Store listing itself -- iTunes Search API already
+            # returns this per result, just never passed through before.
+            "url": r.get("trackViewUrl"),
         }
         for r in (data.get("results") or [])
         if isinstance(r, dict)
@@ -2328,6 +2371,10 @@ def _tool_package_download_stats(registry: str = "", package: str = "") -> dict[
                 "downloads_last_week": week.json().get("downloads"),
                 "downloads_last_month": month.json().get("downloads"),
                 "source": "npmjs.org",
+                # "source" above names the STATS provider (npmjs.org's own
+                # download-count API), not a clickable citation -- this is
+                # the actual package page (confirmed live 2026-09-08).
+                "url": f"https://www.npmjs.com/package/{pkg}",
             }
         resp = _guarded_get(f"https://pypistats.org/api/packages/{encoded}/recent")
         if resp.status_code == 404:
@@ -2341,6 +2388,7 @@ def _tool_package_download_stats(registry: str = "", package: str = "") -> dict[
             "downloads_last_week": data.get("last_week"),
             "downloads_last_month": data.get("last_month"),
             "source": "pypistats.org",
+            "url": f"https://pypi.org/project/{pkg}/",
         }
     except Exception as exc:
         return {"registry": reg, "package": pkg, "error": str(exc)[:200]}

@@ -23,33 +23,64 @@ import re
 from typing import Any
 from urllib.parse import urlparse
 
-# Research tools whose results represent a page the model actually retrieved.
-_FETCH_TOOLS = {"fetch_url", "fetch_url_safe"}
-# Tools that only return candidate hits (title/url/snippet) the model may not
-# have actually opened — used for the narrower cited-domain backfill only.
-_SEARCH_TOOLS = {"search_web"}
+# Research tools whose results represent ONE page/record the model actually
+# retrieved, mapped to the result-dict field holding its citable url. "url"
+# for almost all of them; search_nfd_directory is the one exception, its own
+# "url" field being the NFD OWNER's self-declared site, not a citation for
+# the lookup itself (see that tool's own docstring) -- nfd_profile_url is.
+# 2026-09-08: extended past fetch_url/search_web to every other research
+# tool that returns a real per-fact URL -- same "trust the number, no way
+# to click through and check it" gap chain_entity_gate.py's 'app' entity
+# kind fix closed for on-chain citations the same day. On-chain facts get
+# that module's inline auto-linking instead of this Sources-block backfill
+# (a better-fitting mechanism for an entity id mentioned in prose); this
+# backfill is for whole external pages/records a tool fetched.
+_FETCH_TOOLS: dict[str, str] = {
+    "fetch_url": "url",
+    "fetch_url_safe": "url",
+    "github_activity": "url",
+    "get_defi_tvl": "url",
+    "get_defi_tvl_history": "url",
+    "package_download_stats": "url",
+    "search_nfd_directory": "nfd_profile_url",
+}
+# Tools that only return candidate hits (several items with their own
+# label/url) the model may not have actually used -- used for the narrower
+# cited-domain backfill only. (result list key, ordered label-field
+# fallbacks) per tool: search_x's posts have no "title", only "text"; the
+# rest name their own item shape.
+_SEARCH_TOOL_SHAPES: dict[str, tuple[str, tuple[str, ...]]] = {
+    "search_web": ("results", ("title",)),
+    "search_x": ("posts", ("text",)),
+    "app_store_metrics": ("results", ("app_name",)),
+    "lookup_asset_market_data": ("assets", ("name", "ticker")),
+}
 _SOURCES_HEADING_RE = re.compile(r"(?im)^#{1,6}\s*(sources?|references?)\b")
 _LINK_URL_RE = re.compile(r"\]\((https?://[^\s)]+)\)")
 _MAX_SOURCES = 12
 
 
 def fetched_sources(trace: list[dict]) -> list[tuple[str, str]]:
-    """(url, label) for each successfully fetched research URL, deduped in order.
+    """(url, label) for each successfully fetched/looked-up research source, deduped in order.
 
-    A successful fetch_url result is a dict carrying the (possibly
-    redirect-resolved) "url" and no "error"; we prefer its page title as the
-    link label, falling back to the host.
+    A successful result is a dict with no "error", carrying its citable url
+    under whichever field _FETCH_TOOLS names for that tool (almost always
+    "url"); we prefer its title field as the link label, falling back to the
+    host.
     """
     out: list[tuple[str, str]] = []
     seen: set[str] = set()
     for entry in trace:
-        if not isinstance(entry, dict) or entry.get("tool") not in _FETCH_TOOLS:
+        if not isinstance(entry, dict):
+            continue
+        url_field = _FETCH_TOOLS.get(entry.get("tool"))
+        if url_field is None:
             continue
         result = entry.get("result")
         if not isinstance(result, dict) or result.get("error"):
             continue
         args = entry.get("arguments") if isinstance(entry.get("arguments"), dict) else {}
-        url = str(result.get("url") or args.get("url") or "").strip()
+        url = str(result.get(url_field) or args.get("url") or "").strip()
         if not url.startswith(("http://", "https://")) or url in seen:
             continue
         seen.add(url)
@@ -59,23 +90,32 @@ def fetched_sources(trace: list[dict]) -> list[tuple[str, str]]:
 
 
 def _search_result_sources(trace: list[dict]) -> list[tuple[str, str]]:
-    """(url, label) for every search_web hit, deduped in order. Unfiltered — callers must narrow this down (see cited-domain backfill below); most search hits are never actually used by the model."""
+    """(url, label) for every search-shaped tool hit, deduped in order. Unfiltered — callers must narrow this down (see cited-domain backfill below); most search hits are never actually used by the model."""
     out: list[tuple[str, str]] = []
     seen: set[str] = set()
     for entry in trace:
-        if not isinstance(entry, dict) or entry.get("tool") not in _SEARCH_TOOLS:
+        if not isinstance(entry, dict):
             continue
+        shape = _SEARCH_TOOL_SHAPES.get(entry.get("tool"))
+        if shape is None:
+            continue
+        list_key, label_keys = shape
         result = entry.get("result")
         if not isinstance(result, dict):
             continue
-        for item in result.get("results") or []:
+        for item in result.get(list_key) or []:
             if not isinstance(item, dict):
                 continue
             url = str(item.get("url") or "").strip()
             if not url.startswith(("http://", "https://")) or url in seen:
                 continue
             seen.add(url)
-            label = (str(item.get("title") or "").strip() or urlparse(url).netloc)[:120]
+            label = ""
+            for key in label_keys:
+                label = str(item.get(key) or "").strip()
+                if label:
+                    break
+            label = (label or urlparse(url).netloc)[:120]
             out.append((url, label))
     return out
 
