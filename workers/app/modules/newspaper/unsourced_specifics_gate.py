@@ -20,6 +20,16 @@ fabricated benchmarks / authority-phrasing). This one generalises quote_gate's
   2. NAMED partners/backers — a proper-noun name introduced by a partnership /
      backing trigger ("partners with", "backed by", "investors include", …).
      The name must appear in the ground corpus.
+  3. RECORD-attributed values — a sentence that attributes a value to a
+     specific fetched record ("the note field carries...", "ARC-69 metadata
+     shows...") must have every figure in it appear in what one of the
+     record-reading tools actually returned, not just anywhere in the wider
+     corpus. Root-caused 2026-09-09 (AlgoChess incident): a fabricated
+     on-chain settlement-note "rating" claim was invisible to both the LLM
+     rubric (title+body only, no trace access) and this gate's other checks
+     ("rating" isn't a tracked traction noun) — a record-attributed value has
+     no traction/funding noun to key off, so it needs its own trigger-phrase
+     + tool-scoped check.
 
 Precision levers (this is why it ships read-only first, to tune on real data):
 - A bare number is only a candidate if a traction/funding noun sits within a few
@@ -192,20 +202,88 @@ _BACKWARD_NOUN_LINKERS = _NOUN_MODIFIERS | _DETERMINERS
 
 _FOLD_RE = re.compile(r"[^a-z0-9]+")
 
+# Tools whose result is a specific fetched RECORD (a transaction's note field,
+# an ARC-69 metadata blob, an application's global state, ...) as opposed to a
+# live/aggregate market figure or the writer's own prose. A "record-attributed
+# value" claim ("the note field carries...") is only checkable against what
+# one of THESE tools actually returned -- never against page copy or
+# admin-supplied text, which is exactly the kind of external claim that must
+# never "confirm" a record read (root-caused 2026-09-09, AlgoChess incident:
+# a fabricated on-chain settlement-note "rating" claim slipped past every
+# check; the real note format carried no such field at all).
+_RECORD_TOOLS = frozenset(
+    {
+        "lookup_transaction_note",
+        "lookup_arc69_metadata",
+        "lookup_application",
+        "lookup_account_transactions",
+        "lookup_asset_transactions",
+        "fetch_url",
+        "search_crawled_pages",
+    }
+)
+
+# Phrases that mark a sentence as attributing a value to a specific fetched
+# record rather than making a general claim -- the exact words a writer uses
+# when citing what a record supposedly contains.
+_RECORD_ATTRIBUTION_RE = re.compile(
+    r"note field|transaction note|memo|settlement transaction|"
+    r"recorded on[- ]?chain|on-chain record|arc-?69|metadata|logged in|stored in",
+    re.I,
+)
+_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+")
+# A record-attributed claim is only checkable when it's a real multi-digit
+# figure (a rating, a count, an amount) -- not a version string or single
+# digit dropped into the same sentence by coincidence.
+_RECORD_NUM_RE = re.compile(r"\d{1,3}(?:,\d{3})+|\d{3,}")
+
 
 def _fold(text: str) -> str:
     return _FOLD_RE.sub(" ", (text or "").lower()).strip()
 
 
 def _ground_corpus(trace: list[dict] | None, extra_texts: list[str]) -> str:
+    from app.modules.gatekeeper.fact_align import grounding_corpus_text
+
+    return grounding_corpus_text(trace, extra_texts)
+
+
+def _record_tool_corpus(trace: list[dict] | None) -> str:
+    """Ground corpus scoped ONLY to _RECORD_TOOLS results — deliberately excludes extra_texts (page copy, admin-supplied text) and every other tool's output, so a page's own prose can never "confirm" what a specific fetched record actually contains."""
+    from app.modules.gatekeeper.fact_align import grounding_entries
+
     parts: list[str] = []
-    for entry in trace or ():
+    for tool, result in grounding_entries(trace):
+        if tool not in _RECORD_TOOLS:
+            continue
         try:
-            parts.append(json.dumps(entry))
+            parts.append(json.dumps({"tool": tool, "result": result}))
         except (TypeError, ValueError):
-            parts.append(str(entry))
-    parts.extend(t for t in extra_texts if t)
-    return " ".join(parts)
+            parts.append(f"{tool} {result}")
+    return _fold(" ".join(parts).replace(",", ""))
+
+
+def _record_findings(body: str, record_ctx: str) -> list[dict[str, str]]:
+    """Sentence-scoped: a sentence that attributes a value to a specific fetched record (a transaction note, ARC-69 metadata, ...) must have every ≥3-digit figure in it appear verbatim in that record tool's own result — not just anywhere in the wider ground corpus (research digest prose, admin sources, page copy), which is exactly the kind of external claim that must never "confirm" a record read."""
+    out: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for sentence in _SENTENCE_SPLIT_RE.split(body):
+        if not _RECORD_ATTRIBUTION_RE.search(sentence):
+            continue
+        for m in _RECORD_NUM_RE.finditer(sentence):
+            raw = m.group(0)
+            digits = raw.replace(",", "")
+            # A bare 4-digit year (no comma grouping) is a date, not a
+            # record value, even inside a record-attribution sentence.
+            if "," not in raw and re.fullmatch(r"(?:19|20)\d\d", digits):
+                continue
+            if digits in seen:
+                continue
+            if digits in set(_DIGIT_RUN_RE.findall(record_ctx)):
+                continue
+            seen.add(digits)
+            out.append({"kind": "record", "claim": raw, "context": ""})
+    return out
 
 
 def _tokens(text: str) -> list[str]:
@@ -412,6 +490,7 @@ def find_unsourced_specifics(
     findings += _funding_findings(body, corpus_ctx)
     findings += _percent_findings(body, corpus_ctx)
     findings += _named_findings(body, corpus_folded)
+    findings += _record_findings(body, _record_tool_corpus(trace))
     return findings
 
 

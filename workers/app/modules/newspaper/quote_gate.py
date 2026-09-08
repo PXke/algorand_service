@@ -17,7 +17,6 @@ legitimate uses, too little verbatim claim.
 
 from __future__ import annotations
 
-import json
 import logging
 import re
 from typing import Any
@@ -56,14 +55,9 @@ def _in_any_span(pos: int, spans: list[tuple[int, int]]) -> bool:
 
 
 def _ground_corpus(trace: list[dict] | None, extra_texts: list[str]) -> str:
-    parts: list[str] = []
-    for entry in trace or ():
-        try:
-            parts.append(json.dumps(entry))
-        except (TypeError, ValueError):
-            parts.append(str(entry))
-    parts.extend(t for t in extra_texts if t)
-    return _fold(" ".join(parts))
+    from app.modules.gatekeeper.fact_align import grounding_corpus_text
+
+    return _fold(grounding_corpus_text(trace, extra_texts))
 
 
 def unquote_ungrounded_quotes(

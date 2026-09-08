@@ -255,3 +255,32 @@ def test_admin_supplied_source_trace_entry_grounds_a_figure_present_nowhere_else
     r = fa.numeric_entailment_score(trace_text, article)
     assert r.ungrounded == ()
     assert r.score == 1.0
+
+
+def test_grounding_corpus_excludes_review_draft_self_grounding() -> None:
+    """Root-cause regression (2026-09-09, AlgoChess incident).
+
+    review_draft's stored result is the grader's own verdict, whose issues
+    list quotes the exact claim it just flagged as ungrounded. A pass-1
+    finding must not ground itself on a pass-2 check via the shared grounding
+    corpus -- grounding_entries/grounding_corpus_text must drop every
+    review_draft trace entry, keeping only real observed evidence.
+    """
+    trace = [
+        {"tool": "fetch_url", "arguments": {}, "result": {"body": "no rating mentioned"}},
+        {
+            "tool": "review_draft",
+            "arguments": {},
+            "result": {
+                "issues": [
+                    'unsourced specific: the figure "1,748" does not appear in your research'
+                ]
+            },
+        },
+    ]
+    entries = fa.grounding_entries(trace)
+    assert [tool for tool, _ in entries] == ["fetch_url"]
+
+    corpus = fa.grounding_corpus_text(trace)
+    assert "1,748" not in corpus
+    assert "no rating mentioned" in corpus

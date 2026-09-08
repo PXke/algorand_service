@@ -46,6 +46,21 @@ DEFAULT_RULES: tuple[CompletenessRule, ...] = (
         triggers=("incorporated", "registered company", "ltd", "inc.", "llc", "gmbh"),
         required_any=("query_corporate_registry",),
     ),
+    # Root-caused 2026-09-09 (AlgoChess incident): the article claimed a
+    # settlement transaction's note field carried player ratings the writer
+    # never actually looked up -- no record-reading tool was called at all.
+    # Companion to unsourced_specifics_gate's record-attributed-value check
+    # (which verifies the VALUE against the record once fetched); this rule
+    # catches the case where no record was fetched in the first place.
+    CompletenessRule(
+        name="record_read",
+        triggers=("note field", "transaction note", "memo"),
+        required_any=(
+            "lookup_transaction_note",
+            "lookup_account_transactions",
+            "lookup_arc69_metadata",
+        ),
+    ),
 )
 
 

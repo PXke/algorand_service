@@ -32,6 +32,26 @@ def test_domain_provenance_trigger_word_rule_removed() -> None:
     assert "domain_provenance" not in failed
 
 
+def test_record_claim_without_record_read_fails() -> None:
+    """Root-cause regression (2026-09-09, AlgoChess incident).
+
+    The article claimed a settlement transaction's note field carried player
+    ratings, but no record-reading tool was ever called.
+    """
+    src = "The transaction note field carries each player's rating before and after."
+    r = c.check_completeness(src, tool_trace='{"search_web": "..."}')
+    assert not r.passed
+    assert "record_read" in r.failed_rules
+
+
+def test_record_claim_with_record_read_passes() -> None:
+    """Passes once the trace shows a record-reading tool actually ran."""
+    src = "The transaction note field carries each player's rating before and after."
+    r = c.check_completeness(src, tool_trace='{"lookup_transaction_note": {"note": "..."}}')
+    assert r.passed
+    assert "record_read" not in r.failed_rules
+
+
 def test_named_persons_unscreened() -> None:
     """Lists named persons lacking a sanctions/PEP screen, empty once the trace shows one ran."""
     src = "Founder Jane Doe and CEO Mike Smith spoke."

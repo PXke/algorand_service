@@ -16,9 +16,50 @@ pipeline, so malformed text yields empty results, never an exception.
 
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
+from typing import Any
+
+# Tools whose trace entry is the model's OWN authored output, not evidence it
+# observed -- never a valid grounding anchor for anything. review_draft is the
+# deterministic grader's own verdict, appended to the trace by reference and
+# then read back by every later pass; its "result" is a review dict whose
+# `issues` list quotes the very claim it just flagged as ungrounded (e.g.
+# 'unsourced specific: the figure "1,000 issuers" does not appear...'), so
+# including it in the grounding corpus lets a flagged specific ground itself
+# on every subsequent check -- root-caused 2026-09-09 reading the code path
+# after a fabricated on-chain "rating" claim scored gk_factuality=0.98 with
+# zero flagged reasons on the article that actually invented it.
+MODEL_AUTHORED_TOOLS = frozenset({"review_draft"})
+
+
+def grounding_entries(trace: list[dict] | None) -> list[tuple[str, Any]]:
+    """(tool, result) for every trace entry that is real observed evidence -- excludes model-authored entries (see MODEL_AUTHORED_TOOLS) and drops each entry's `arguments` (what the model asked for, not what it was told), which the grounding corpus must never treat as an anchor either."""
+    out: list[tuple[str, Any]] = []
+    for entry in trace or ():
+        if not isinstance(entry, dict):
+            continue
+        tool = str(entry.get("tool", ""))
+        if tool in MODEL_AUTHORED_TOOLS:
+            continue
+        out.append((tool, entry.get("result")))
+    return out
+
+
+def grounding_corpus_text(
+    trace: list[dict] | None, extra_texts: list[str] | tuple[str, ...] = ()
+) -> str:
+    """Joined-string form of grounding_entries, for callers (the deterministic gates) that scan a flat corpus rather than iterating tool/result pairs. `extra_texts` (compose input, admin-supplied source text) is appended unfiltered -- it is caller-supplied context, not a trace entry, so MODEL_AUTHORED_TOOLS does not apply to it."""
+    parts: list[str] = []
+    for tool, result in grounding_entries(trace):
+        try:
+            parts.append(json.dumps({"tool": tool, "result": result}))
+        except (TypeError, ValueError):
+            parts.append(f"{tool} {result}")
+    parts.extend(t for t in extra_texts if t)
+    return " ".join(parts)
 
 
 def _today() -> date:

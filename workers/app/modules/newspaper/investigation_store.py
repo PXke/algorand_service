@@ -40,8 +40,25 @@ def load_investigation_trace(service_id: str, *, limit: int | None = None) -> st
 
     Reads the evidence trail stored by ``store_investigation_findings`` (keyed by
     service_id == the compose-time source_url). One line per tool call:
-    ``tool(arguments) -> result_json``. Best-effort: returns "" on any error so
+    ``tool -> result_json``. Best-effort: returns "" on any error so
     the gate degrades gracefully rather than aborting a publish.
+
+    Excludes ``review_draft`` rows and drops ``arguments`` entirely -- neither
+    is observed evidence. Root-caused 2026-09-09: review_draft's stored
+    result is the grader's own verdict, whose `issues` list quotes the exact
+    claim it just flagged as ungrounded (e.g. 'unsourced specific: the figure
+    "1,000 issuers" does not appear...'); a flagged claim's own citation text
+    then grounds itself on the next check. A fabricated on-chain "rating"
+    claim scored gk_factuality=0.98 with zero flagged reasons on the article
+    that invented it, via this exact path -- numeric_entailment_score
+    (fact_align.py) consumes this function's return value directly, and the
+    stored review_draft rows were feeding it right back the number it was
+    trying to catch. ``arguments`` is what the model asked for, not what it
+    was told; check_completeness (this trace's other consumer) only checks
+    for a tool NAME substring, never arguments, so dropping them is safe --
+    see app.modules.gatekeeper.fact_align.grounding_entries for the same
+    exclusion applied to the in-memory (same-compose) trace these gates
+    also read.
 
     ``limit`` defaults to ``config.INVESTIGATION_TRACE_MAX_ENTRIES`` -- must
     stay >= whatever ``store_investigation_findings`` actually wrote, or the
@@ -54,13 +71,16 @@ def load_investigation_trace(service_id: str, *, limit: int | None = None) -> st
         from app.core.cassandra import get_cassandra_session
         from app.core.config import INVESTIGATION_TRACE_MAX_ENTRIES
         from app.core.statements import InvestigationStmts
+        from app.modules.gatekeeper.fact_align import MODEL_AUTHORED_TOOLS
 
         session = get_cassandra_session()
         rows = session.execute(
             InvestigationStmts.LIST, (service_id, limit or INVESTIGATION_TRACE_MAX_ENTRIES)
         )
         lines = [
-            f"{r.tool}({r.arguments}) -> {r.result_json}" for r in rows if getattr(r, "tool", None)
+            f"{r.tool} -> {r.result_json}"
+            for r in rows
+            if getattr(r, "tool", None) and r.tool not in MODEL_AUTHORED_TOOLS
         ]
         return "\n".join(lines)
     except Exception:

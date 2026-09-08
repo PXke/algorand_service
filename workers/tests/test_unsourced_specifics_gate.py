@@ -8,7 +8,11 @@ from app.modules.newspaper import unsourced_specifics_gate as gate
 
 
 def _trace(*texts: object) -> list[dict]:
-    return [{"role": "tool", "name": "fetch_url", "content": t} for t in texts]
+    return [{"tool": "fetch_url", "arguments": {}, "result": t} for t in texts]
+
+
+def _record_trace(tool: str, result: object) -> list[dict]:
+    return [{"tool": tool, "arguments": {}, "result": result}]
 
 
 # --------------------------------------------------------------------------- #
@@ -271,6 +275,97 @@ def test_percent_of_noun_still_crosses_the_determiner() -> None:
         if f["kind"] == "percent"
     }
     assert "60%" in pct
+
+
+# --------------------------------------------------------------------------- #
+# record-attributed values (Step B, 2026-09-09 AlgoChess incident)
+# --------------------------------------------------------------------------- #
+def test_flags_fabricated_record_attributed_rating() -> None:
+    """The exact AlgoChess incident shape.
+
+    A settlement transaction's note field is claimed to carry player ratings
+    it never actually contained.
+    """
+    trace = _record_trace(
+        "lookup_transaction_note", {"note": "AC1|duel|0-1|timeout|<addr1>|<addr2>|<moves>"}
+    )
+    body = (
+        "The note field carries each player's rating before and after the match — "
+        "one falling from 1748 to 1643, the other rising from 1666 to 1727."
+    )
+    claims = {
+        f["claim"] for f in gate.find_unsourced_specifics(body, trace) if f["kind"] == "record"
+    }
+    assert {"1748", "1643", "1666", "1727"} <= claims
+
+
+def test_grounded_record_value_passes() -> None:
+    """A record-attributed figure that genuinely appears in the record tool's own result is not flagged."""
+    trace = _record_trace("lookup_arc69_metadata", {"attributes": {"power_level": 4200}})
+    body = "The ARC-69 metadata shows the item is at power level 4200."
+    assert [f for f in gate.find_unsourced_specifics(body, trace) if f["kind"] == "record"] == []
+
+
+def test_record_check_ignores_page_copy_and_admin_text() -> None:
+    """A record-attributed claim must be checkable against the record tool's OWN result only -- page copy or admin-supplied text must never "confirm" what a specific record actually contains."""
+    trace = _record_trace("lookup_transaction_note", {"note": "no rating field present"})
+    body = "The transaction note shows a rating of 1748."
+    findings = gate.find_unsourced_specifics(
+        body, trace, extra_texts=["Some unrelated page mentions the number 1748 elsewhere."]
+    )
+    assert any(f["kind"] == "record" and f["claim"] == "1748" for f in findings)
+
+
+def test_record_check_ignores_non_attribution_sentences() -> None:
+    """A sentence with no record-attribution phrase is out of scope for this check, even with an ungrounded number."""
+    trace = _record_trace("lookup_transaction_note", {"note": "nothing numeric here"})
+    body = "The project has grown a lot this year, reaching new heights."
+    assert [f for f in gate.find_unsourced_specifics(body, trace) if f["kind"] == "record"] == []
+
+
+def test_record_check_skips_bare_years() -> None:
+    """A bare 4-digit year inside a record-attribution sentence is a date, not a record value."""
+    trace = _record_trace("lookup_transaction_note", {"note": "no year mentioned"})
+    body = "The transaction memo references the 2019 protocol upgrade."
+    assert [f for f in gate.find_unsourced_specifics(body, trace) if f["kind"] == "record"] == []
+
+
+def test_flagged_specific_does_not_ground_itself_on_a_later_pass() -> None:
+    r"""Root-cause regression (2026-09-09, AlgoChess incident).
+
+    llm_compose._record_grade appends the pass-1 review_draft verdict to the
+    SAME trace list a pass-2 check reads -- that verdict's issues list
+    quotes the exact figure it just flagged (e.g. 'the figure "1,748" does
+    not appear...'). Before the fix, this quoted citation text grounded the
+    claim on pass 2, so a hard-enforcement hold could never actually fire on
+    anything flagged even once earlier. It must still flag on pass 2.
+    """
+    trace: list = [{"tool": "fetch_url", "arguments": {}, "result": {"body": "no user data"}}]
+    body = "It has grown to 1,748 users."
+
+    pass1 = gate.find_unsourced_specifics(body, trace)
+    claims = {f["claim"] for f in pass1}
+    assert "1,748" in claims
+
+    # Simulate _record_grade: the pass-1 verdict is appended to the SAME trace,
+    # by reference, quoting the exact flagged figure in its issues list.
+    trace.append(
+        {
+            "tool": "review_draft",
+            "arguments": {},
+            "result": {
+                "issues": [
+                    f'unsourced specific: the figure "{f["claim"]}" does not appear '
+                    "in your research"
+                    for f in pass1
+                ]
+            },
+        }
+    )
+
+    pass2 = gate.find_unsourced_specifics(body, trace)
+    pass2_claims = {f["claim"] for f in pass2}
+    assert "1,748" in pass2_claims
 
 
 def test_clean_body_no_findings() -> None:

@@ -34,7 +34,6 @@ citation itself.
 
 from __future__ import annotations
 
-import json
 import logging
 import re
 from typing import Any
@@ -99,14 +98,9 @@ def _is_valid_address(addr: str) -> bool:
 
 
 def _grounding_corpus(trace: list[dict] | None, extra_texts: tuple[str, ...] | list[str]) -> str:
-    parts: list[str] = []
-    for entry in trace or ():
-        try:
-            parts.append(json.dumps(entry))
-        except (TypeError, ValueError):
-            parts.append(str(entry))
-    parts.extend(t for t in extra_texts if isinstance(t, str))
-    return "\n".join(parts)
+    from app.modules.gatekeeper.fact_align import grounding_corpus_text
+
+    return grounding_corpus_text(trace, [t for t in extra_texts if isinstance(t, str)])
 
 
 def _classify_lookup(data: dict[str, Any]) -> str:

@@ -168,7 +168,52 @@ def test_load_investigation_trace_reads_past_the_old_25_row_limit(
 
     trace = load_investigation_trace("svc")
     assert captured_limit == [200]
-    assert trace.count("fetch_url(") == 200
+    assert trace.count("fetch_url -> ") == 200
+
+
+def test_load_investigation_trace_excludes_review_draft_rows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Root-cause regression (2026-09-09).
+
+    A review_draft row's stored result is the grader's own verdict, whose
+    issues list quotes the exact claim it just flagged as ungrounded -- if it
+    were included here, a flagged specific would ground itself on the next
+    check via numeric_entailment_score, which consumes this function's
+    return value directly. review_draft rows must never appear in the
+    reconstructed trace.
+    """
+
+    class _Row:
+        def __init__(self, tool: str, result_json: str) -> None:
+            self.tool = tool
+            self.arguments = "{}"
+            self.result_json = result_json
+
+    rows = [
+        _Row("fetch_url", '{"body": "real evidence"}'),
+        _Row(
+            "review_draft",
+            '{"issues": ["unsourced specific: the figure \\"1,748\\" does not appear..."]}',
+        ),
+    ]
+
+    class _FakeSession:
+        def prepare(self, cql: str) -> str:
+            return cql
+
+        def execute(self, _stmt: object, _params: tuple) -> list[_Row]:
+            return rows
+
+    import app.core.cassandra as c
+
+    monkeypatch.setattr(c, "get_cassandra_session", lambda: _FakeSession())
+    c.prepare_cached.cache_clear()
+
+    trace = load_investigation_trace("svc")
+    assert "fetch_url -> " in trace
+    assert "review_draft" not in trace
+    assert "1,748" not in trace
 
 
 class _Row:
