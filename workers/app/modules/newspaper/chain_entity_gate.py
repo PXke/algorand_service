@@ -3,9 +3,15 @@
 Root-caused 2026-07-17 (AlgoGlyph, deleted article 9eb96392): the writer cited
 a real asset and creator address but fabricated the arithmetic on top of them
 ("50.16% of supply" when the chain says 25.08%). Owner's insight: if every
-cited ASA id / wallet address / txid HAD to resolve against the chain and got
-rendered as an explorer link, a wrong or invented one becomes mechanically
-detectable — and a reader can always click through to the ground truth.
+cited ASA id / wallet address / txid / application id HAD to resolve against
+the chain and got rendered as an explorer link, a wrong or invented one
+becomes mechanically detectable — and a reader can always click through to
+the ground truth.
+
+Application (smart contract) ids were missing entirely until 2026-09-08
+(root-caused on the AlgoChess review: a story built entirely from
+lookup_application reads had zero auto-linkable citations, because this
+gate had no concept of an app id at all).
 
 Policy per entity found in the body:
 - Fails local validation (58-char address with a bad checksum): definitionally
@@ -43,6 +49,12 @@ _TXID_RE = re.compile(r"\b[A-Z2-7]{52}\b")
 # Asset ids only count when the prose says they are one — bare numbers are
 # far too ambiguous (block heights, dollar amounts, round numbers).
 _ASSET_CTX_RE = re.compile(r"(?i)\b(?:asset(?:[\s-]+id)?|asa)\s*[#:]?\s*(\d{3,15})\b")
+# Application (smart contract) ids, same "only when the prose says so" rule
+# as assets above -- 2026-09-08, root-caused on the AlgoChess review: a
+# story built entirely from lookup_application reads (escrow, distributor,
+# house contracts) had zero auto-linkable citations, because this gate had
+# no concept of an application id at all, only asset/address/txid.
+_APP_CTX_RE = re.compile(r"(?i)\b(?:app(?:lication)?(?:[\s-]+id)?)\s*[#:]?\s*(\d{3,15})\b")
 # Explorer links the writer already emitted — their ids get verified too, and
 # a link to a nonexistent entity is delinked (the id itself is handled by the
 # entity rules above). Includes algoexplorer.io (root-caused live 2026-08-10,
@@ -59,7 +71,7 @@ _EXPLORER_URL_RE = re.compile(
     r"https?://(?:www\.)?"
     r"(allo\.info|lora\.algokit\.io/(?:mainnet|testnet)|explorer\.perawallet\.app"
     r"|algoexplorer\.io|testnet\.algoexplorer\.io)"
-    r"/(asset|account|address|tx|transaction)s?/([A-Za-z0-9]+)",
+    r"/(asset|account|address|tx|transaction|application)s?/([A-Za-z0-9]+)",
     re.IGNORECASE,
 )
 _MD_LINK_RE = re.compile(r"\[([^\]]*)\]\((https?://[^)\s]+)\)")
@@ -76,6 +88,7 @@ _EXPLORER_KIND = {
     "address": "address",
     "tx": "txid",
     "transaction": "txid",
+    "application": "app",
 }
 
 
@@ -125,6 +138,11 @@ def _lookup_status(kind: str, value: str) -> str:
         return _two_network_status(
             _algod_get(f"/v2/assets/{value}"), lambda: _testnet_idx_get(f"/v2/assets/{value}")
         )
+    if kind == "app":
+        return _two_network_status(
+            _algod_get(f"/v2/applications/{value}"),
+            lambda: _testnet_idx_get(f"/v2/applications/{value}"),
+        )
     if kind == "txid":
         return _two_network_status(
             _mainnet_idx_get(f"/v2/transactions/{value}"),
@@ -158,8 +176,8 @@ def _entity_status(
 def find_chain_entities(body: str) -> list[tuple[str, str]]:
     """Unique (kind, value) entities cited in the body, in first-seen order.
 
-    Kinds: 'address', 'txid', 'asset'. Explorer-link ids are included under
-    their entity kind.
+    Kinds: 'address', 'txid', 'asset', 'app'. Explorer-link ids are included
+    under their entity kind.
     """
     seen: set[tuple[str, str]] = set()
     ordered: list[tuple[str, str]] = []
@@ -176,6 +194,8 @@ def find_chain_entities(body: str) -> list[tuple[str, str]]:
         _add("txid", m.group(0))
     for m in _ASSET_CTX_RE.finditer(body):
         _add("asset", m.group(1))
+    for m in _APP_CTX_RE.finditer(body):
+        _add("app", m.group(1))
     for m in _EXPLORER_URL_RE.finditer(body):
         kind = _EXPLORER_KIND.get(m.group(2).lower())
         if kind:
@@ -217,8 +237,11 @@ def unverifiable_chain_entities(
             continue  # vouched by research; linking is the final gate's job
         status = _entity_status(kind, value, checked=checked, budget=budget)
         if status == "missing":
-            label = "asset id" if kind == "asset" else "transaction"
-            tool = "lookup_asset or lookup_asset_by_name" if kind == "asset" else "testnet_lookup"
+            label = {"asset": "asset id", "app": "application id"}.get(kind, "transaction")
+            tool = {
+                "asset": "lookup_asset or lookup_asset_by_name",
+                "app": "lookup_application",
+            }.get(kind, "testnet_lookup")
             issues.append(
                 f"on-chain citation: {label} {value} does not exist on Algorand "
                 f"mainnet or testnet — verify the real one with {tool} and "
@@ -240,9 +263,16 @@ def _in_spans(pos: int, end: int, spans: list[tuple[int, int]]) -> bool:
 
 def _explorer_url(kind: str, value: str, net: str) -> str:
     if net == "testnet":
-        path = {"asset": "asset", "address": "account", "txid": "transaction"}[kind]
+        path = {
+            "asset": "asset",
+            "address": "account",
+            "txid": "transaction",
+            "app": "application",
+        }[kind]
         return f"https://lora.algokit.io/testnet/{path}/{value}"
-    path = {"asset": "asset", "address": "account", "txid": "tx"}[kind]
+    # allo.info confirmed live (2026-09-08): /application/<id> 200s, /app/<id>
+    # 404s -- it follows algod's own vocabulary here, not a shorthand.
+    path = {"asset": "asset", "address": "account", "txid": "tx", "app": "application"}[kind]
     return f"https://allo.info/{path}/{value}"
 
 

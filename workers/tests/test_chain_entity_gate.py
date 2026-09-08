@@ -193,6 +193,47 @@ def test_algoglyph_incident_regression(monkeypatch: pytest.MonkeyPatch) -> None:
     assert f"[{_REAL_ADDR}](https://allo.info/account/{_REAL_ADDR})" in out["body"]
 
 
+def test_find_chain_entities_extracts_contextual_application_ids() -> None:
+    """Extracts an application id when the prose names it as one, both 'app' and 'application' phrasing, but not a bare number with no context."""
+    body = (
+        "The escrow application 741234567 holds the pot. "
+        "App id 552211998 is the distributor contract. "
+        "The number 741234567 alone, unlabeled, appeared once more above."
+    )
+    entities = find_chain_entities(body)
+    assert ("app", "741234567") in entities
+    assert ("app", "552211998") in entities
+
+
+def test_missing_application_id_flagged_for_revision(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Flags an application id that doesn't exist on-chain as an issue needing revision, naming lookup_application as the tool to verify with."""
+    monkeypatch.setattr(chain_entity_gate, "_lookup_status", lambda _kind, _value: "missing")
+    body = "Application 999999999999 is the escrow contract."
+    issues = unverifiable_chain_entities(body, [])
+    assert any(
+        "application id 999999999999 does not exist" in i and "lookup_application" in i
+        for i in issues
+    )
+
+
+def test_verified_application_auto_linked_to_explorer(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A mainnet-verified application id is auto-linked to its allo.info explorer page -- the AlgoChess review's own gap (2026-09-08): a story built entirely from lookup_application reads had nothing to auto-link before this kind existed."""
+    monkeypatch.setattr(chain_entity_gate, "_lookup_status", lambda _kind, _value: "mainnet")
+    payload = {"body": "The house contract, application 741234567, holds the Stockfish reserve."}
+    out = link_and_verify_chain_entities(payload, [])
+    assert "[741234567](https://allo.info/application/741234567)" in out["body"]
+    assert out["_chain_entities_linked"] == [
+        {"kind": "app", "value": "741234567", "net": "mainnet"}
+    ]
+
+
+def test_verified_application_auto_linked_on_testnet() -> None:
+    """A testnet-only application id links to Lora, not allo.info."""
+    payload = {"body": "Application 741234567 is a testnet deployment."}
+    out = link_and_verify_chain_entities(payload, [], checked={("app", "741234567"): "testnet"})
+    assert "[741234567](https://lora.algokit.io/testnet/application/741234567)" in out["body"]
+
+
 def test_gate_disabled_is_a_noop(monkeypatch: pytest.MonkeyPatch) -> None:
     """Leaves the body unchanged when the chain-entity gate is disabled."""
     monkeypatch.setattr("app.core.config.CHAIN_ENTITY_GATE_ENABLED", False, raising=False)
