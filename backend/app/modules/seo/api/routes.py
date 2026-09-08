@@ -49,6 +49,58 @@ _RSS_CACHE_TTL = 900
 # count so the file doesn't silently start truncating as the corpus grows.
 _LLMS_FULL_CONTENT_LIMIT = 500
 _LLMS_FULL_CACHE_TTL = 3600
+# Matches settings.ecosystem_list_max_results -- the registry is nowhere
+# near sitemap-chunking scale (design doc target: 100-200 entries at
+# launch), so one flat urlset at this cap is plenty.
+_REGISTRY_SSR_LIMIT = 200
+
+
+def _request_host(request: Request) -> str:
+    return (request.url.host or "").lower()
+
+
+def _is_registry_host(request: Request) -> bool:
+    """True when this request arrived on algorand-registry.pxke.me -- see home()/robots()/sitemap_root(), the shared handlers this dispatches out of. Computed fresh per request (not a module-level constant) so tests can monkeypatch settings.registry_public_site_url."""
+    from urllib.parse import urlparse
+
+    return _request_host(request) == (urlparse(settings.registry_public_site_url).hostname or "")
+
+
+def _is_x402_host(request: Request) -> bool:
+    """True when this request arrived on x402.pxke.me -- x402 has no SSR document routes yet, only robots()/sitemap_root() branch on this."""
+    from urllib.parse import urlparse
+
+    return _request_host(request) == (urlparse(settings.x402_public_site_url).hostname or "")
+
+
+def _cached_registry_sitemap_xml() -> str:
+    """Build the registry's sitemap once per TTL -- same cache-key-per-product isolation as _cached_sitemap_build, so the two builds never collide."""
+    from app.core.cache import cached_json
+    from app.modules.ecosystem.stores.factory import get_project_store
+
+    def compute() -> dict[str, object]:
+        from algorand_shared.ecosystem_statements import ALL_CATEGORY_PARTITION
+
+        entries = get_project_store().list_by_category(
+            ALL_CATEGORY_PARTITION, limit=_REGISTRY_SSR_LIMIT
+        )
+        return {"xml": sitemap.build_registry_sitemap(entries)}
+
+    data = cached_json("seo:sitemap-build-registry", _SITEMAP_CACHE_TTL, compute)
+    return str(data["xml"])
+
+
+def _cached_x402_sitemap_xml() -> str:
+    """Build the x402 marketplace's sitemap once per TTL -- own cache key, isolated from the news and registry builds."""
+    from app.core.cache import cached_json
+    from app.modules.x402_directory.services.listing_service import ListingService
+
+    def compute() -> dict[str, object]:
+        listings = ListingService().search(limit=settings.x402_search_max_results)
+        return {"xml": sitemap.build_x402_sitemap(listings)}
+
+    data = cached_json("seo:sitemap-build-x402", _SITEMAP_CACHE_TTL, compute)
+    return str(data["xml"])
 
 
 def _cached_sitemap_build() -> sitemap.SitemapBuild:
@@ -82,12 +134,13 @@ def _doc_response(
     tracked_path: str | None = None,
     dedup_path: str | None = None,
     html_lang: str = "en",
+    dist_subdir: str = "frontend_web",
 ) -> Response:
-    """``tracked_path`` is what gets counted server-side (must be the CANONICAL path for an article — see _article_document). ``dedup_path`` is what the client-side beacon dedup marker gets, and must match ``window.location.pathname`` exactly, or the SPA boot's mismatch check fails open and fires a second, redundant beacon for the same load. These differ for a locale-prefixed article: canonical for counting, `/fr/...` for what the browser is actually at. Defaults to ``tracked_path`` for every other route, where the two are the same string."""
+    """``tracked_path`` is what gets counted server-side (must be the CANONICAL path for an article — see _article_document). ``dedup_path`` is what the client-side beacon dedup marker gets, and must match ``window.location.pathname`` exactly, or the SPA boot's mismatch check fails open and fires a second, redundant beacon for the same load. These differ for a locale-prefixed article: canonical for counting, `/fr/...` for what the browser is actually at. Defaults to ``tracked_path`` for every other route, where the two are the same string. ``dist_subdir`` selects which product's Vite build supplies the shell (see shell.render_document) -- the registry's SSR routes are the only caller that passes a non-default value."""
     head, body = parts
     if tracked_path:
         body = shell.ssr_track_snippet(dedup_path or tracked_path) + body
-    document = shell.render_document(head, body, html_lang=html_lang)
+    document = shell.render_document(head, body, html_lang=html_lang, dist_subdir=dist_subdir)
     if document is None:
         # Shell template not found (missing/So far unbuilt frontend). Still return
         # valid crawlable HTML so meta/OG/JSON-LD survive; the SPA can't boot from
@@ -266,7 +319,9 @@ news = NewsService()
 
 
 def home(request: Request) -> Response:
-    """SSR front page: latest feed items plus the hot-reads rail."""
+    """SSR front page (algorand.pxke.me) or registry index (algorand-registry.pxke.me), dispatched on the incoming Host header -- one shared Falcon app behind the same upstream serves all three product domains."""
+    if _is_registry_host(request):
+        return registry_index(request)
     path = "/"
     _record(request, path)
     feed, topics = cached_feed_snapshot(news.list_feed)
@@ -276,6 +331,75 @@ def home(request: Request) -> Response:
         render.render_front(items, hot, topic_links=topics),
         "public, max-age=120",
         tracked_path=path,
+    )
+
+
+def registry_index(request: Request) -> Response:
+    """SSR registry index: every approved entry, schema.org ItemList. Reached at both '/' (registry domain) and '/registry' (that path 301s here from algorand.pxke.me -- see the nginx template)."""
+    from algorand_shared.ecosystem_statements import ALL_CATEGORY_PARTITION
+
+    from app.modules.ecosystem.stores.factory import get_project_store
+
+    path = "/registry"
+    _record(request, path)
+    entries = get_project_store().list_by_category(
+        ALL_CATEGORY_PARTITION, limit=_REGISTRY_SSR_LIMIT
+    )
+    return _doc_response(
+        render.render_registry_index(entries),
+        "public, max-age=300",
+        tracked_path=path,
+        dist_subdir="frontend_web_registry",
+    )
+
+
+def registry_entry(request: Request) -> Response:
+    """SSR one registry entry by slug; registry-chrome 404 for pending/rejected/unknown."""
+    from app.modules.ecosystem.models.domain import STATUS_APPROVED
+    from app.modules.ecosystem.stores.factory import get_project_store
+
+    slug = (request.path_params.get("slug", "") or "").strip().lower()
+    item = get_project_store().get(slug) if slug else None
+    path = f"/registry/{slug}"
+    if item is None or item.status != STATUS_APPROVED:
+        _record_notfound(request, path)
+        return _doc_response(
+            render.render_registry_noindex("Page not found", path=path),
+            "public, max-age=60",
+            status=404,
+            dist_subdir="frontend_web_registry",
+        )
+    _record(request, path)
+    return _doc_response(
+        render.render_registry_entry(item),
+        "public, max-age=300",
+        tracked_path=path,
+        dist_subdir="frontend_web_registry",
+    )
+
+
+def registry_submit_doc(request: Request) -> Response:
+    """Noindex SSR shell for the submit form -- keeps it out of the index (it's a form, not content) while still serving real title/meta and the registry's own chrome to anything that requests the document directly."""
+    path = "/registry/submit"
+    _record(request, path)
+    return _doc_response(
+        render.render_registry_noindex("Submit a project", path=path),
+        "public, max-age=300",
+        tracked_path=path,
+        dist_subdir="frontend_web_registry",
+    )
+
+
+def registry_request_doc(request: Request) -> Response:
+    """Noindex SSR shell for the "suggest a change" form (roadmap item 26, owner ask 2026-09-08). Same reasoning as registry_submit_doc -- does not check whether `slug` names a real entry; the underlying SPA route and API already 404 on submit for an unknown slug, and a document-level 404 here would need the same store read the entry route already does for no SEO benefit (this page is noindex either way)."""
+    slug = (request.path_params.get("slug", "") or "").strip().lower()
+    path = f"/registry/{slug}/request"
+    _record(request, path)
+    return _doc_response(
+        render.render_registry_noindex("Suggest a change", path=path),
+        "public, max-age=300",
+        tracked_path=path,
+        dist_subdir="frontend_web_registry",
     )
 
 
@@ -754,9 +878,14 @@ def beacon_pageview(request: Request) -> Response:
 
 
 def robots(request: Request) -> Response:
-    """robots.txt, cached briefly."""
-    _ = request
-    return _text_response(sitemap.robots_txt(), "text/plain; charset=utf-8", "public, max-age=3600")
+    """robots.txt, cached briefly. Host-aware: registry/x402 subdomains get their own, pointing at their own sitemap."""
+    if _is_registry_host(request):
+        text = sitemap.registry_robots_txt()
+    elif _is_x402_host(request):
+        text = sitemap.x402_robots_txt()
+    else:
+        text = sitemap.robots_txt()
+    return _text_response(text, "text/plain; charset=utf-8", "public, max-age=3600")
 
 
 def rss_feed(request: Request) -> Response:
@@ -846,8 +975,15 @@ def llms_full_txt(request: Request) -> Response:
 
 
 def sitemap_root(request: Request) -> Response:
-    """Root sitemap index."""
-    _ = request
+    """Root sitemap. Host-aware: registry/x402 get their own small flat urlset (build_registry_sitemap/build_x402_sitemap -- nowhere near index/chunk scale); the news site keeps its index-or-chunks build."""
+    if _is_registry_host(request):
+        return _text_response(
+            _cached_registry_sitemap_xml(), "application/xml; charset=utf-8", "public, max-age=900"
+        )
+    if _is_x402_host(request):
+        return _text_response(
+            _cached_x402_sitemap_xml(), "application/xml; charset=utf-8", "public, max-age=900"
+        )
     build = _cached_sitemap_build()
     return _text_response(build.root_xml, "application/xml; charset=utf-8", "public, max-age=900")
 
@@ -929,6 +1065,16 @@ def register_seo_routes(app: Router) -> None:
     app.get("/topic/:tag")(topic)
     app.get("/glossary")(glossary_index)
     app.get("/glossary/:slug")(glossary_term)
+    # Falcon's CompiledRouter (falcon.App()'s default -- see falcon_main.py)
+    # prefers a literal path segment over a param one at the same position
+    # regardless of registration order, so /registry/submit always wins
+    # over /registry/:slug treating "submit" as a slug -- registered in
+    # this order anyway, for readability, matching every other literal-
+    # before-param pair in this file (e.g. /x402/endpoints vs /x402/:tab).
+    app.get("/registry")(registry_index)
+    app.get("/registry/submit")(registry_submit_doc)
+    app.get("/registry/:slug/request")(registry_request_doc)
+    app.get("/registry/:slug")(registry_entry)
     app.get("/x402")(x402_index)
     app.get("/x402/endpoints")(x402_endpoints)
     app.get("/x402/:tab")(x402_tab)
@@ -961,6 +1107,10 @@ def register_seo_routes(app: Router) -> None:
         ("/topic/:tag", topic),
         ("/glossary", glossary_index),
         ("/glossary/:slug", glossary_term),
+        ("/registry", registry_index),
+        ("/registry/submit", registry_submit_doc),
+        ("/registry/:slug/request", registry_request_doc),
+        ("/registry/:slug", registry_entry),
         ("/x402", x402_index),
         ("/x402/endpoints", x402_endpoints),
         ("/x402/:tab", x402_tab),

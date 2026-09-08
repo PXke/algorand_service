@@ -139,6 +139,68 @@ def ssr_page(
     )
 
 
+# --- Algorand Open Registry (algorand-registry.pxke.me) ---------------------
+# A separate product on its own subdomain (see render.py's
+# render_registry_index/render_registry_entry) -- its own nav/brand/footer,
+# NOT the news site's ssr_page above: reusing that verbatim would hand a
+# crawler <a href="/news">, <a href="/hot"> etc. that 404 on this domain.
+_REGISTRY_NAV_LINKS: tuple[tuple[str, str], ...] = (
+    ("Browse", "/registry"),
+    ("Submit a project", "/registry/submit"),
+)
+_REGISTRY_TAGLINE = (
+    "A free, human-reviewed directory of Algorand projects — wallets, DeFi, NFTs, tooling and more."
+)
+
+
+def _registry_nav_html(*, active: str | None) -> str:
+    items = []
+    for label, path in _REGISTRY_NAV_LINKS:
+        extra = ' aria-current="page"' if active and path == active else ""
+        items.append(f'<li><a href="{_attr(path)}"{extra}>{html.escape(label)}</a></li>')
+    return f'<nav class="ssr-nav" aria-label="Primary"><ul>{"".join(items)}</ul></nav>'
+
+
+def _registry_footer_html() -> str:
+    year = datetime.now(tz=UTC).year
+    return (
+        f'<footer class="ssr-footer">'
+        f'<div class="ssr-footer-grid">'
+        f'<section class="ssr-footer-brand" aria-labelledby="ssr-brand-h">'
+        f'<h2 id="ssr-brand-h"><a href="/">Algorand Open Registry</a></h2>'
+        f"<p>{html.escape(_REGISTRY_TAGLINE)}</p>"
+        f"</section>"
+        f'<section class="ssr-footer-col" aria-labelledby="ssr-nav-h">'
+        f'<h2 id="ssr-nav-h">Registry</h2>'
+        f"<ul>"
+        f'<li><a href="/registry">Browse</a></li>'
+        f'<li><a href="/registry/submit">Submit a project</a></li>'
+        f"</ul></section>"
+        f"</div>"
+        f'<p class="ssr-rights">© {year} PXke Algorand. All rights reserved.</p>'
+        f"</footer>"
+    )
+
+
+def registry_ssr_page(
+    main_html: str, *, active: str | None = None, breadcrumbs: list[tuple[str, str]] | None = None
+) -> str:
+    """Registry-product site chrome wrapping crawlable main content (inside #ssr-body) -- the registry's own nav/brand/footer, not the news site's."""
+    crumbs = _breadcrumb_html(breadcrumbs or [])
+    return (
+        f'<header class="ssr-header">'
+        f'<div class="ssr-masthead">'
+        f'<p class="ssr-brand"><a href="/">Algorand Open Registry</a></p>'
+        f'<p class="ssr-tagline">{html.escape(_REGISTRY_TAGLINE)}</p>'
+        f"</div>"
+        f"{_registry_nav_html(active=active)}"
+        f"</header>"
+        f"{crumbs}"
+        f'<main class="ssr-main">{main_html}</main>'
+        f"{_registry_footer_html()}"
+    )
+
+
 # This <style> paints before the SPA's stylesheet exists, so it restates the
 # palette. The values come from shared/design_tokens.json — the same file the
 # SPA is checked against — so the pre-boot paint reads as the same paper

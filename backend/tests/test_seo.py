@@ -11,11 +11,22 @@ import pytest
 
 from app.core.config import settings
 from app.core.http import QueryParams, Request
+from app.modules.ecosystem.models.domain import STATUS_APPROVED, StoredProject
 from app.modules.news.models.schemas import ArticleDetail, ArticleFeedItem
 from app.modules.seo import feeds, render, shell, sitemap, topics
-from app.modules.seo.api.routes import _doc_response, _is_known_app_path, article
+from app.modules.seo.api.routes import (
+    _doc_response,
+    _is_known_app_path,
+    article,
+    home,
+    registry_entry,
+    registry_index,
+    robots,
+    sitemap_root,
+)
 from app.modules.seo.markdown import md_to_html, md_to_text, truncate
 from app.modules.seo.topics import SECTION_REDIRECTS, reliable_tags
+from app.modules.x402_directory.models.domain import StoredListing
 
 
 def _article(**kw: object) -> ArticleDetail:
@@ -601,6 +612,52 @@ def test_robots_news_sitemap_gated_by_flag(monkeypatch: pytest.MonkeyPatch) -> N
     assert "sitemap-news.xml" in sitemap.robots_txt()
 
 
+def test_robots_txt_host_dispatch_registry() -> None:
+    """robots() serves registry_robots_txt(), pointed at the registry's own sitemap, when the request arrives on the registry's Host header."""
+    from types import SimpleNamespace
+
+    req = Request(
+        method="GET",
+        headers={},
+        query_params=QueryParams({}),
+        path_params={},
+        url=SimpleNamespace(path="/robots.txt", host="algorand-registry.pxke.me", scheme="https"),
+    )
+    resp = robots(req)
+    assert "Sitemap: https://algorand-registry.pxke.me/sitemap.xml" in resp.description
+    assert "Sitemap: https://algorand.pxke.me/sitemap.xml" not in resp.description
+
+
+def test_robots_txt_host_dispatch_x402() -> None:
+    """robots() serves x402_robots_txt() on x402's Host header."""
+    from types import SimpleNamespace
+
+    req = Request(
+        method="GET",
+        headers={},
+        query_params=QueryParams({}),
+        path_params={},
+        url=SimpleNamespace(path="/robots.txt", host="x402.pxke.me", scheme="https"),
+    )
+    resp = robots(req)
+    assert "Sitemap: https://x402.pxke.me/sitemap.xml" in resp.description
+
+
+def test_robots_txt_host_dispatch_default_is_news() -> None:
+    """An unrecognized/default Host (the real news domain, or anything else) still gets the news robots.txt."""
+    from types import SimpleNamespace
+
+    req = Request(
+        method="GET",
+        headers={},
+        query_params=QueryParams({}),
+        path_params={},
+        url=SimpleNamespace(path="/robots.txt", host="algorand.pxke.me", scheme="https"),
+    )
+    resp = robots(req)
+    assert "Sitemap: https://algorand.pxke.me/sitemap.xml" in resp.description
+
+
 def test_sitemap_xml_includes_articles_and_topics() -> None:
     # 25 stories -> "market" on 10 (clears MIN_COUNT, under the 50% ubiquity
     # ceiling), the rest singleton filler tags.
@@ -786,6 +843,193 @@ def test_render_topics_has_collection_jsonld() -> None:
     assert '"@type":"ItemList"' in head
 
 
+# --- registry / x402 sitemaps --------------------------------------------------
+
+
+def _approved_project(slug: str = "acme", *, reviewed_at_epoch: int = 0) -> StoredProject:
+    return StoredProject(
+        slug=slug,
+        name="Acme",
+        domain="acme.test",
+        url="https://acme.test",
+        description="A test project for the registry sitemap.",
+        status=STATUS_APPROVED,
+        reviewed_at_epoch=reviewed_at_epoch,
+    )
+
+
+def test_build_registry_sitemap_includes_index_and_each_entry() -> None:
+    """One <loc> for the registry root plus one per entry, on the registry's own domain."""
+    xml = sitemap.build_registry_sitemap([_approved_project("acme"), _approved_project("beta")])
+    assert xml.startswith("<?xml")
+    assert "<loc>https://algorand-registry.pxke.me/</loc>" in xml
+    assert "<loc>https://algorand-registry.pxke.me/registry/acme</loc>" in xml
+    assert "<loc>https://algorand-registry.pxke.me/registry/beta</loc>" in xml
+    # Never the news domain -- this is the whole point of registry_absolute().
+    assert "algorand.pxke.me" not in xml
+
+
+def test_build_registry_sitemap_omits_lastmod_when_never_reviewed() -> None:
+    """A seeded/not-yet-reviewed entry (reviewed_at_epoch=0) gets no <lastmod>, rather than a fabricated 1970 date."""
+    xml = sitemap.build_registry_sitemap([_approved_project("acme", reviewed_at_epoch=0)])
+    entry_xml = xml.split("<loc>https://algorand-registry.pxke.me/registry/acme</loc>")[1]
+    assert "<lastmod>" not in entry_xml.split("</url>")[0]
+
+
+def _stored_listing(
+    url: str = "https://svc.test/api", *, created_at_epoch: int = 0
+) -> StoredListing:
+    return StoredListing(
+        url_hash="hash-1",
+        url=url,
+        price="1000",
+        description="A test x402 listing.",
+        schema_json="{}",
+        settlement_tx_id="tx-1",
+        term_end_epoch=9_999_999_999,
+        created_at_epoch=created_at_epoch,
+    )
+
+
+def test_build_x402_sitemap_includes_static_pages_and_listings() -> None:
+    """Directory/developers static pages plus one entry per listing, addressed by its own URL as a query param -- the live SPA's own addressing scheme, not a slug."""
+    xml = sitemap.build_x402_sitemap([_stored_listing("https://svc.test/api")])
+    assert "<loc>https://x402.pxke.me/</loc>" in xml
+    assert "<loc>https://x402.pxke.me/directory</loc>" in xml
+    assert "<loc>https://x402.pxke.me/developers</loc>" in xml
+    assert "<loc>https://x402.pxke.me/listing?url=https%3A%2F%2Fsvc.test%2Fapi</loc>" in xml
+    assert "algorand.pxke.me" not in xml
+    assert "algorand-registry.pxke.me" not in xml
+
+
+def _host_request(host: str, path: str = "/", *, path_params: dict | None = None) -> Request:
+    from types import SimpleNamespace
+
+    return Request(
+        method="GET",
+        headers={},
+        query_params=QueryParams({}),
+        path_params=path_params or {},
+        url=SimpleNamespace(path=path, host=host, scheme="https"),
+    )
+
+
+def test_sitemap_root_host_dispatch_registry(monkeypatch: pytest.MonkeyPatch) -> None:
+    """sitemap_root() serves the registry's own flat urlset, not the news index/chunk build, on the registry Host."""
+    from app.modules.ecosystem.stores import factory as ecosystem_factory
+    from app.modules.ecosystem.stores.memory import InMemoryProjectStore
+
+    store = InMemoryProjectStore()
+    store.upsert(_approved_project("acme"))
+    ecosystem_factory.set_project_store(store)
+    try:
+        monkeypatch.setattr("app.core.cache.cached_json", lambda _key, _ttl, compute: compute())
+        resp = sitemap_root(_host_request("algorand-registry.pxke.me", "/sitemap.xml"))
+        assert "algorand-registry.pxke.me/registry/acme" in resp.description
+        assert "algorand.pxke.me/news" not in resp.description
+    finally:
+        ecosystem_factory.set_project_store(None)
+
+
+def test_sitemap_root_host_dispatch_x402(monkeypatch: pytest.MonkeyPatch) -> None:
+    """sitemap_root() serves the x402 flat urlset on the x402 Host, reading live listings via ListingService directly (not the rate-limited HTTP route)."""
+    from app.modules.x402_directory.services.listing_service import ListingService
+
+    monkeypatch.setattr("app.core.cache.cached_json", lambda _key, _ttl, compute: compute())
+    monkeypatch.setattr(
+        ListingService, "search", lambda _self, **_kw: [_stored_listing("https://svc.test/api")]
+    )
+    resp = sitemap_root(_host_request("x402.pxke.me", "/sitemap.xml"))
+    assert "x402.pxke.me/listing?url=" in resp.description
+    assert "algorand.pxke.me" not in resp.description
+
+
+def test_sitemap_root_default_host_is_still_the_news_build(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The news domain (or anything unrecognized) keeps the existing index/chunk sitemap build untouched."""
+    monkeypatch.setattr("app.core.cache.cached_json", lambda _key, _ttl, compute: compute())
+    from app.modules.seo.api import routes as seo_routes
+
+    monkeypatch.setattr(seo_routes.news, "list_feed_for_sitemap", lambda *, limit: ([], {}))  # noqa: ARG005 -- kwarg name must match the real signature (limit=...)
+    resp = sitemap_root(_host_request("algorand.pxke.me", "/sitemap.xml"))
+    assert "<loc>https://algorand.pxke.me/</loc>" in resp.description
+
+
+def test_home_dispatches_to_registry_index_on_registry_host() -> None:
+    """home() renders the registry index, not the news front page, when Host is the registry domain."""
+    from app.modules.ecosystem.stores import factory as ecosystem_factory
+    from app.modules.ecosystem.stores.memory import InMemoryProjectStore
+
+    store = InMemoryProjectStore()
+    store.upsert(_approved_project("acme"))
+    ecosystem_factory.set_project_store(store)
+    try:
+        resp = home(_host_request("algorand-registry.pxke.me", "/"))
+        assert resp.status_code == 200
+        assert "Algorand Open Registry" in resp.description
+        assert "Acme" in resp.description
+    finally:
+        ecosystem_factory.set_project_store(None)
+
+
+def test_registry_entry_renders_an_approved_entry() -> None:
+    """registry_entry() renders the entry's own SSR document for an approved slug."""
+    from app.modules.ecosystem.stores import factory as ecosystem_factory
+    from app.modules.ecosystem.stores.memory import InMemoryProjectStore
+
+    store = InMemoryProjectStore()
+    store.upsert(_approved_project("acme"))
+    ecosystem_factory.set_project_store(store)
+    try:
+        resp = registry_entry(
+            _host_request(
+                "algorand-registry.pxke.me", "/registry/acme", path_params={"slug": "acme"}
+            )
+        )
+        assert resp.status_code == 200
+        assert "Acme" in resp.description
+    finally:
+        ecosystem_factory.set_project_store(None)
+
+
+def test_registry_entry_404s_for_an_unknown_slug() -> None:
+    """A slug with no store row (or a pending/rejected one) 404s with registry chrome, not the news 404."""
+    from app.modules.ecosystem.stores import factory as ecosystem_factory
+    from app.modules.ecosystem.stores.memory import InMemoryProjectStore
+
+    ecosystem_factory.set_project_store(InMemoryProjectStore())
+    try:
+        req = _host_request(
+            "algorand-registry.pxke.me", "/registry/nope", path_params={"slug": "nope"}
+        )
+        resp = registry_entry(req)
+        assert resp.status_code == 404
+    finally:
+        ecosystem_factory.set_project_store(None)
+
+
+def test_registry_index_route_reachable_directly_at_slash_registry() -> None:
+    """/registry is its own registered route (not just '/' dispatch) -- exercised directly, same as a request proxied there from the news domain's redirect."""
+    from app.modules.ecosystem.stores import factory as ecosystem_factory
+    from app.modules.ecosystem.stores.memory import InMemoryProjectStore
+
+    store = InMemoryProjectStore()
+    store.upsert(_approved_project("acme"))
+    ecosystem_factory.set_project_store(store)
+    try:
+        resp = registry_index(_host_request("algorand-registry.pxke.me", "/registry"))
+        assert resp.status_code == 200
+        assert "Acme" in resp.description
+    finally:
+        ecosystem_factory.set_project_store(None)
+
+
+def test_registry_index_ignores_registry_host_for_the_news_domain() -> None:
+    """home() on the ordinary news Host still renders the news front page, never the registry index."""
+    resp = home(_host_request("algorand.pxke.me", "/"))
+    assert resp.status_code == 200
+    assert "Algorand Open Registry" not in resp.description
+
+
 # --- shell injection ---------------------------------------------------------
 
 _SHELL = (
@@ -829,7 +1073,7 @@ def test_candidate_dirs_survives_deleted_cwd(monkeypatch: pytest.MonkeyPatch) ->
     """Rolling deploy can delete the process WorkingDirectory; Path.cwd() then raises FileNotFoundError — must not take down every SSR route."""
     monkeypatch.setattr(shell.settings, "frontend_dist_dir", None)
     monkeypatch.setattr(shell, "_safe_cwd_roots", lambda: [])
-    dirs = shell._candidate_dirs()
+    dirs = shell._candidate_dirs("frontend_web")
     assert dirs  # __file__-relative roots still present
     assert all("frontend_web" in str(d) or "frontend/dist" in str(d) for d in dirs)
 

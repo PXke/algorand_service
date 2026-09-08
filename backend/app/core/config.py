@@ -29,6 +29,12 @@ class Settings(msgspec.Struct, kw_only=True):
     # Public-facing site (used to build absolute canonical / OG / sitemap URLs
     # in the SEO-rendered document routes). Override per-env via PUBLIC_SITE_URL.
     public_site_url: str = "https://algorand.pxke.me"
+    # The Algorand Open Registry's own domain (registry SSR canonical/OG
+    # URLs and the Host-header check that routes "/" on this domain to
+    # render_registry_index instead of the news homepage -- see
+    # seo/api/routes.py's home()). Mirrors x402_public_site_url's existing,
+    # still-unused-for-SSR pattern (x402 has no SSR yet).
+    registry_public_site_url: str = "https://algorand-registry.pxke.me"
     site_name: str = "PXke Algorand"
     # Doubles as the meta description for the front page and RSS channel —
     # written for the SERP snippet (task #39, 2026-07-16: the brand query

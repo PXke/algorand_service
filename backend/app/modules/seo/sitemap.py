@@ -16,7 +16,11 @@ from app.modules.seo.render import (
     article_hreflang_links,
     article_path,
     is_icon_like,
+    registry_absolute,
+    registry_site_url,
     site_url,
+    x402_absolute,
+    x402_site_url,
 )
 from app.modules.seo.topics import reliable_tags
 
@@ -116,6 +120,33 @@ def robots_txt() -> str:
     ]
     if settings.seo_news_sitemap_enabled:
         lines.append(f"Sitemap: {site_url()}/sitemap-news.xml")
+    return "\n".join(lines) + "\n"
+
+
+def registry_robots_txt() -> str:
+    """robots.txt for algorand-registry.pxke.me -- own domain, own sitemap, same allow-all/API-disallow shape as robots_txt() above, just scoped to registry_site_url()."""
+    lines = [
+        "User-agent: *",
+        "Allow: /",
+        "Disallow: /admin",
+        "Disallow: /api/",
+        "Allow: /api/v1/img",
+        "",
+        f"Sitemap: {registry_site_url()}/sitemap.xml",
+    ]
+    return "\n".join(lines) + "\n"
+
+
+def x402_robots_txt() -> str:
+    """robots.txt for x402.pxke.me -- own domain, own sitemap. No SSR document routes on this domain yet (2026-09-08), so no /admin to disallow beyond the shared API prefix."""
+    lines = [
+        "User-agent: *",
+        "Allow: /",
+        "Disallow: /api/",
+        "Allow: /api/v1/img",
+        "",
+        f"Sitemap: {x402_site_url()}/sitemap.xml",
+    ]
     return "\n".join(lines) + "\n"
 
 
@@ -359,6 +390,55 @@ def _article_entries(
             seen_locs.add(loc)
             entries.append(_UrlEntry(loc=loc, lastmod=lastmod, alternates=alternates, image=image))
     return entries
+
+
+def build_registry_sitemap(entries: list) -> str:
+    """Single flat urlset for algorand-registry.pxke.me -- one entry per approved registry project, plus the index itself. No index/chunk split: the registry is nowhere near MAX_URLS_PER_SITEMAP (design doc target is 100-200 entries at launch), and won't be for a long time.
+
+    `entries` is `list[app.modules.ecosystem.models.domain.StoredProject]` --
+    left untyped here rather than importing that module, the one place in
+    this file that would otherwise reach across a product boundary just for
+    a type hint (render.py already imports StoredProject directly for its
+    own registry renderers; this function only reads `.slug` and
+    `.reviewed_at_epoch`, so a structural duck-type is enough).
+    """
+    url_entries = [_UrlEntry(loc=registry_site_url() + "/")]
+    for item in entries:
+        lastmod = _iso_date(item.reviewed_at_epoch) if item.reviewed_at_epoch else None
+        url_entries.append(
+            _UrlEntry(loc=registry_absolute(f"/registry/{item.slug}"), lastmod=lastmod)
+        )
+    return _urlset_xml(url_entries)
+
+
+def build_x402_sitemap(listings: list) -> str:
+    """Single flat urlset for x402.pxke.me -- the directory/overview/developers pages plus one entry per live listing.
+
+    `listings` is `list[app.modules.x402_directory.models.domain.StoredListing]`
+    -- same untyped-for-boundary-reasons choice as build_registry_sitemap
+    above; only `.url` and `.created_at_epoch` are read. Listings are
+    addressed by their own URL as a query param (`/listing?url=...`, the
+    live SPA router's own scheme -- frontend/src/App.svelte's
+    resolveMarketplaceView -- there is no per-listing slug to route to
+    instead), which is unusual for a sitemap but matches what the live page
+    actually serves; only a real slug-based redesign of that routing would
+    change it, which is out of scope here.
+    """
+    from urllib.parse import quote
+
+    url_entries = [
+        _UrlEntry(loc=x402_site_url() + "/"),
+        _UrlEntry(loc=x402_absolute("/directory")),
+        _UrlEntry(loc=x402_absolute("/developers")),
+    ]
+    for item in listings:
+        lastmod = _iso_date(item.created_at_epoch) if item.created_at_epoch else None
+        url_entries.append(
+            _UrlEntry(
+                loc=x402_absolute(f"/listing?url={quote(item.url, safe='')}"), lastmod=lastmod
+            )
+        )
+    return _urlset_xml(url_entries)
 
 
 def build_sitemaps(

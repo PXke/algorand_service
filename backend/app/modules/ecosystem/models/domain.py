@@ -52,6 +52,38 @@ CATEGORIES: tuple[str, ...] = (
 )
 DEFAULT_CATEGORY = "other"
 
+# Human names for the closed category enum (design doc section 4), mirrors
+# frontend/src/lib/api/ecosystem.ts's ECOSYSTEM_CATEGORY_LABELS 1:1 -- own
+# copy, no cross-service import, same convention that file's own docstring
+# already uses for CATEGORIES itself. Backend-only use: the registry SSR
+# pages (seo/render.py's render_registry_index/render_registry_entry).
+CATEGORY_LABELS: dict[str, str] = {
+    "wallets": "Wallets & key management",
+    "defi-exchange": "Exchanges & AMMs",
+    "defi-lending": "Lending, stablecoins & yield",
+    "nfts": "NFTs & collectibles",
+    "gaming": "Gaming & metaverse",
+    "identity": "Identity, names & credentials",
+    "rwa": "Real-world assets",
+    "payments": "Payments & commerce",
+    "infrastructure": "Infrastructure & nodes",
+    "devtools": "Developer tools & SDKs",
+    "analytics": "Explorers & analytics",
+    "governance": "Governance & DAOs",
+    "interop": "Oracles & bridges",
+    "security": "Security & auditing",
+    "agents": "AI & agents",
+    "enterprise": "Enterprise & impact",
+    "media": "Education & media",
+    "other": "Other",
+}
+
+
+def category_label(slug: str) -> str:
+    """Human label for a category slug; falls back to the slug itself for an unrecognized value."""
+    return CATEGORY_LABELS.get(slug, slug)
+
+
 # Rejection reasons shown to the submitter on the status page (design doc
 # section 3.3), a short closed list -- not free text, so the same reason
 # always reads the same way to a resubmitting builder.
@@ -199,6 +231,7 @@ class SubmissionQueueItem:
 
 __all__ = [
     "CATEGORIES",
+    "CATEGORY_LABELS",
     "DEFAULT_CATEGORY",
     "DEFAULT_STAGE",
     "MAX_REQUEST_MESSAGE_LENGTH",
@@ -229,4 +262,5 @@ __all__ = [
     "EntryRequest",
     "StoredProject",
     "SubmissionQueueItem",
+    "category_label",
 ]

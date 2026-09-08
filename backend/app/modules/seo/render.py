@@ -28,9 +28,10 @@ from app.core.article_translation_langs import (
     og_locale_for,
 )
 from app.core.config import settings
+from app.modules.ecosystem.models.domain import StoredProject, category_label
 from app.modules.glossary.store import GlossaryTerm
 from app.modules.news.models.schemas import ArticleDetail, ArticleFeedItem
-from app.modules.seo.chrome import SSR_CHROME_STYLE, ssr_page
+from app.modules.seo.chrome import SSR_CHROME_STYLE, registry_ssr_page, ssr_page
 from app.modules.seo.markdown import md_to_html, md_to_text, truncate
 from app.modules.seo.topics import display_tag_label, primary_tag, topic_feed_path
 from app.modules.x402_board.models.domain import StoredPlacement
@@ -50,6 +51,30 @@ def absolute(path: str) -> str:
     if path.startswith(("http://", "https://")):
         return path
     return f"{site_url()}/{path.lstrip('/')}"
+
+
+def registry_site_url() -> str:
+    """Public base URL for the Algorand Open Registry's own domain -- NOT site_url() (see render_registry_index/render_registry_entry, the only callers)."""
+    return settings.registry_public_site_url.rstrip("/")
+
+
+def registry_absolute(path: str) -> str:
+    """Turn a possibly-relative path into an absolute REGISTRY-domain URL (mirrors absolute(), scoped to registry_site_url())."""
+    if path.startswith(("http://", "https://")):
+        return path
+    return f"{registry_site_url()}/{path.lstrip('/')}"
+
+
+def x402_site_url() -> str:
+    """Public base URL for the x402 marketplace's own domain -- x402 has no SSR document routes yet (2026-09-08), only a sitemap; see sitemap.build_x402_sitemap, the one caller."""
+    return settings.x402_public_site_url.rstrip("/")
+
+
+def x402_absolute(path: str) -> str:
+    """Turn a possibly-relative path into an absolute X402-domain URL (mirrors absolute(), scoped to x402_site_url())."""
+    if path.startswith(("http://", "https://")):
+        return path
+    return f"{x402_site_url()}/{path.lstrip('/')}"
 
 
 def _content_img_src(image_url: str) -> str:
@@ -428,6 +453,14 @@ def ssr_container(
         breadcrumbs=breadcrumbs,
         topic_links=topic_links,
     )
+    return f'{_SSR_STYLE}<div id="ssr-body">{_SSR_LOADING}{page}</div>{_SSR_REMOVE_SCRIPT}'
+
+
+def registry_ssr_container(
+    inner_html: str, *, active: str | None = None, breadcrumbs: list[tuple[str, str]] | None = None
+) -> str:
+    """Same wrapper as ssr_container, but the registry product's own chrome (chrome.registry_ssr_page) -- see render_registry_index/render_registry_entry."""
+    page = registry_ssr_page(inner_html, active=active, breadcrumbs=breadcrumbs)
     return f'{_SSR_STYLE}<div id="ssr-body">{_SSR_LOADING}{page}</div>{_SSR_REMOVE_SCRIPT}'
 
 
@@ -1152,6 +1185,131 @@ def render_glossary_term(term: GlossaryTerm) -> tuple[str, str]:
         f"<h1>{html.escape(term.term)}</h1><p>{html.escape(term.definition)}</p>{aliases_html}",
         active="/glossary",
         breadcrumbs=trail,
+    )
+    return head, body
+
+
+# --- Algorand Open Registry (algorand-registry.pxke.me) ---------------------
+#
+# SSR mirror of frontend/src/routes/Registry.svelte and RegistryEntry.svelte.
+# A SEPARATE product on its own subdomain -- every canonical/OG/breadcrumb
+# URL below is built with registry_absolute()/registry_site_url(), never the
+# news site's absolute()/site_url(), and the chrome is registry_ssr_container
+# (its own nav/brand/footer), never ssr_container. Design doc section 6.2:
+# "one index renderer, one detail renderer" -- reads the SAME store calls
+# the JSON routes (app.modules.ecosystem.api.routes) use, passed in by the
+# caller (seo/api/routes.py), not a second copy of that read.
+_REGISTRY_DEFAULT_IMAGE_DIMS = (512, 512)
+_REGISTRY_TAGLINE = (
+    "A free, human-reviewed directory of Algorand projects — wallets, DeFi, NFTs, tooling and more."
+)
+
+
+def render_registry_index(entries: list[StoredProject]) -> tuple[str, str]:
+    """Registry index: every approved entry, schema.org ItemList."""
+    canonical = registry_site_url() + "/"
+    title = "Algorand Open Registry"
+    description = _REGISTRY_TAGLINE
+    json_ld = {
+        "@context": "https://schema.org",
+        "@type": "ItemList",
+        "@id": canonical,
+        "name": title,
+        "url": canonical,
+        "itemListElement": [
+            {
+                "@type": "ListItem",
+                "position": i + 1,
+                "url": registry_absolute(f"/registry/{item.slug}"),
+                "name": item.name,
+            }
+            for i, item in enumerate(entries)
+        ],
+    }
+    head = _meta_block(
+        title=title,
+        description=description,
+        canonical=canonical,
+        image=registry_absolute(settings.seo_default_image),
+        image_alt=title,
+        image_dims=_REGISTRY_DEFAULT_IMAGE_DIMS,
+        json_ld=[json_ld],
+    )
+    links = "".join(
+        f'<li><a href="{_attr(registry_absolute(f"/registry/{item.slug}"))}">'
+        f"{html.escape(item.name)}</a> — {html.escape(category_label(item.category))}"
+        f"<br>{html.escape(item.description[:160])}</li>"
+        for item in entries
+    )
+    body = registry_ssr_container(
+        f"<h1>{html.escape(title)}</h1><p>{html.escape(description)}</p><ul>{links}</ul>",
+        active="/registry",
+        breadcrumbs=[("Registry", canonical)],
+    )
+    return head, body
+
+
+def render_registry_entry(entry: StoredProject) -> tuple[str, str]:
+    """One registry entry's SSR page, schema.org SoftwareApplication."""
+    canonical = registry_absolute(f"/registry/{entry.slug}")
+    title = f"{entry.name} — Algorand Open Registry"
+    description = entry.description[:280]
+    trail = [
+        ("Registry", registry_site_url() + "/"),
+        (
+            category_label(entry.category),
+            registry_absolute(f"/registry?category={quote(entry.category)}"),
+        ),
+        (entry.name, canonical),
+    ]
+    json_ld = {
+        "@context": "https://schema.org",
+        "@type": "SoftwareApplication",
+        "@id": canonical,
+        "name": entry.name,
+        "description": entry.description,
+        "url": canonical,
+        "applicationCategory": category_label(entry.category),
+        "sameAs": [u for u in (entry.url, entry.repo_url) if u],
+    }
+    head = _meta_block(
+        title=title,
+        description=description,
+        canonical=canonical,
+        image=registry_absolute(settings.seo_default_image),
+        image_alt=entry.name,
+        image_dims=_REGISTRY_DEFAULT_IMAGE_DIMS,
+        json_ld=[json_ld, _breadcrumb(trail)],
+    )
+    links_html = ""
+    if entry.url:
+        links_html += f'<p><a href="{_attr(entry.url)}">Visit site</a></p>'
+    if entry.repo_url:
+        links_html += f'<p><a href="{_attr(entry.repo_url)}">Source code</a></p>'
+    body = registry_ssr_container(
+        f"<h1>{html.escape(entry.name)}</h1><p>{html.escape(entry.description)}</p>{links_html}",
+        active="/registry",
+        breadcrumbs=trail,
+    )
+    return head, body
+
+
+def render_registry_noindex(title: str, *, path: str) -> tuple[str, str]:
+    """Minimal registry-chrome shell for utility routes (submit, suggest-a-change) -- keep them out of the index but still serve the app. Mirrors render_noindex, registry-scoped."""
+    canonical = registry_absolute(path)
+    head = _meta_block(
+        title=title,
+        description=_REGISTRY_TAGLINE,
+        canonical=canonical,
+        image=registry_absolute(settings.seo_default_image),
+        image_alt="Algorand Open Registry",
+        image_dims=_REGISTRY_DEFAULT_IMAGE_DIMS,
+        robots="noindex, follow",
+    )
+    body = registry_ssr_container(
+        f"<h1>{html.escape(title)}</h1>",
+        active=None,
+        breadcrumbs=[("Registry", registry_site_url() + "/"), (title, canonical)],
     )
     return head, body
 

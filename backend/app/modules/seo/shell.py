@@ -30,7 +30,12 @@ _HEAD_CLOSE_RE = re.compile(r"</head>", re.IGNORECASE)
 _BODY_OPEN_RE = re.compile(r"<body[^>]*>", re.IGNORECASE)
 _HTML_LANG_RE = re.compile(r'(<html[^>]*\s)lang=["\'][^"\']*["\']', re.IGNORECASE)
 
-_cache: dict[str, object] = {"path": None, "mtime": 0.0, "html": None}
+# Keyed by dist_subdir (see load_template) -- the news shell and the
+# registry shell are different builds served by the SAME backend process
+# (nginx routes by Host, not this process), so they need independent
+# mtime-cache entries rather than one that thrashes every time the two
+# alternate.
+_cache: dict[str, dict[str, object]] = {}
 
 
 def _safe_cwd_roots() -> list[Path]:
@@ -48,12 +53,17 @@ def _safe_cwd_roots() -> list[Path]:
     return [cwd, cwd.parent]
 
 
-def _candidate_dirs() -> list[Path]:
+def _candidate_dirs(dist_subdir: str) -> list[Path]:
     """Directories to probe for the built Vite SPA, most likely first."""
     if settings.frontend_dist_dir:
         return [Path(settings.frontend_dist_dir)]
-    # Auto-detect the built web dir. In prod it sits at <release>/frontend_web,
-    # in dev at <repo>/frontend/dist. shell.py is at
+    # Auto-detect the built web dir. In prod it sits at <release>/<dist_subdir>
+    # (frontend_web for the news product, frontend_web_registry for the
+    # registry product -- see deploy/package.sh's _maybe_build_registry_frontend),
+    # in dev at <repo>/frontend/dist (there's no separate registry dev build,
+    # so a registry SSR request in local dev falls back to the news shell --
+    # acceptable since local dev never proxies algorand-registry.pxke.me
+    # through this same auto-detect path anyway). shell.py is at
     # backend/app/modules/seo/, so the release/repo root is parents[4]; we also
     # probe the systemd WorkingDirectory (releases/current/backend) via cwd, so a
     # path-depth change can't silently strip the SPA's own scripts again.
@@ -63,7 +73,7 @@ def _candidate_dirs() -> list[Path]:
     dirs: list[Path] = []
     seen: set[Path] = set()
     for root in roots:
-        for sub in ("frontend_web", "frontend/dist"):
+        for sub in (dist_subdir, "frontend/dist"):
             cand = root / sub
             if cand not in seen:
                 seen.add(cand)
@@ -71,25 +81,32 @@ def _candidate_dirs() -> list[Path]:
     return dirs
 
 
-def _resolve_index() -> Path | None:
-    for d in _candidate_dirs():
+def _resolve_index(dist_subdir: str) -> Path | None:
+    for d in _candidate_dirs(dist_subdir):
         candidate = d / "index.html"
         if candidate.is_file():
             return candidate
     return None
 
 
-def load_template() -> str | None:
-    """Return the index.html shell, reloading when the file changes on disk."""
-    path = _resolve_index()
+def load_template(*, dist_subdir: str = "frontend_web") -> str | None:
+    """Return the index.html shell, reloading when the file changes on disk.
+
+    `dist_subdir` selects which product's build to load -- "frontend_web"
+    (default, the news product) or "frontend_web_registry" (the Algorand
+    Open Registry, a separate Vite build on its own subdomain -- see
+    render.py's render_registry_index/render_registry_entry, the only
+    callers that pass a non-default value).
+    """
+    path = _resolve_index(dist_subdir)
     if path is None:
         return None
     mtime = path.stat().st_mtime
-    if _cache["path"] != str(path) or _cache["mtime"] != mtime or _cache["html"] is None:
-        _cache["path"] = str(path)
-        _cache["mtime"] = mtime
-        _cache["html"] = path.read_text(encoding="utf-8")
-    return _cache["html"]  # type: ignore[return-value]
+    entry = _cache.get(dist_subdir)
+    if entry is None or entry["path"] != str(path) or entry["mtime"] != mtime:
+        entry = {"path": str(path), "mtime": mtime, "html": path.read_text(encoding="utf-8")}
+        _cache[dist_subdir] = entry
+    return entry["html"]  # type: ignore[return-value]
 
 
 def ssr_track_snippet(path: str) -> str:
@@ -98,9 +115,11 @@ def ssr_track_snippet(path: str) -> str:
     return f'<script>try{{sessionStorage.setItem("pxke_ssr_pv","{safe}")}}catch(e){{}}</script>'
 
 
-def render_document(head_html: str, body_html: str, *, html_lang: str = "en") -> str | None:
-    """Inject `head_html` (title/meta/JSON-LD) before </head> and `body_html` (the crawlable `#ssr-body` content) right after <body>. Strips the static title/description so ours win."""
-    template = load_template()
+def render_document(
+    head_html: str, body_html: str, *, html_lang: str = "en", dist_subdir: str = "frontend_web"
+) -> str | None:
+    """Inject `head_html` (title/meta/JSON-LD) before </head> and `body_html` (the crawlable `#ssr-body` content) right after <body>. Strips the static title/description so ours win. See load_template for `dist_subdir`."""
+    template = load_template(dist_subdir=dist_subdir)
     if template is None:
         return None
     doc = _HTML_LANG_RE.sub(
