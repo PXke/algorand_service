@@ -35,10 +35,27 @@ def _apply_result(resp: falcon.Response, result: Any) -> None:
             resp.status = falcon.HTTP_204
         return
 
-    if hasattr(result, "status_code") and hasattr(result, "headers") and hasattr(result, "description"):
+    if (
+        hasattr(result, "status_code")
+        and hasattr(result, "headers")
+        and hasattr(result, "description")
+    ):
         resp.status = falcon.code_to_http_status(int(result.status_code or 200))
         for key, value in (result.headers or {}).items():
-            resp.set_header(str(key), str(value))
+            # Falcon's set_header() explicitly refuses "Set-Cookie" (raises
+            # HeaderNotSupported) -- a response can carry more than one
+            # Set-Cookie header, so Falcon requires append_header() for it
+            # specifically, unlike every other header this loop handles.
+            # Route handlers build the raw Set-Cookie string themselves (see
+            # auth/api/routes.py's _session_cookie_header) and pass it
+            # through this same generic Response(headers={...}) shape, so
+            # the loop has to special-case the one header name Falcon
+            # treats differently rather than assuming set_header works for
+            # all of them uniformly.
+            if str(key).lower() == "set-cookie":
+                resp.append_header(str(key), str(value))
+            else:
+                resp.set_header(str(key), str(value))
         description = result.description
         if isinstance(description, bytes):
             resp.data = description
