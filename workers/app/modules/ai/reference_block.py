@@ -4,7 +4,7 @@ The writer model tends to cite only the main domain in its footer, dropping the
 deeper pages it actually fetched during research — which costs citation density
 (see gatekeeper.structure.citation_density) and hides real sources from readers.
 This deterministically appends every successfully fetched URL the body doesn't
-already cite. Pure stdlib so it stays unit-testable without the Mistral client.
+already cite. Pure stdlib so it stays unit-testable without the LLM client.
 
 Same failure mode also happens for sources the model only ever saw as a
 search_web hit (title + url + snippet) and never actually opened with

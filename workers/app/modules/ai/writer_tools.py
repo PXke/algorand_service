@@ -1,4 +1,4 @@
-"""Agentic tools the Mistral writer can call on demand while composing.
+"""Agentic tools the writer (DeepSeek) can call on demand while composing.
 
 Each tool is a (schema, handler) pair. Handlers read live platform data and
 must be cheap and failure-tolerant — a tool error returns {"error": ...} and
@@ -207,10 +207,12 @@ def _tool_get_article(article_id: str, offset: int = 0) -> dict[str, Any]:
     if detail is None:
         return {"error": "no article found for that id"}
     body = detail.body or ""
-    # The agent loop truncates each serialized tool result to 4000 chars; keep the
-    # body window within that budget so the metadata fields below survive, and
-    # place body last so any overflow only clips the body tail rather than
-    # dropping fields.
+    # The agent loop truncates each serialized tool result to
+    # LLM_TOOL_RESULT_MAX_CHARS (config.py, default 24000 -- this comment
+    # used to cite a stale 4000 figure, 2026-09-08). This window stays well
+    # under that on its own so the metadata fields below always survive
+    # alongside it, and body is placed last so any overflow only clips the
+    # body tail rather than dropping fields.
     off = max(0, int(offset))
     window = 3000
     chunk = body[off : off + window]
@@ -367,16 +369,18 @@ SUGGEST_TOOL_SCHEMA: dict[str, Any] = {
             "Testnet txn/app deploy, github_activity for repo momentum and "
             "github_repository_contents to READ contract source, search_leak_databases "
             "for offshore leaks and screen_sanctions_and_pep for people (present on "
-            "investigative stories), discourse_forum "
-            "for forum activity AND forum search (query param), search_bluesky for "
-            "community sentiment (use this "
-            "instead of X/Twitter), medium_api_article_list for a blog's article list, "
-            "reddit_api_post_history for a user's Reddit history, xgov_proposal_status "
+            "investigative stories, when configured), discourse_forum "
+            "for forum activity AND forum search (query param), search_bluesky and "
+            "search_x for community sentiment (Bluesky and X respectively — check "
+            "your tool list for which are currently available, budgets vary), "
+            "medium_api_article_list for a blog's article list, "
+            "nft_asset_listing_status / nft_collection_market_stats for NFT listing "
+            "status and floor/volume/holder stats, get_defi_tvl_history for a "
+            "protocol's historical TVL trend, xgov_proposal_status "
             "for xGov grant proposal status, fetch_archive_text to "
             "read a deleted/edited page from the Wayback Machine. ONLY when nothing "
-            "existing fits, record the genuine gap (e.g. Telegram search, an NFT "
-            "collection's floor price, a historical TVL time-series). Do NOT suggest a "
-            "capability you already have. This returns "
+            "existing fits, record the genuine gap (e.g. Telegram search). Do NOT "
+            "suggest a capability you already have. This returns "
             "no data; call it only for real gaps, then keep writing."
         ),
         "parameters": {
@@ -1008,7 +1012,11 @@ def _wrap_fetch_url_scroll(
     window_caps: dict[str, int] = ctx.setdefault("_fetch_url_window_caps", {})
 
     def _wrapped(**kwargs: Any) -> dict[str, Any]:  # noqa: ANN401 -- arbitrary LLM tool-call arguments
-        from app.modules.ai.research_tools import _fetch_url_internal, _publicize_fetch_result
+        from app.modules.ai.research_tools import (
+            _augment_fetch_result,
+            _fetch_url_internal,
+            _publicize_fetch_result,
+        )
 
         url = _canonical_fetch_url(str(kwargs.get("url") or ""))
         if not url:
@@ -1036,7 +1044,10 @@ def _wrap_fetch_url_scroll(
         else:
             offsets.pop(url, None)
             window_caps.pop(url, None)
-        return _publicize_fetch_result(raw)
+        # 2026-09-08 (Fable audit): this used to return _publicize_fetch_result(raw)
+        # directly, bypassing every fetch_url safety augmentation (github-archived,
+        # SPA-not-found) -- see _augment_fetch_result's own docstring.
+        return _augment_fetch_result(url, _publicize_fetch_result(raw))
 
     return _wrapped
 

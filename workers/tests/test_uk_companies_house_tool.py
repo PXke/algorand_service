@@ -37,10 +37,13 @@ def test_lookup_by_number_returns_profile(monkeypatch: pytest.MonkeyPatch) -> No
     resp = httpx.Response(
         200,
         json=profile,
-        request=httpx.Request("GET", "https://api.company-information.service.gov.uk/company/12345678"),
+        request=httpx.Request(
+            "GET", "https://api.company-information.service.gov.uk/company/12345678"
+        ),
     )
     monkeypatch.setattr(
-        "app.core.net_guard.guarded_get", lambda *_a, **_kw: resp,
+        "app.core.net_guard.guarded_get",
+        lambda *_a, **_kw: resp,
     )
     result = it.query_uk_companies_house(company_number="12345678")
     assert result["name"] == "BRALE UK LTD"
@@ -53,10 +56,13 @@ def test_lookup_by_number_not_found(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("COMPANIES_HOUSE_API_KEY", "test-key")
     resp = httpx.Response(
         404,
-        request=httpx.Request("GET", "https://api.company-information.service.gov.uk/company/00000000"),
+        request=httpx.Request(
+            "GET", "https://api.company-information.service.gov.uk/company/00000000"
+        ),
     )
     monkeypatch.setattr(
-        "app.core.net_guard.guarded_get", lambda *_a, **_kw: resp,
+        "app.core.net_guard.guarded_get",
+        lambda *_a, **_kw: resp,
     )
     result = it.query_uk_companies_house(company_number="00000000")
     assert result["error"] == "no company with this number"
@@ -78,10 +84,13 @@ def test_lookup_by_name_returns_candidates(monkeypatch: pytest.MonkeyPatch) -> N
                 }
             ]
         },
-        request=httpx.Request("GET", "https://api.company-information.service.gov.uk/search/companies"),
+        request=httpx.Request(
+            "GET", "https://api.company-information.service.gov.uk/search/companies"
+        ),
     )
     monkeypatch.setattr(
-        "app.core.net_guard.guarded_get", lambda *_a, **_kw: resp,
+        "app.core.net_guard.guarded_get",
+        lambda *_a, **_kw: resp,
     )
     result = it.query_uk_companies_house(company_name="Brale")
     assert result["matches"] == 1
@@ -102,3 +111,20 @@ def test_registers_only_when_key_configured(monkeypatch: pytest.MonkeyPatch) -> 
     names = {s["function"]["name"] for s in schemas}
     assert "query_uk_companies_house" in names
     assert "query_uk_companies_house" in handlers
+
+
+def test_screen_sanctions_and_pep_registers_only_when_key_configured(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression (2026-09-08, Fable audit): confirmed live that api.opensanctions.org hard-401s every unauthenticated call, and no OPENSANCTIONS_API_KEY was set anywhere in prod -- screen_sanctions_and_pep was registering and guaranteed-failing on every real call. Same gating pattern as query_uk_companies_house/query_corporate_registry."""
+    monkeypatch.delenv("OPENSANCTIONS_API_KEY", raising=False)
+    schemas, handlers = it.investigative_tools(include_entity_osint=True)
+    names = {s["function"]["name"] for s in schemas}
+    assert "screen_sanctions_and_pep" not in names
+    assert "screen_sanctions_and_pep" not in handlers
+
+    monkeypatch.setenv("OPENSANCTIONS_API_KEY", "test-key")
+    schemas, handlers = it.investigative_tools(include_entity_osint=True)
+    names = {s["function"]["name"] for s in schemas}
+    assert "screen_sanctions_and_pep" in names
+    assert "screen_sanctions_and_pep" in handlers

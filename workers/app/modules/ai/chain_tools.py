@@ -1,7 +1,10 @@
-"""Read-only on-chain lookups backed by the wired algod node (ALGOD_URL/TOKEN, the same connector chain_reader.py uses). These answer the recurring "verify it on-chain" gap the writer kept working around — point lookup_application at a governance app to read its live proposal/vote state, etc.
+"""Read-only on-chain lookups, backed by BOTH the wired algod node (ALGOD_URL/TOKEN, the same connector chain_reader.py uses) and the public mainnet/testnet indexers -- most handlers here actually read the indexer, not algod (2026-09-08: this docstring used to describe the module as algod-backed alone). These answer the recurring "verify it on-chain" gap the writer kept working around — point lookup_application at a governance app to read its live proposal/vote state, etc.
 
-algod gives CURRENT state only (no history — that needs an indexer). Every handler
-is failure-tolerant: any error returns {"error": ...} and never aborts the article.
+algod gives CURRENT state only (no history); the indexer covers historical
+transactions/config changes -- lookup_arc69_metadata and lookup_account_transactions
+are examples of handlers that need the indexer specifically for that reason. Every
+handler is failure-tolerant: any error returns {"error": ...} and never aborts
+the article.
 """
 
 from __future__ import annotations
@@ -594,6 +597,55 @@ def _tool_lookup_transaction_note(txid: str) -> dict[str, Any]:
     }
 
 
+# Bounds how far _latest_acfg_page pages forward (10 txns/page) hunting for
+# the true most-recent acfg -- 20 pages covers 200 reconfigs, far past any
+# real ARC-69 collection's rewrite count, without unbounded indexer calls
+# for a pathological asset.
+_ARC69_MAX_PAGES = 20
+
+
+def _latest_acfg_page(aid: int) -> dict[str, Any] | list[dict[str, Any]]:
+    """Page forward through an asset's acfg transactions and return the LAST page reached.
+
+    The indexer returns this endpoint's results OLDEST-first with no
+    descending-order option (confirmed live against several real
+    reconfigured ASAs) -- since order is strictly ascending by round, the
+    last page paged to holds the true most-recent entries, unlike trusting
+    just the first page (the bug this was split out to fix, 2026-09-08).
+    An error dict on failure; an empty list if the asset has no acfg
+    history at all.
+    """
+    from app.core.config import CHAIN_CACHE_TTL_SLOW
+
+    txns: list[dict[str, Any]] = []
+    next_token: str | None = None
+    for _ in range(_ARC69_MAX_PAGES):
+        params: dict[str, Any] = {"tx-type": "acfg", "limit": 10}
+        if next_token:
+            params["next"] = next_token
+        data = _mainnet_idx_get(
+            f"/v2/assets/{aid}/transactions", params=params, cache_ttl=CHAIN_CACHE_TTL_SLOW
+        )
+        if not isinstance(data, dict):
+            return {"error": "unexpected indexer response"}
+        # Checked BEFORE the empty-page branch below -- an indexer error has
+        # no "transactions" key either, and used to fall through to "no
+        # asset-config transactions found", an authoritative-sounding
+        # negative for what was actually an outage (CLAUDE.md sec 2 #8).
+        if data.get("error"):
+            return data
+        if data.get("_status") == 404:
+            break
+        page = [t for t in (data.get("transactions") or []) if isinstance(t, dict)]
+        if not page:
+            break
+        txns = page  # ascending order: the LATEST page has the newest rounds
+        next_token = data.get("next-token")
+        if not next_token:
+            break
+    return txns
+
+
 def _tool_lookup_arc69_metadata(asset_id: int | str) -> dict[str, Any]:
     """An ASA's ARC-69 attributes (traits, ratings, any structured properties an issuer wrote in), read from the right place.
 
@@ -614,33 +666,29 @@ def _tool_lookup_arc69_metadata(asset_id: int | str) -> dict[str, Any]:
     can rewrite it later (multiple acfg transactions) — this always reads
     the MOST RECENT one, since that's the attribute state a marketplace or
     reader would see today.
+
+    2026-09-08 (Fable audit): the indexer returns this endpoint's results
+    OLDEST-first with no descending-order option (confirmed live against
+    several real reconfigured ASAs), and this used to take only the FIRST
+    page of 10 -- an asset reconfigured more than 10 times got the 10th-
+    OLDEST config, not the most recent, despite the docstring's own promise
+    above. Now pages forward (bounded by _ARC69_MAX_PAGES) and keeps the
+    last page reached, which -- since order is strictly ascending by round
+    -- holds the true most recent entries.
     """
     try:
         aid = int(asset_id)
     except (TypeError, ValueError):
         return {"error": "asset_id must be numeric"}
-    from app.core.config import CHAIN_CACHE_TTL_SLOW
 
     # SLOW, not STATIC: a manager CAN rewrite this via a later acfg (see
     # docstring) -- unlike a plain transaction note, "most recent config" is
     # not permanent.
-    data = _mainnet_idx_get(
-        f"/v2/assets/{aid}/transactions",
-        params={"tx-type": "acfg", "limit": 10},
-        cache_ttl=CHAIN_CACHE_TTL_SLOW,
-    )
-    if not isinstance(data, dict):
-        return {"error": "unexpected indexer response"}
-    if data.get("_status") == 404 or not data.get("transactions"):
-        return {"asset_id": aid, "error": "no asset-config transactions found for this asset"}
-    if data.get("error"):
-        return data
-    txns = [t for t in data["transactions"] if isinstance(t, dict)]
+    txns = _latest_acfg_page(aid)
+    if isinstance(txns, dict):
+        return txns  # error dict, propagated as-is
     if not txns:
         return {"asset_id": aid, "error": "no asset-config transactions found for this asset"}
-    # Indexer order for this endpoint is not guaranteed newest-first -- sort
-    # explicitly so a manager's later metadata update always wins over the
-    # original mint's.
     latest = max(txns, key=lambda t: t.get("confirmed-round") or 0)
     note_b64 = latest.get("note")
     if not note_b64:
@@ -1115,15 +1163,19 @@ def _tool_get_asset_holder_share(asset_id: int | str, address: str) -> dict[str,
 def _tool_lookup_asset_holders(asset_id: int | str, limit: int = 10) -> dict[str, Any]:
     """Current holders of an ASA (balance > 0), via the mainnet indexer — the real 'is this collection actually held/traded' signal, the reverse of get_asset_holder_share (which needs a candidate address already in hand). For a 1/1 NFT (total=1), one call says whether the creator still holds it (never sold/distributed) or a different address does (a real transfer happened) — root-caused 2026-08-05: a compose treated a whole NFT collection as unverified/obscure after checking only DEX token-pool listings, which don't apply to 1/1 NFTs, instead of just checking whether any of the assets had actually moved off the creator's wallet.
 
-    creator_still_holds is checked via a DIRECT lookup of the creator's own
-    account, not by searching for them in the holders page below — root-
-    caused 2026-08-06 against a real fungible token where the creator held
-    ~99.99999% of supply: the holders page is capped at 100 raw balances in
-    indexer-default order, NOT sorted by amount, so a creator with a
-    100+-holder token can easily be absent from that page despite holding
-    virtually everything, producing a false "creator no longer holds it".
-    top_holders (best-of-page-100, amount-sorted) is still useful for who
-    else holds it, just not authoritative for the creator specifically.
+    creator_still_holds is checked via a DIRECT, uncapped per-asset holding
+    lookup (algod's /v2/accounts/{addr}/assets/{asset_id}), not by searching
+    for them in the holders page below and not (2026-09-08 fix) by reading
+    lookup_account's own `assets` list, which is silently capped at 25
+    entries — a creator wallet opted into more than 25 ASAs (common for a
+    minting wallet) would show 0 holding past the cap, a false "creator no
+    longer holds it". Root-caused 2026-08-06 against a real fungible token
+    where the creator held ~99.99999% of supply: the holders page is capped
+    at 100 raw balances in indexer-default order, NOT sorted by amount, so a
+    creator with a 100+-holder token can easily be absent from that page
+    despite holding virtually everything. top_holders (best-of-page-100,
+    amount-sorted) is still useful for who else holds it, just not
+    authoritative for the creator specifically.
     """
     aid = str(asset_id).strip()
     if not aid.isdigit():
@@ -1141,24 +1193,28 @@ def _tool_lookup_asset_holders(asset_id: int | str, limit: int = 10) -> dict[str
             return round(amount / (10**decimals), 6)
         return amount
 
-    creator_account = (
-        _tool_lookup_account(creator) if creator else {"error": "no creator on record"}
-    )
-    creator_lookup_error = creator_account.get("error")
-    creator_holding = (
-        0
-        if creator_lookup_error
-        else next(
-            (
-                a.get("amount")
-                for a in (creator_account.get("assets") or [])
-                if a.get("asset_id") == asset_id_int
-            ),
-            0,
-        )
-    )
-
     from app.core.config import CHAIN_CACHE_TTL_SLOW
+
+    # 2026-09-08: was reading this off lookup_account's `assets` list, the
+    # exact bug get_asset_holder_share was already fixed for on 2026-08-11
+    # (silently capped at 25 entries -- a creator wallet opted into more
+    # than 25 ASAs, common for a minting wallet, showed 0 holding past the
+    # cap, a false "creator no longer holds it"). Same fix: query algod's
+    # per-asset holding endpoint directly, which has no such cap.
+    creator_lookup_error: str | None = None
+    creator_holding = 0
+    if not creator:
+        creator_lookup_error = "no creator on record"
+    else:
+        holding_data = _algod_get(
+            f"/v2/accounts/{creator}/assets/{asset_id_int}", cache_ttl=CHAIN_CACHE_TTL_SLOW
+        )
+        if holding_data.get("_status") == 404:
+            creator_holding = 0
+        elif holding_data.get("error"):
+            creator_lookup_error = str(holding_data.get("error"))
+        else:
+            creator_holding = holding_data.get("asset-holding", {}).get("amount") or 0
 
     data = _mainnet_idx_get(
         f"/v2/assets/{aid}/balances",
@@ -1657,7 +1713,10 @@ def _testnet_lookup_txid(txid: str) -> dict[str, Any]:
         "type": tx.get("tx-type"),
         "sender": tx.get("sender"),
         "confirmed_round": tx.get("confirmed-round"),
-        "round_time": tx.get("round-time"),
+        # 2026-09-08 (Fable audit): was the raw indexer epoch int -- every
+        # mainnet tool's round_time is ISO via _iso_round_time; same field
+        # name, different type read like the same fact and wasn't.
+        "round_time": _iso_round_time(tx),
         "created_application_index": tx.get("created-application-index"),
         "created_asset_index": tx.get("created-asset-index"),
         "fee": tx.get("fee"),
@@ -1707,7 +1766,7 @@ def _testnet_lookup_address(address: str) -> dict[str, Any]:
                 "txid": t.get("id"),
                 "type": t.get("tx-type"),
                 "round": t.get("confirmed-round"),
-                "round_time": t.get("round-time"),
+                "round_time": _iso_round_time(t),
             }
             for t in (txns.get("transactions", []) or [])[:10]
             if isinstance(t, dict)
@@ -1823,7 +1882,7 @@ CHAIN_SCHEMAS: list[dict[str, Any]] = [
         "function": {
             "name": "lookup_application_account",
             "description": (
-                "An application's escrow (\"app\") account: its live ALGO/asset "
+                'An application\'s escrow ("app") account: its live ALGO/asset '
                 "balance and recent transaction history (appl calls, axfer/pay "
                 "transfers), by app_id alone. Use this — not lookup_application — "
                 "to independently verify an escrow's real balance or whether funds "

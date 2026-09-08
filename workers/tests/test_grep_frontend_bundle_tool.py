@@ -88,10 +88,10 @@ def test_skips_known_third_party_tracker_scripts(monkeypatch: pytest.MonkeyPatch
     """Analytics/ad scripts never carry app logic and would crowd out real bundles under the script cap -- excluded before fetching."""
     page = _html_response(
         "https://example.com/",
-        '<html><head>'
+        "<html><head>"
         '<script src="https://www.googletagmanager.com/gtag/js"></script>'
         '<script src="/assets/app.js"></script>'
-        '</head></html>',
+        "</head></html>",
     )
     bundle = _js_response("https://example.com/assets/app.js", "requireWalletConnect()")
     fetched: list[str] = []
@@ -108,11 +108,57 @@ def test_skips_known_third_party_tracker_scripts(monkeypatch: pytest.MonkeyPatch
     assert result["scripts_checked"] == ["https://example.com/assets/app.js"]
 
 
+def test_a_failed_script_fetch_is_recorded_not_silently_dropped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression (2026-09-08, Fable audit): a script that failed to fetch used to just `continue` with no record at all -- indistinguishable from a script that fetched clean and genuinely had no match. scripts_failed_to_fetch now names it."""
+    page = _html_response(
+        "https://example.com/",
+        "<html><head>"
+        '<script src="/assets/blocked.js"></script>'
+        '<script src="/assets/app.js"></script>'
+        "</head></html>",
+    )
+    bundle = _js_response("https://example.com/assets/app.js", "function submit(x){return x}")
+
+    def fake_get(url: str, **_kw: object) -> httpx.Response:
+        if url.endswith("blocked.js"):
+            raise httpx.ConnectError("blocked")
+        if url.endswith("app.js"):
+            return bundle
+        return page
+
+    monkeypatch.setattr("app.modules.ai.research_tools._guarded_get_with_retry", fake_get)
+    result = _tool_grep_frontend_bundle("https://example.com", "requireWalletConnect")
+    assert result["scripts_failed_to_fetch"] == ["https://example.com/assets/blocked.js"]
+    assert result["scripts_checked"] == ["https://example.com/assets/app.js"]
+    assert result["match_count"] == 0
+
+
+def test_no_failed_fetches_key_absent_when_every_script_fetched_clean(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The field stays absent (not an empty list) on the ordinary all-succeeded path, so a naive `if "scripts_failed_to_fetch" in result` check downstream works."""
+    page = _html_response(
+        "https://example.com/",
+        '<html><head><script src="/assets/app.js"></script></head></html>',
+    )
+    bundle = _js_response("https://example.com/assets/app.js", "function submit(x){return x}")
+
+    def fake_get(url: str, **_kw: object) -> httpx.Response:
+        return bundle if url.endswith("app.js") else page
+
+    monkeypatch.setattr("app.modules.ai.research_tools._guarded_get_with_retry", fake_get)
+    result = _tool_grep_frontend_bundle("https://example.com", "requireWalletConnect")
+    assert "scripts_failed_to_fetch" not in result
+
+
 def test_no_scripts_on_page_returns_an_error(monkeypatch: pytest.MonkeyPatch) -> None:
     """A page with no <script src=...> tags at all can't be grepped -- a clear error, not a silent empty result."""
     page = _html_response("https://example.com/", "<html><body>No scripts here.</body></html>")
     monkeypatch.setattr(
-        "app.modules.ai.research_tools._guarded_get_with_retry", lambda *_a, **_kw: page,
+        "app.modules.ai.research_tools._guarded_get_with_retry",
+        lambda *_a, **_kw: page,
     )
     result = _tool_grep_frontend_bundle("https://example.com", "anything")
     assert "error" in result

@@ -1,4 +1,4 @@
-"""Phase-1 investigative-journalism tools for the Mistral agent.
+"""Phase-1 investigative-journalism tools for the writer (DeepSeek).
 
 Every tool is a stateless external lookup (no new database; results may be
 persisted to Cassandra by the caller). All handlers are timeout-bounded and
@@ -519,16 +519,31 @@ def query_court_dockets(entity_name: str) -> dict[str, Any]:
 def search_leak_databases(entity_name: str) -> dict[str, Any]:
     """ICIJ Offshore Leaks (Panama/Pandora/Paradise Papers). Best-effort HTML search; no official API."""
     try:
-        html = _get(
+        resp = _guarded_get(
             "https://offshoreleaks.icij.org/search",
             params={"q": entity_name},
             headers={"Accept": "text/html"},
         )
-        if not isinstance(html, str):
-            return {"query": entity_name, "note": "unexpected response"}
+    except Exception as exc:
+        return {"error": str(exc), "note": "ICIJ has no official API; best-effort"}
+    # 2026-09-08 (Fable audit): confirmed live -- ICIJ's AWS WAF edge answers
+    # every bare HTTP client with a 202 and an empty body (x-amzn-waf-action:
+    # challenge), for every query, not just occasionally. That used to parse
+    # as an empty results table and report hits: 0, indistinguishable from a
+    # genuine "no offshore leak record found."
+    if resp.status_code != 200 or not resp.text.strip():
+        return {
+            "query": entity_name,
+            "error": (
+                f"ICIJ did not return a normal search page (status {resp.status_code}) "
+                "-- likely bot-blocked at the edge, not a confirmed zero-hit result"
+            ),
+            "note": "ICIJ has no official API; best-effort",
+        }
+    try:
         from bs4 import BeautifulSoup
 
-        soup = BeautifulSoup(html, "html.parser")
+        soup = BeautifulSoup(resp.text, "html.parser")
         rows = [a.get_text(" ").strip() for a in soup.select("table a[href*='/nodes/']")[:6]]
         return {"query": entity_name, "hits": len(rows), "entities": rows}
     except Exception as exc:
@@ -738,7 +753,11 @@ def investigative_tools(
     only for investigative lanes, and query_corporate_registry only when
     OPENCORPORATES_API_TOKEN is set (without it OpenCorporates returns a
     permanent 401, so registering it just burns a writer turn) — same reasoning
-    for query_uk_companies_house and COMPANIES_HOUSE_API_KEY.
+    for query_uk_companies_house and COMPANIES_HOUSE_API_KEY, and (2026-09-08,
+    Fable audit: confirmed live that api.opensanctions.org hard-401s every
+    unauthenticated call, and no OPENSANCTIONS_API_KEY was set anywhere in
+    prod, so screen_sanctions_and_pep was registering and guaranteed-failing
+    on every call) for screen_sanctions_and_pep and OPENSANCTIONS_API_KEY.
     """
     schemas = list(ARCHIVE_SCHEMAS)
     handlers = dict(ARCHIVE_HANDLERS)
@@ -749,9 +768,11 @@ def investigative_tools(
         has_ch_key = bool(
             env_str("COMPANIES_HOUSE_API_KEY", config.COMPANIES_HOUSE_API_KEY).strip()
         )
+        has_os_key = bool(env_str("OPENSANCTIONS_API_KEY", config.OPENSANCTIONS_API_KEY).strip())
         skip_unconfigured = {
             "query_corporate_registry": not has_oc_token,
             "query_uk_companies_house": not has_ch_key,
+            "screen_sanctions_and_pep": not has_os_key,
         }
         for schema in ENTITY_OSINT_SCHEMAS:
             name = schema["function"]["name"]

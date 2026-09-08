@@ -6,9 +6,23 @@ import httpx
 import pytest
 
 from app.modules.ai.research_tools import (
+    _fetch_pdf_document,
     _find_pdf_url_in_html,
     _tool_extract_pdf_from_page,
 )
+
+
+def _fake_pdf_bytes(num_pages: int) -> bytes:
+    import io
+
+    from pypdf import PdfWriter
+
+    writer = PdfWriter()
+    for _ in range(num_pages):
+        writer.add_blank_page(width=200, height=200)
+    buf = io.BytesIO()
+    writer.write(buf)
+    return buf.getvalue()
 
 
 def test_find_pdf_url_prefers_google_docs_viewer_param() -> None:
@@ -51,7 +65,8 @@ def test_extract_pdf_from_page_handles_a_url_that_is_already_a_pdf(
         request=httpx.Request("GET", "https://example.com/doc.pdf"),
     )
     monkeypatch.setattr(
-        "app.modules.ai.research_tools._guarded_get_with_retry", lambda *a, **kw: resp,  # noqa: ARG005
+        "app.modules.ai.research_tools._guarded_get_with_retry",
+        lambda *a, **kw: resp,  # noqa: ARG005
     )
     monkeypatch.setattr(
         "app.modules.ai.research_tools._fetch_pdf_document",
@@ -124,7 +139,8 @@ def test_extract_pdf_from_page_falls_back_to_rendered_html(
         html='<iframe src="/decks/stablecoins.pdf"></iframe>',
     )
     monkeypatch.setattr(
-        "app.modules.scraper.core.browser_scrape.fetch_page", lambda *a, **kw: rendered,  # noqa: ARG005
+        "app.modules.scraper.core.browser_scrape.fetch_page",
+        lambda *a, **kw: rendered,  # noqa: ARG005
     )
     monkeypatch.setattr(
         "app.modules.ai.research_tools._fetch_pdf_document",
@@ -145,7 +161,8 @@ def test_extract_pdf_from_page_errors_clearly_when_no_pdf_found_anywhere(
         request=httpx.Request("GET", "https://example.com/"),
     )
     monkeypatch.setattr(
-        "app.modules.ai.research_tools._guarded_get_with_retry", lambda *a, **kw: wrapper_resp,  # noqa: ARG005
+        "app.modules.ai.research_tools._guarded_get_with_retry",
+        lambda *a, **kw: wrapper_resp,  # noqa: ARG005
     )
     monkeypatch.setattr(
         "app.modules.scraper.core.browser_scrape.fetch_page",
@@ -154,6 +171,34 @@ def test_extract_pdf_from_page_errors_clearly_when_no_pdf_found_anywhere(
     result = _tool_extract_pdf_from_page("https://example.com/")
     assert "error" in result
     assert "found_pdf_url" not in result
+
+
+def test_fetch_pdf_document_flags_truncation_on_a_pdf_longer_than_the_page_cap() -> None:
+    """Regression (2026-09-08, Fable audit): a PDF over the 40-page extraction cap used to report has_more: false once the extracted text ran out, reading identically to "the document ends here" -- with no way to tell that from pages 41+ having been silently dropped."""
+
+    class _FakeResp:
+        content = _fake_pdf_bytes(45)
+
+    result = _fetch_pdf_document(
+        _FakeResp(), base="https://example.com/long.pdf", cap=8000, offset=0
+    )
+    assert result["pdf_pages_total"] == 45
+    assert result["pdf_pages_extracted"] == 40
+    assert "pdf_truncated_note" in result
+
+
+def test_fetch_pdf_document_no_truncation_fields_under_the_page_cap() -> None:
+    """A short PDF (under the 40-page cap) carries no truncation fields -- has_more: false there really does mean the document ended."""
+
+    class _FakeResp:
+        content = _fake_pdf_bytes(5)
+
+    result = _fetch_pdf_document(
+        _FakeResp(), base="https://example.com/short.pdf", cap=8000, offset=0
+    )
+    assert "pdf_pages_total" not in result
+    assert "pdf_pages_extracted" not in result
+    assert "pdf_truncated_note" not in result
 
 
 def test_extract_pdf_from_page_tool_registered() -> None:

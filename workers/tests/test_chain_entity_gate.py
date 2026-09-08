@@ -227,6 +227,18 @@ def test_verified_application_auto_linked_to_explorer(monkeypatch: pytest.Monkey
     ]
 
 
+def test_app_id_auto_link_does_not_grab_a_trailing_digit_off_a_nearby_number(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression (2026-09-08, Fable audit): the digit-boundary guard existed for 'asset' only; 'app' used bare re.escape and could match the trailing digits of an unrelated nearby number -- "app 500" inside "stake 2500 ALGO ... app 500" used to link the "500" INSIDE "2500", not the real standalone app id."""
+    monkeypatch.setattr(chain_entity_gate, "_lookup_status", lambda _kind, _value: "mainnet")
+    payload = {"body": "Players stake 2500 ALGO into escrow app 500 before the game starts."}
+    out = link_and_verify_chain_entities(payload, [])
+    assert "2[500](https://allo.info/application/500) ALGO" not in out["body"]
+    assert "2500 ALGO" in out["body"]
+    assert "[500](https://allo.info/application/500)" in out["body"]
+
+
 def test_verified_application_auto_linked_on_testnet() -> None:
     """A testnet-only application id links to Lora, not allo.info."""
     payload = {"body": "Application 741234567 is a testnet deployment."}

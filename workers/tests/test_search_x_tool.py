@@ -265,6 +265,27 @@ def test_cache_hit_serves_repeat_query_without_second_live_call(
     assert patch_redis_from_url.store.get(f"news:x_search_count:{_today()}") == "1"
 
 
+def test_cache_hit_carries_a_cached_at_marker_from_the_original_live_call(
+    monkeypatch: pytest.MonkeyPatch,
+    patch_redis_from_url: FakeRedis,  # noqa: ARG001 -- fixture patches redis globally, not referenced directly
+) -> None:
+    """Regression (2026-09-08, Fable audit): a forever-cache hit used to return the exact same dict a live call would, no marker distinguishing "posts from just now" from "posts from months ago" -- a recompose reading a stale cache entry presented it as current."""
+    monkeypatch.setattr("app.core.config.X_SEARCH_ENABLED", True)
+    monkeypatch.setattr("app.core.config.X_BEARER_TOKEN", "test-token")
+    monkeypatch.setattr("app.core.config.X_SEARCH_DAILY_CAP", 20)
+    monkeypatch.setattr(
+        "app.modules.ai.research_tools._x_search_live",
+        lambda q: {"query": q, "count": 0, "posts": []},
+    )
+
+    first = _tool_search_x("cached at query")
+    assert "cached_at" not in first  # the live call itself carries no marker
+
+    second = _tool_search_x("cached at query")
+    assert "cached_at" in second
+    assert second["cached_at"]  # a real, non-empty ISO timestamp string
+
+
 def test_cache_hit_does_not_consume_daily_budget(
     monkeypatch: pytest.MonkeyPatch,
     patch_redis_from_url: FakeRedis,

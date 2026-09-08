@@ -65,6 +65,10 @@ def test_fetch_hint_suggests_archive_for_gone_pages_only() -> None:
 def test_entity_osint_tools_available_unconditionally(monkeypatch: pytest.MonkeyPatch) -> None:
     """Entity-background OSINT tools are no longer topic-gated (ungated 2026-08-21, and the now-pointless ``topic`` kwarg removed from all_tools entirely): most real gaps (Nodely's KRS/NIP, Brale's NMLS) surfaced on ordinary generic-topic composes, not scam_alert/editorial_assignment, so restricting them to those two lanes just made a configured, working tool unreachable."""
     monkeypatch.setenv("OPENCORPORATES_API_TOKEN", "tok")
+    # 2026-09-08 (Fable audit): screen_sanctions_and_pep also needs its own
+    # key now (see test_screen_sanctions_and_pep_registers_only_when_key_configured)
+    # -- unrelated to the topic-gating this test is actually pinning.
+    monkeypatch.setenv("OPENSANCTIONS_API_KEY", "tok")
     schemas, _ = all_tools()
 
     osint = {

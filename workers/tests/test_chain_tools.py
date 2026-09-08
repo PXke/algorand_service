@@ -127,6 +127,38 @@ def test_lookup_asset_holders_no_warning_on_a_real_capped_supply(
     assert "total_supply_warning" not in result
 
 
+def test_lookup_asset_holders_creator_holding_not_capped_at_25_assets(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression (2026-09-08, Fable audit): creator_holding used to be read off lookup_account's own `assets` list, capped at 25 entries -- a creator wallet opted into a 30th ASA showed 0 holding, a false "creator no longer holds it". Fixed to query the uncapped per-asset holding endpoint directly, same fix get_asset_holder_share already got on 2026-08-11."""
+
+    def fake_algod_get(path: str, **_kwargs: object) -> dict:
+        if path == "/v2/assets/849191641":
+            return {
+                "params": {
+                    "name": "Test Asset",
+                    "total": 1,
+                    "decimals": 0,
+                    "creator": "CREATOR_ADDR",
+                }
+            }
+        assert path == "/v2/accounts/CREATOR_ADDR/assets/849191641"
+        # The creator's holding of THIS asset, reachable only via the
+        # uncapped per-asset endpoint -- would be invisible if this tool
+        # still read lookup_account's own 25-item-capped `assets` list.
+        return {"asset-holding": {"amount": 1}}
+
+    monkeypatch.setattr(chain_tools, "_algod_get", fake_algod_get)
+    monkeypatch.setattr(
+        chain_tools,
+        "_mainnet_idx_get",
+        lambda _path, params=None, **_kwargs: {"balances": []},  # noqa: ARG005
+    )
+    result = chain_tools._tool_lookup_asset_holders(849191641)
+    assert result["creator_still_holds"] is True
+    assert result["creator_holding_adjusted"] == 1
+
+
 def test_get_asset_holder_share_computes_real_percentage(monkeypatch: pytest.MonkeyPatch) -> None:
     """Regression-pin the actual CompX incident numbers: total=1e15 raw (decimals=6 -> 1 billion COMPX), creator holds 112,111,670,453,492 raw -> the real share is ~11.21%, NOT the "99.99%" the writer fabricated by doing the division itself and getting it wrong."""
 
@@ -441,6 +473,43 @@ def test_testnet_lookup_proceeds_for_a_valid_address(monkeypatch: pytest.MonkeyP
     assert result["found"] is True
 
 
+def test_testnet_lookup_txid_round_time_is_iso_not_a_raw_epoch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression (2026-09-08, Fable audit): testnet_lookup's round_time used to be the raw indexer epoch int while every mainnet tool's round_time is ISO (_iso_round_time) -- same field name, different type, silently misleading if compared or displayed the same way."""
+    monkeypatch.setattr(
+        chain_tools,
+        "_testnet_idx_get",
+        lambda _path, params=None, **_kwargs: {  # noqa: ARG005
+            "transaction": {"tx-type": "pay", "confirmed-round": 100, "round-time": 1700000000}
+        },
+    )
+    result = chain_tools._tool_testnet_lookup(txid="A" * 52)
+    assert result["round_time"] == "2023-11-14T22:13:20+00:00"
+
+
+def test_testnet_lookup_address_recent_transactions_round_time_is_iso(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Same fix, the address branch's recent_transactions list."""
+    real = chain_tools._encode_address(b"\x05" * 32)
+    calls = {"n": 0}
+
+    def fake_idx_get(_path: str, params: dict | None = None, **_kwargs: object) -> dict:  # noqa: ARG001
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return {"account": {"amount": 1_000_000}}
+        return {
+            "transactions": [
+                {"id": "TXID1", "tx-type": "pay", "confirmed-round": 100, "round-time": 1700000000}
+            ]
+        }
+
+    monkeypatch.setattr(chain_tools, "_testnet_idx_get", fake_idx_get)
+    result = chain_tools._tool_testnet_lookup(address=real)
+    assert result["recent_transactions"][0]["round_time"] == "2023-11-14T22:13:20+00:00"
+
+
 def test_round_to_date_rejects_both_or_neither_argument() -> None:
     """Exactly one of round/date is required — both or neither is a usage error."""
     assert "error" in chain_tools._tool_round_to_date()
@@ -740,9 +809,7 @@ def test_nft_collection_distribution_timeline_uses_asset_ids_when_given(
     monkeypatch.setattr(chain_tools, "_algod_get", fake_algod_get)
     monkeypatch.setattr(chain_tools, "_mainnet_idx_get", fake_idx_get)
 
-    result = chain_tools._tool_nft_collection_distribution_timeline(
-        creator, asset_ids=[111, 222]
-    )
+    result = chain_tools._tool_nft_collection_distribution_timeline(creator, asset_ids=[111, 222])
 
     assert result["sampled"] == 2
     assert result["total_created_assets"] == 2

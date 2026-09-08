@@ -74,7 +74,9 @@ def test_randgallery_asset_listing_not_listed(monkeypatch: pytest.MonkeyPatch) -
 
 def test_exa_asset_listing_true_when_buy_now_present(monkeypatch: pytest.MonkeyPatch) -> None:
     """'Buy now' text on the card means listed."""
-    monkeypatch.setattr(nft, "_render", lambda _url, *_a: "DonkeyDAO\nDonkey 2031\nBuy now\nPrice\n350\n")
+    monkeypatch.setattr(
+        nft, "_render", lambda _url, *_a: "DonkeyDAO\nDonkey 2031\nBuy now\nPrice\n350\n"
+    )
     result = nft._exa_asset_listing("1")
     assert result["listed"] is True
 
@@ -87,6 +89,50 @@ def test_exa_asset_listing_false_when_only_make_offer(monkeypatch: pytest.Monkey
     assert result["listed"] is False
 
 
+def test_statto_asset_listing_ambiguous_on_a_near_empty_render(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression (2026-09-08, Fable audit): a rendered-but-near-empty page (bot block, wrong id, layout drift) used to read as a confirmed "listed: False", indistinguishable from a page that genuinely showed no FOR SALE marker."""
+    monkeypatch.setattr(nft, "_render", lambda _url, *_a: "Access Denied")
+    result = nft._statto_asset_listing("1")
+    assert result["listed"] is None
+    assert "note" in result
+
+
+def test_randgallery_asset_listing_ambiguous_on_a_near_empty_render(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Same fix as statto."""
+    monkeypatch.setattr(nft, "_render", lambda _url, *_a: "")
+    result = nft._randgallery_asset_listing("1")
+    assert result["listed"] is None
+    assert "note" in result
+
+
+def test_exa_asset_listing_ambiguous_when_neither_marker_present(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression (2026-09-08, Fable audit): Exa's 'Buy now'/'Make offer' pair are both real markers, but a page showing NEITHER (bot block, wrong id) used to default to listed: False, the same value a confirmed 'Make offer' page gets."""
+    monkeypatch.setattr(
+        nft,
+        "_render",
+        lambda _url, *_a: "This is a generic error page with no listing markers at all",
+    )
+    result = nft._exa_asset_listing("1")
+    assert result["listed"] is None
+    assert "note" in result
+
+
+def test_downbad_asset_listing_ambiguous_on_a_near_empty_render(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Same fix as statto/randgallery -- applies to Downbad's own fallback branch (neither 'not listed', 'Listed on downbad', nor 'BUY NOW' matched)."""
+    monkeypatch.setattr(nft, "_render", lambda _url, *_a: "err")
+    result = nft._downbad_asset_listing("1")
+    assert result["listed"] is None
+    assert "note" in result
+
+
 def test_nft_asset_listing_status_rejects_non_numeric_id() -> None:
     """asset_id must be numeric — matches chain_tools' convention."""
     result = nft._tool_nft_asset_listing_status("not-a-number")
@@ -97,7 +143,9 @@ def test_nft_asset_listing_status_aggregates_all_four_sources(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Combines all four per-asset sources into one result, each independently."""
-    monkeypatch.setattr(nft, "_downbad_asset_listing", lambda _aid, *_a: {"listed": True, "price_algo": 60.0})
+    monkeypatch.setattr(
+        nft, "_downbad_asset_listing", lambda _aid, *_a: {"listed": True, "price_algo": 60.0}
+    )
     monkeypatch.setattr(nft, "_statto_asset_listing", lambda _aid, *_a: {"listed": True})
     monkeypatch.setattr(nft, "_randgallery_asset_listing", lambda _aid, *_a: {"listed": False})
     monkeypatch.setattr(nft, "_exa_asset_listing", lambda _aid, *_a: {"error": "could not render"})
@@ -122,7 +170,9 @@ def test_downbad_asset_listing_parses_a_real_page_shape(monkeypatch: pytest.Monk
 
 def test_downbad_asset_listing_not_listed(monkeypatch: pytest.MonkeyPatch) -> None:
     """'Not Listed' text on the item page means not listed."""
-    monkeypatch.setattr(nft, "_render", lambda _url, *_a: "Item\nLumi Ankh 1\nNot Listed\nMake offer\n")
+    monkeypatch.setattr(
+        nft, "_render", lambda _url, *_a: "Item\nLumi Ankh 1\nNot Listed\nMake offer\n"
+    )
     result = nft._downbad_asset_listing("3637324709")
     assert result["listed"] is False
 
@@ -163,9 +213,7 @@ def test_downbad_collection_stats_parses_a_real_page_shape(monkeypatch: pytest.M
 def test_downbad_collection_stats_reports_not_found_on_404(monkeypatch: pytest.MonkeyPatch) -> None:
     """A client-side 404 (still HTTP 200) is detected from the rendered text and reported as not found."""
     monkeypatch.setattr(nft, "_downbad_discover_slug", lambda _name, *_a: None)
-    monkeypatch.setattr(
-        nft, "_render", lambda _url, *_a: "404\nThis page could not be found."
-    )
+    monkeypatch.setattr(nft, "_render", lambda _url, *_a: "404\nThis page could not be found.")
     result = nft._downbad_collection_stats("Nonexistent Collection")
     assert result["found"] is False
 
@@ -280,7 +328,9 @@ def test_randgallery_collection_stats_parses_a_real_page_shape(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Real page shape captured live 2026-08-10 (randgallery.com/collections/Haramboiz)."""
-    sample = "Haramboiz\nFloor\n37.00\n24h Sales\n25.00\nHighest Sale\n250.00\nListings\n118\nNfts\n"
+    sample = (
+        "Haramboiz\nFloor\n37.00\n24h Sales\n25.00\nHighest Sale\n250.00\nListings\n118\nNfts\n"
+    )
     monkeypatch.setattr(nft, "_render", lambda _url, *_a: sample)
     result = nft._randgallery_collection_stats("Haramboiz")
     assert result["found"] is True
@@ -334,7 +384,9 @@ def test_statto_collection_stats_not_found_is_not_a_negative_claim(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Not appearing in the visible ranked table is explicitly NOT the same as not existing on Statto."""
-    monkeypatch.setattr(nft, "_render", lambda _url, *_a: "Top Collections by Volume\nOther Thing\n")
+    monkeypatch.setattr(
+        nft, "_render", lambda _url, *_a: "Top Collections by Volume\nOther Thing\n"
+    )
     result = nft._statto_collection_stats("Some Niche Collection")
     assert result["found_in_top_collections_table"] is False
     assert "does NOT mean" in result["note"]
@@ -354,7 +406,9 @@ def test_nft_collection_market_stats_aggregates_all_four_sources(
     monkeypatch.setattr(nft, "_randgallery_collection_stats", lambda _name, *_a: {"found": False})
     monkeypatch.setattr(nft, "_exa_collection_stats", lambda _name, *_a: {"found": True})
     monkeypatch.setattr(
-        nft, "_statto_collection_stats", lambda _name, *_a: {"found_in_top_collections_table": False}
+        nft,
+        "_statto_collection_stats",
+        lambda _name, *_a: {"found_in_top_collections_table": False},
     )
 
     result = nft._tool_nft_collection_market_stats("Pixel City")
@@ -397,7 +451,8 @@ def test_render_falls_back_to_a_one_off_browser_without_a_session(
 
     fake_result = unittest.mock.MagicMock(text="rendered via one-off fetch_page")
     monkeypatch.setattr(
-        "app.modules.scraper.core.browser_scrape.fetch_page", lambda *a, **kw: fake_result  # noqa: ARG005
+        "app.modules.scraper.core.browser_scrape.fetch_page",
+        lambda *a, **kw: fake_result,  # noqa: ARG005
     )
     result = nft._render("https://example.com")
     assert result == "rendered via one-off fetch_page"

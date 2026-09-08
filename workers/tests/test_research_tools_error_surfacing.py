@@ -53,6 +53,52 @@ def test_github_top_contributors_reports_error_not_empty_list(
     assert out == [{"error": "boom"}]
 
 
+def _rate_limited_response(url: str) -> httpx.Response:
+    """A GitHub rate-limit/auth error: valid JSON, non-2xx status -- .json() alone never raises on this."""
+    return httpx.Response(
+        403,
+        json={"message": "API rate limit exceeded", "documentation_url": "https://docs.github.com"},
+        request=httpx.Request("GET", url),
+    )
+
+
+def test_github_releases_reports_error_on_rate_limit_not_empty_list(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression (2026-09-08, Fable audit): a 403 rate-limit response is valid JSON -- a dict, not a list -- so .json() alone never raised; iterating a dict yields its keys (strings), every isinstance(x, dict) check silently filtered them out, and [] read as "this repo has no releases"."""
+    monkeypatch.setattr(
+        research_tools, "_github_get", lambda url, **_kw: _rate_limited_response(url)
+    )
+    out = _github_releases("foo/bar", 5)
+    assert "error" in out[0]
+    assert out[0]["error"]  # non-empty -- a real message, not swallowed
+    assert "message" not in out[0]  # never a raw, unrelated dict key
+
+
+def test_github_recent_commits_reports_error_on_rate_limit_not_empty_list(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Same fix as releases."""
+    monkeypatch.setattr(
+        research_tools, "_github_get", lambda url, **_kw: _rate_limited_response(url)
+    )
+    out = _github_recent_commits("foo/bar", 5)
+    assert "error" in out[0]
+    assert out[0]["error"]  # non-empty -- a real message, not swallowed
+
+
+def test_github_top_contributors_reports_error_on_rate_limit_not_empty_list(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Same fix as releases."""
+    monkeypatch.setattr(
+        research_tools, "_github_get", lambda url, **_kw: _rate_limited_response(url)
+    )
+    out = _github_top_contributors("foo/bar", 5)
+    assert "error" in out[0]
+    assert out[0]["error"]
+
+
 def test_github_activity_surfaces_partial_failure_instead_of_hiding_it(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

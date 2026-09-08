@@ -87,6 +87,36 @@ def test_nonexistent_handle_reports_exists_false(monkeypatch: pytest.MonkeyPatch
     assert result == {"handle": "definitely-not-a-real-handle-xyz", "exists": False}
 
 
+def test_revoked_token_reports_error_not_exists_false(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Regression (2026-09-08, Fable audit): every non-ok response used to collapse into exists: False -- a revoked/invalid bot token (401) read exactly the same as a genuinely nonexistent channel, when it's actually a check failure with no signal about the channel at all."""
+    monkeypatch.setattr("app.core.config.TELEGRAM_BOT_TOKEN", "revoked-token")
+    monkeypatch.setattr(
+        research_tools,
+        "_guarded_get",
+        lambda url, **_kw: _json_response(
+            url, 401, {"ok": False, "error_code": 401, "description": "Unauthorized"}
+        ),
+    )
+    result = _tool_telegram_channel_lookup("nfdomains")
+    assert "error" in result
+    assert "exists" not in result
+
+
+def test_rate_limited_reports_error_not_exists_false(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Same fix: a 429 rate-limit response is a check failure, not a "channel doesn't exist" fact."""
+    monkeypatch.setattr("app.core.config.TELEGRAM_BOT_TOKEN", "test-token")
+    monkeypatch.setattr(
+        research_tools,
+        "_guarded_get",
+        lambda url, **_kw: _json_response(
+            url, 429, {"ok": False, "error_code": 429, "description": "Too Many Requests"}
+        ),
+    )
+    result = _tool_telegram_channel_lookup("nfdomains")
+    assert "error" in result
+    assert "exists" not in result
+
+
 def test_strips_leading_at_sign(monkeypatch: pytest.MonkeyPatch) -> None:
     """A handle passed with a leading @ is normalized before use."""
     monkeypatch.setattr("app.core.config.TELEGRAM_BOT_TOKEN", "test-token")

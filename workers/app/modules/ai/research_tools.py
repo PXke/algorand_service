@@ -160,7 +160,7 @@ def _bsky_access_token() -> tuple[str, str]:
 
 
 def _tool_search_bluesky(query: str, limit: int = 10) -> dict[str, Any]:
-    """Recent public Bluesky posts matching a query — community sentiment and discussion. Returns post text + engagement so the writer judges the mood; a post is social opinion, never cited as established fact.
+    """Public Bluesky posts matching a query — community sentiment and discussion. Returns post text + engagement so the writer judges the mood; a post is social opinion, never cited as established fact.
 
     Uses `_guarded_get_with_retry` (2026-08-28) rather than a bare `guarded_get`
     call: root-caused live on a real compose (Lumi Rogue recompose,
@@ -169,6 +169,12 @@ def _tool_search_bluesky(query: str, limit: int = 10) -> dict[str, Any]:
     sentiment angle for a first-coverage story. 502 is in
     `_FETCH_RETRYABLE_STATUS`, the same policy every other external-API tool
     in this module already gets.
+
+    NOT sorted by recency (2026-09-08 Fable audit): this calls Bluesky's
+    search with sort="top" (engagement-ranked), and results carry a real
+    `created_at` per post -- do not assume the first/top result is the
+    newest, or describe these as "recent" without checking each post's own
+    `created_at`.
     """
     q = (query or "").strip()
     if not q:
@@ -206,6 +212,7 @@ def _tool_search_bluesky(query: str, limit: int = 10) -> dict[str, Any]:
             {
                 "author": handle,
                 "text": (record.get("text") or "")[:300],
+                "created_at": record.get("createdAt"),
                 "likes": p.get("likeCount", 0),
                 "reposts": p.get("repostCount", 0),
                 "replies": p.get("replyCount", 0),
@@ -314,12 +321,20 @@ def _x_search_cache_set(query: str, result: dict[str, Any]) -> None:
     investigation_findings, itself never TTL'd) is the real forever-cache;
     this Redis layer is the cheap same/near-session fast path on top of it.
     """
+    from datetime import UTC, datetime
+
     from app.core.redis_client import get_redis
 
     key = _x_search_cache_key(query)
+    # 2026-09-08 (Fable audit): a forever-cache hit used to return the
+    # exact same dict a live call would, no marker distinguishing "posts
+    # from just now" from "posts from months ago" -- a recompose reading a
+    # months-old cache entry presented it as current with nothing telling
+    # the model (or a human reading the trace) otherwise.
+    stamped = {**result, "cached_at": datetime.now(tz=UTC).isoformat()}
     try:
         client = get_redis()
-        client.set(key, json.dumps(result))
+        client.set(key, json.dumps(stamped))
     except Exception:
         logger.warning("_x_search_cache_set: Redis unavailable, result not cached", exc_info=True)
 
@@ -375,7 +390,16 @@ def _x_search_live(query: str) -> dict[str, Any]:
 
 
 def _tool_search_x(query: str) -> dict[str, Any]:
-    """Search recent public X (Twitter) posts -- many Algorand ecosystem projects announce primarily on X rather than Bluesky. Paid per call (X's pay-as-you-go API), so this is capped hard: a fixed small result count and a daily call budget shared across every article composed today. Treat results as social opinion/announcement, never cited as established fact on its own."""
+    """Search recent public X (Twitter) posts -- many Algorand ecosystem projects announce primarily on X rather than Bluesky. Paid per call (X's pay-as-you-go API), so this is capped hard: a fixed small result count and a daily call budget shared across every article composed today. Treat results as social opinion/announcement, never cited as established fact on its own.
+
+    Results are cached forever per normalized query (owner call,
+    2026-09-02) -- a repeat/recompose query can return posts from months
+    ago. When present, `cached_at` is the ISO timestamp of the ORIGINAL
+    live call, not of this request -- treat "recent" as relative to
+    `cached_at`, not to now, on a cache hit (2026-09-08 Fable audit: this
+    field didn't exist before, so a stale cache hit had nothing telling
+    the model it wasn't current).
+    """
     from app.core.config import X_BEARER_TOKEN, X_SEARCH_ENABLED
 
     q = (query or "").strip()
@@ -450,8 +474,10 @@ _BLUESKY_SCHEMA = {
     "function": {
         "name": "search_bluesky",
         "description": (
-            "Search recent public Bluesky posts for community sentiment/discussion "
-            "on a topic (free, no Twitter/X). Use ONLY when the story's value "
+            "Search public Bluesky posts for community sentiment/discussion "
+            "on a topic (free, no Twitter/X). Ranked by engagement (top), NOT "
+            "by recency -- check each result's own `created_at` before "
+            "calling anything 'recent'. Use ONLY when the story's value "
             "depends on what the community is saying; summarize the mood and treat "
             "posts as social opinion, not fact."
         ),
@@ -798,10 +824,19 @@ def _github_repo_metadata(slug: str) -> dict[str, Any]:
 
 def _github_releases(slug: str, n: int) -> list[dict[str, Any]]:
     try:
-        rel = _github_get(
+        resp = _github_get(
             f"https://api.github.com/repos/{slug}/releases",
             params={"per_page": n},
-        ).json()
+        )
+        # 2026-09-08 (Fable audit): a rate-limit/auth error (e.g. 403 "API
+        # rate limit exceeded") still returns valid JSON -- a dict, not a
+        # list -- so .json() alone never raised. Iterating a dict yields its
+        # KEYS (strings), every `isinstance(x, dict)` check below silently
+        # failed, and the error read as "this repo genuinely has no
+        # releases" instead of the CLAUDE.md sec 2 #8 error dict this
+        # function's own comment already promised.
+        resp.raise_for_status()
+        rel = resp.json()
         return [
             {
                 "name": x.get("name") or x.get("tag_name"),
@@ -827,10 +862,14 @@ def _github_releases(slug: str, n: int) -> list[dict[str, Any]]:
 
 def _github_recent_commits(slug: str, n: int) -> list[dict[str, Any]]:
     try:
-        commits = _github_get(
+        resp = _github_get(
             f"https://api.github.com/repos/{slug}/commits",
             params={"per_page": n},
-        ).json()
+        )
+        # See _github_releases: a rate-limit/auth error response is a dict,
+        # not a list, and .json() alone never raised on it.
+        resp.raise_for_status()
+        commits = resp.json()
         return [
             {
                 "message": (c.get("commit", {}).get("message") or "").splitlines()[0][:140],
@@ -850,10 +889,14 @@ def _github_recent_commits(slug: str, n: int) -> list[dict[str, Any]]:
 def _github_top_contributors(slug: str, n: int) -> list[dict[str, Any]]:
     """Top contributors by total commit count — who really built the project, a stronger "anonymous team" signal than the last few commit authors."""
     try:
-        contributors = _github_get(
+        resp = _github_get(
             f"https://api.github.com/repos/{slug}/contributors",
             params={"per_page": n},
-        ).json()
+        )
+        # See _github_releases: a rate-limit/auth error response is a dict,
+        # not a list, and .json() alone never raised on it.
+        resp.raise_for_status()
+        contributors = resp.json()
         return [
             {"login": c.get("login"), "contributions": c.get("contributions")}
             for c in contributors
@@ -923,7 +966,7 @@ def _tool_github_repository_search(query: str, limit: int = 5) -> dict[str, Any]
 
 
 def _tool_search_token_listings(asset_id: int | str) -> dict[str, Any]:
-    """Whether an Algorand ASA is actually listed/tradeable on the two biggest Algorand DEXs (Tinyman, Pact) — real liquidity, price, and 24h/7d volume in USD, or confirmation it's NOT listed anywhere. Use this instead of assuming a token trades just because it exists; a real supply with zero listings is itself a notable fact worth reporting. For a single cross-DEX aggregate price/volume/market-cap/TVL number instead of a per-DEX breakdown, use lookup_asset_market_data instead."""
+    """Whether an Algorand ASA is actually listed/tradeable on Tinyman and Pact SPECIFICALLY (the two biggest Algorand DEXs, but not the only ones) — real liquidity, price, and 24h/7d volume in USD, or confirmation it's not listed on either of those two. "Not listed" here means "not on Tinyman or Pact" -- NOT "not listed anywhere" (2026-09-08: this docstring used to overclaim that). Use this instead of assuming a token trades just because it exists. For a genuinely cross-DEX aggregate price/volume/market-cap/TVL number, use lookup_asset_market_data instead."""
     aid = str(asset_id).strip()
     if not aid.isdigit():
         return {"error": "asset_id must be a numeric ASA id"}
@@ -1116,6 +1159,23 @@ def _publicize_fetch_result(raw: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+def _publicize_google_doc_result(raw: dict[str, Any]) -> dict[str, Any]:
+    """Strip the internal offset key and expose it as a real `next_offset` the model can pass back to fetch_google_doc's own `offset` param.
+
+    2026-09-08 (Fable audit): this used to reuse _publicize_fetch_result,
+    which strips `_next_offset` entirely and injects a scroll hint pointing
+    at fetch_url with continue_reading=true -- the wrong tool, and a
+    parameter fetch_google_doc doesn't accept. fetch_google_doc paginates
+    via its own `offset` parameter (see its schema), so the continuation
+    value has to actually reach the model, not just a boolean.
+    """
+    out = dict(raw)
+    next_offset = out.pop("_next_offset", None)
+    if out.get("has_more"):
+        out["next_offset"] = next_offset
+    return out
+
+
 def _fetch_url_error(u: str, exc: Exception, *, status_code: int | None = None) -> dict[str, Any]:
     """Build the {url, error, [status_code], [hint]} response for a failed fetch."""
     out: dict[str, Any] = {"url": u, "error": str(exc)[:200]}
@@ -1125,6 +1185,9 @@ def _fetch_url_error(u: str, exc: Exception, *, status_code: int | None = None) 
     if hint:
         out["hint"] = hint
     return out
+
+
+_PDF_MAX_PAGES = 40
 
 
 def _fetch_pdf_document(resp: Any, *, base: str, cap: int, offset: int) -> dict[str, Any]:  # noqa: ANN401 -- httpx.Response, kept loosely typed to match the caller
@@ -1137,10 +1200,26 @@ def _fetch_pdf_document(resp: Any, *, base: str, cap: int, offset: int) -> dict[
         reader = PdfReader(BytesIO(resp.content))
         md = reader.metadata
         title = (getattr(md, "title", None) or "")[:200] if md else ""
-        text = "\n".join((pg.extract_text() or "") for pg in reader.pages[:40]).strip()
+        total_pages = len(reader.pages)
+        text = "\n".join((pg.extract_text() or "") for pg in reader.pages[:_PDF_MAX_PAGES]).strip()
     except Exception as exc:
         return {"url": base, "error": f"pdf parse failed: {str(exc)[:160]}"}
-    return _slice_document_text(text, url=base, title=title, links=[], max_chars=cap, offset=offset)
+    result = _slice_document_text(
+        text, url=base, title=title, links=[], max_chars=cap, offset=offset
+    )
+    if total_pages > _PDF_MAX_PAGES:
+        # 2026-09-08 (Fable audit): has_more used to go false once the model had
+        # paged through all of the EXTRACTED text, reading as "document ended" --
+        # with no way to tell that from a document actually truncated at the
+        # 40-page extraction cap, silently dropping every page after it.
+        result["pdf_pages_extracted"] = _PDF_MAX_PAGES
+        result["pdf_pages_total"] = total_pages
+        result["pdf_truncated_note"] = (
+            f"only the first {_PDF_MAX_PAGES} of {total_pages} pages were extracted -- "
+            "has_more turning false means the extracted text ended, not that the "
+            "document itself ends here"
+        )
+    return result
 
 
 _PDF_URL_IN_ATTR_RE = re.compile(r'(?:href|src)=["\']([^"\']+\.pdf(?:\?[^"\']*)?)["\']', re.I)
@@ -1235,9 +1314,9 @@ def _tool_fetch_google_doc(url: str, max_chars: int = 6000, offset: int = 0) -> 
     Only works for a doc whose sharing is "Anyone with the link can view" (or
     published to the web) — a private doc's export endpoint 401s/redirects to
     a login page, same as any other access-controlled page this pipeline
-    can't authenticate into. Paginated the same way fetch_url is: call again
-    with the same url and a later offset (from has_more/_next_offset) to keep
-    reading.
+    can't authenticate into. Paginated via this tool's own `offset` param
+    (not fetch_url's continue_reading): call again with the same url and
+    the returned `next_offset` to keep reading.
     """
     u = (url or "").strip()
     if not u:
@@ -1266,7 +1345,7 @@ def _tool_fetch_google_doc(url: str, max_chars: int = 6000, offset: int = 0) -> 
     raw = _slice_document_text(
         resp.text, url=u, title="", links=[], max_chars=max_chars, offset=offset
     )
-    return _publicize_fetch_result(raw)
+    return _publicize_google_doc_result(raw)
 
 
 _SCRIPT_SRC_RE = re.compile(r'<script[^>]+src=["\']([^"\']+)["\']', re.I)
@@ -1332,9 +1411,15 @@ def _tool_grep_frontend_bundle(url: str, search_term: str, max_matches: int = 5)
 
     Fetches the page's own <script src=...> bundles (same-origin and CDN,
     skipping obvious third-party analytics/ad scripts) up to a byte budget,
-    and returns each match with surrounding context. A miss across every
-    bundle is itself informative — it means the term isn't in the client
-    code at all, not that the check failed.
+    and returns each match with surrounding context. A miss is only
+    informative when scripts_checked covers every script listed in
+    scripts_found_on_page -- check scripts_failed_to_fetch (2026-09-08:
+    this docstring used to claim a miss always means the term isn't in the
+    client code, with no way to tell a real miss from a script that never
+    loaded) before treating "no matches" as "not present." Also does not
+    see dynamically-imported route chunks a page never references via a
+    plain <script src=...> tag -- a real limitation, not just a fetch
+    failure, for most SPA logic split across routes.
     """
     u = (url or "").strip()
     term = (search_term or "").strip()
@@ -1358,6 +1443,7 @@ def _tool_grep_frontend_bundle(url: str, search_term: str, max_matches: int = 5)
 
     matches: list[dict[str, Any]] = []
     scripts_checked: list[str] = []
+    scripts_failed_to_fetch: list[str] = []
     bytes_total = 0
     for src in script_urls:
         if bytes_total >= _BUNDLE_GREP_MAX_BYTES_TOTAL or len(matches) >= n_matches:
@@ -1366,13 +1452,18 @@ def _tool_grep_frontend_bundle(url: str, search_term: str, max_matches: int = 5)
             resp = _guarded_get_with_retry(src, timeout=15.0)
             resp.raise_for_status()
         except Exception:
+            # 2026-09-08 (Fable audit): used to just `continue` with no
+            # record at all -- every bundle failing to fetch (e.g. a CDN
+            # blocking this server) read identically to "checked every
+            # script, term genuinely absent."
+            scripts_failed_to_fetch.append(src)
             continue
         body = resp.text
         bytes_total += len(body.encode("utf-8", errors="ignore"))
         scripts_checked.append(src)
         matches.extend(_bundle_body_matches(body, src, term, limit=n_matches - len(matches)))
 
-    return {
+    result: dict[str, Any] = {
         "url": u,
         "search_term": term,
         "scripts_checked": scripts_checked,
@@ -1380,6 +1471,9 @@ def _tool_grep_frontend_bundle(url: str, search_term: str, max_matches: int = 5)
         "match_count": len(matches),
         "matches": matches,
     }
+    if scripts_failed_to_fetch:
+        result["scripts_failed_to_fetch"] = scripts_failed_to_fetch
+    return result
 
 
 def _extract_html_text_and_links(
@@ -1619,6 +1713,28 @@ def _augment_spa_notfound_warning(result: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
+def _augment_fetch_result(url: str, result: dict[str, Any]) -> dict[str, Any]:
+    """Apply every fetch_url safety augmentation to an already-publicized result -- github-archived-but-owner-still-shipping (Pera Wallet, 2026-07-20) and SPA-shell-not-found (lumirogue, 2026-08-10/12).
+
+    Shared by _tool_fetch_url and writer_tools' scroll wrapper (2026-09-08,
+    Fable audit) so both call paths get the same protections -- the scroll
+    wrapper used to call _fetch_url_internal directly and never applied
+    either augmentation, so in the real compose path (which always goes
+    through the scroll wrapper, see writer_tools.py's tool-context wiring)
+    these two incident fixes never actually ran; only tests calling
+    _tool_fetch_url directly ever exercised them.
+    """
+    try:
+        result = _augment_github_archived(url, result)
+    except Exception:
+        logger.debug("github-archived augmentation failed", exc_info=True)
+    try:
+        result = _augment_spa_notfound_warning(result)
+    except Exception:
+        logger.debug("SPA not-found augmentation failed", exc_info=True)
+    return result
+
+
 def _tool_fetch_url(
     url: str,
     max_chars: int = 6000,
@@ -1631,16 +1747,7 @@ def _tool_fetch_url(
     )
     if raw.get("error"):
         return raw
-    result = _publicize_fetch_result(raw)
-    try:
-        result = _augment_github_archived(url, result)
-    except Exception:
-        logger.debug("github-archived augmentation failed", exc_info=True)
-    try:
-        result = _augment_spa_notfound_warning(result)
-    except Exception:
-        logger.debug("SPA not-found augmentation failed", exc_info=True)
-    return result
+    return _augment_fetch_result(url, _publicize_fetch_result(raw))
 
 
 def _tool_click_element(
@@ -2649,6 +2756,20 @@ def _tool_discourse_forum(forum_url: str, limit: int = 10, query: str = "") -> d
     return out
 
 
+def _telegram_getchat_failure(h: str, data: dict[str, Any]) -> dict[str, Any]:
+    """A non-ok getChat response: 'chat not found' is a genuine negative, anything else (revoked token, rate-limit, ...) is a check failure, not a fact about the channel.
+
+    2026-09-08 (Fable audit): every failure mode used to collapse into
+    "exists: False" here -- a revoked/invalid bot token (401), rate-limiting
+    (429), or any other transport hiccup read exactly the same as a
+    genuinely nonexistent channel (CLAUDE.md sec 2 #8).
+    """
+    description = str(data.get("description") or "")
+    if "chat not found" in description.lower():
+        return {"handle": h, "exists": False}
+    return {"handle": h, "error": description or f"telegram API error {data.get('error_code')}"}
+
+
 def _tool_telegram_channel_lookup(handle: str = "") -> dict[str, Any]:
     """Check whether a specific @handle is a real public Telegram channel/group, via the platform's own posting bot (Bot API's getChat resolves any public handle without needing the bot to be a member). NOT a search — you must already have a candidate handle (try search_web first, or the project's own name). Returns existence, title/type/description, visible member count, and the most recent post date seen on the channel's public web preview (a real activity signal — a channel that exists but hasn't posted in years is itself a notable fact, not evidence of an active community)."""
     import re
@@ -2667,7 +2788,7 @@ def _tool_telegram_channel_lookup(handle: str = "") -> dict[str, Any]:
     except Exception as exc:
         return {"handle": h, "error": str(exc)[:200]}
     if not data.get("ok"):
-        return {"handle": h, "exists": False}
+        return _telegram_getchat_failure(h, data)
     result = data.get("result") or {}
     out: dict[str, Any] = {
         "handle": h,
@@ -2726,12 +2847,28 @@ def _tool_lookup_discord_invite_stats(invite: str) -> dict[str, Any]:
         return {"invite_code": code, "error": "unexpected discord response"}
     guild = data.get("guild") or {}
     profile = data.get("profile") or {}
+    # 2026-09-08 (Fable audit, confirmed live against Discord's real API):
+    # the reliable counts are the TOP-LEVEL approximate_member_count /
+    # approximate_presence_count -- always populated by with_counts=true per
+    # Discord's own documented contract. profile.member_count/online_count
+    # only exist for a server with Discord's "Server Profile" feature
+    # enabled (large/discoverable communities); a typical small project
+    # server -- exactly what this tool is for -- has no profile object at
+    # all and silently returned None for both counts. Prefer the top-level
+    # fields, falling back to profile's only if the top-level key is truly
+    # absent (None, not just zero).
+    member_count = data.get("approximate_member_count")
+    if member_count is None:
+        member_count = profile.get("member_count")
+    online_count = data.get("approximate_presence_count")
+    if online_count is None:
+        online_count = profile.get("online_count")
     return {
         "invite_code": code,
         "exists": True,
         "guild_name": guild.get("name"),
-        "member_count": profile.get("member_count"),
-        "online_count": profile.get("online_count"),
+        "member_count": member_count,
+        "online_count": online_count,
         "description": (guild.get("description") or profile.get("description") or "")[:300] or None,
     }
 
@@ -2857,10 +2994,20 @@ def _tool_github_repo_contents(repo: str, path: str = "", ref: str = "") -> dict
             "error": f"expected owner/name, got '{repo}' — for an owner's repo "
             "list, call github_activity with just the owner"
         }
+    import urllib.parse
+
     p = (path or "").strip().lstrip("/")
+    # 2026-09-08 (Fable audit): `p` used to be interpolated unescaped into an
+    # authenticated api.github.com URL -- a model-supplied path containing
+    # "?"/"#"/".." segments could steer the request's query string or path
+    # resolution in ways the model shouldn't control. quote(..., safe="/")
+    # preserves real directory separators while escaping everything else.
+    encoded_p = urllib.parse.quote(p, safe="/")
     params = {"ref": ref.strip()} if ref and ref.strip() else None
     try:
-        resp = _github_get(f"https://api.github.com/repos/{slug}/contents/{p}", params=params)
+        resp = _github_get(
+            f"https://api.github.com/repos/{slug}/contents/{encoded_p}", params=params
+        )
         if resp.status_code == 404:
             return {"repo": slug, "path": p, "error": "path not found"}
         resp.raise_for_status()
@@ -2942,8 +3089,26 @@ def _parse_medium_rss(feed_url: str, n: int) -> dict[str, Any]:
         return {"feed": feed_url, "error": str(exc)[:200], "articles": []}
     if root is None:
         return {"feed": feed_url, "error": "feed not parseable as RSS", "articles": []}
+    items = root.findall(".//item")
+    root_tag = etree.QName(root).localname if root.tag else ""
+    if not items and (root_tag.lower() != "rss" or root.find(".//channel") is None):
+        # 2026-09-08 (Fable audit, confirmed live against algonaut.space/feed --
+        # the exact custom domain named in this tool's own docstring, which now
+        # 200s with a domain-parking HTML page): raise_for_status() only
+        # catches non-2xx, and recover=True happily parses non-feed HTML into
+        # SOME tree with zero <item> elements -- that used to report count: 0,
+        # identical to a genuine "no articles published on this feed."
+        return {
+            "feed": feed_url,
+            "error": (
+                f"response doesn't look like an RSS feed (root element "
+                f"<{root_tag or '?'}>, no <channel>) -- not a confirmed "
+                "zero-article result"
+            ),
+            "articles": [],
+        }
     articles = []
-    for it in root.findall(".//item")[:n]:
+    for it in items[:n]:
         cats = [c.text.strip() for c in it.findall("category") if c.text]
         articles.append(
             {
@@ -3134,10 +3299,13 @@ _TOKEN_LISTINGS_SCHEMA = {
         "name": "search_token_listings",
         "description": (
             "Check whether an Algorand ASA is actually listed/tradeable on "
-            "Tinyman and Pact (the two biggest Algorand DEXs) — real liquidity, "
-            "price, and 24h/7d volume in USD, or confirmation it's not listed "
-            "anywhere. Use before reporting a token as tradeable, and use a real "
-            "'not listed anywhere' result as a notable fact, not a dead end."
+            "Tinyman and Pact specifically (the two biggest Algorand DEXs) — real "
+            "liquidity, price, and 24h/7d volume in USD, or confirmation it's not "
+            "listed on EITHER of those two. This does NOT cover every Algorand "
+            "DEX/exchange, so 'not listed' here means 'not on Tinyman or Pact', "
+            "not 'not listed anywhere' — for a genuinely cross-DEX aggregate "
+            "figure use lookup_asset_market_data instead. Use before reporting a "
+            "token as tradeable on one of these two."
         ),
         "parameters": {
             "type": "object",
@@ -3156,8 +3324,17 @@ _FETCH_SCHEMA = {
             "or blog post behind a search_web snippet. Long pages return one "
             "window at a time. When has_more is true, call fetch_url AGAIN with "
             "the SAME url and continue_reading=true to read the next section. "
-            "In-content links are kept inline as 'label (url)' and, on the first "
-            "window only, returned as a `links` array of {text,url}."
+            "For a static (non-JS-rendered) page, in-content links are kept "
+            "inline as 'label (url)'. For a page that needed JavaScript "
+            "rendering to show its real content (common on SPA-built project "
+            "sites), the returned text is the rendered page's plain visible "
+            "text instead, with NO inline link markup -- use the separate "
+            "`links` array (from the page's original, pre-render HTML, first "
+            "window only) to cite a specific in-page link in that case, since "
+            "it may not literally appear inline in the text you were given. "
+            "A direct PDF link is read too, but only its first 40 pages -- "
+            "check pdf_truncated_note in the result before treating has_more "
+            "turning false as 'the document ends here' on a longer PDF."
         ),
         "parameters": {
             "type": "object",
@@ -3355,7 +3532,10 @@ _EXTRACT_PDF_SCHEMA = {
             "embed) instead of linking it directly — fetch_url only reads "
             "the wrapper page's own chrome/text in that case, not the "
             "document itself. Also works directly if url is already a "
-            "plain PDF link. Returns up to 40 pages of extracted text."
+            "plain PDF link. Returns up to 40 pages of extracted text, "
+            "windowed like fetch_url (offset/has_more) -- on a longer PDF, "
+            "check pdf_truncated_note before treating has_more turning "
+            "false as 'the document ends here'."
         ),
         "parameters": {
             "type": "object",
@@ -3380,8 +3560,9 @@ _FETCH_GOOGLE_DOC_SCHEMA = {
             "JS editor shell loading, not the document's words. Only works "
             "when the doc's sharing is 'Anyone with the link can view'; a "
             "private doc reports that plainly instead of an empty page. "
-            "Paginated like fetch_url — call again with the same url and a "
-            "later offset (from has_more) to keep reading."
+            "Paginated via this tool's own offset param — if has_more is "
+            "true, call again with the same url and offset=next_offset "
+            "(from the result) to keep reading."
         ),
         "parameters": {
             "type": "object",
@@ -3457,9 +3638,12 @@ _GREP_BUNDLE_SCHEMA = {
             "actually DOES (requires a wallet connection, enforces a fee, "
             "gates a feature) rather than what its rendered page shows. "
             "fetch_url only sees rendered/DOM text; SPA logic that never "
-            "prints to the page is invisible to it. A miss across every "
-            "bundle means the term genuinely isn't in the client code, not "
-            "that the check failed. NOT reliable for mainnet-vs-testnet or "
+            "prints to the page is invisible to it. A miss is only "
+            "informative when scripts_checked covers every script in "
+            "scripts_found_on_page -- check scripts_failed_to_fetch before "
+            "treating 'no matches' as 'not present'. Also never sees "
+            "dynamically-imported route chunks, where most SPA logic lives, "
+            "not just plain <script src> bundles. NOT reliable for mainnet-vs-testnet or "
             "'where does this button actually go' -- a minified bundle "
             "often defines several config objects (a wallet library's "
             "mainnet AND testnet blocks both exist as text) and resolves "
@@ -3675,9 +3859,15 @@ def research_tools() -> tuple[list[dict[str, Any]], dict[str, Any]]:
     github_repository_search, github_repository_contents, search_token_listings,
     fetch_url, click_element, get_defi_tvl, get_defi_tvl_history, discourse_forum, get_node_stats,
     medium_api_article_list, package_download_stats, search_nfd_directory,
-    app_store_metrics, reddit_api_post_history, xgov_proposal_status and
-    lookup_asset_market_data hit free public APIs and are always available
-    (GITHUB_TOKEN optional).
+    app_store_metrics, xgov_proposal_status and lookup_asset_market_data hit
+    free public APIs and are always available (GITHUB_TOKEN optional).
+
+    reddit_api_post_history is NOT in that "always available" set (2026-09-08:
+    this docstring used to list it there) -- it deliberately has no schema at
+    all (2026-07-16: reddit blocks this server's IP outright), only a stub
+    handler kept registered so a stale cached-prompt reference to it gets a
+    truthful zero-network-call answer instead of a 403. The model never sees
+    it as a callable tool.
     """
     from app.core import config
     from app.core.config import BLUESKY_SEARCH_ENABLED, SEARXNG_URL, env_str

@@ -133,11 +133,19 @@ def _parse_amount(text: str) -> float | None:
 # Per-asset listing status
 # ---------------------------------------------------------------------------
 
-_STATTO_FOR_SALE_RE = re.compile(
-    r"FOR SALE\s*\nListed by\s*\n([^\n]+)\n([\d,]+\.?\d*)", re.I
-)
+_STATTO_FOR_SALE_RE = re.compile(r"FOR SALE\s*\nListed by\s*\n([^\n]+)\n([\d,]+\.?\d*)", re.I)
 _RAND_CURRENT_PRICE_RE = re.compile(r"Current Price\s*\n([\d,]+\.?\d*)")
 _DOWNBAD_LISTED_ON_RE = re.compile(r"Listed on downbad\s*\n?([\d,.]+[kKmM]?)", re.I)
+# A near-empty render (a blank app shell, a one-line bot-block/redirect
+# message) is not the same fact as "checked and confirmed not listed" --
+# distinguishes that case from a real page's genuine absence of a listing
+# marker (2026-09-08 Fable audit, same shape as _downbad_collection_stats'
+# own "found: false, page rendered but no stats matched" fix below). Set
+# low deliberately: real "not listed" page samples captured live run
+# 35-90 chars even trimmed for test fixtures (a full render is longer
+# still) -- this only catches renders far short of that, not a coarse
+# site-specific content check.
+_MIN_REAL_ASSET_PAGE_TEXT_LEN = 25
 
 
 def _statto_asset_listing(asset_id: str, playwright_session: Any = None) -> dict[str, Any]:  # noqa: ANN401
@@ -145,11 +153,20 @@ def _statto_asset_listing(asset_id: str, playwright_session: Any = None) -> dict
     if text is None:
         return {"error": "could not render statto.xyz asset page"}
     if "FOR SALE" not in text:
+        if len(text) < _MIN_REAL_ASSET_PAGE_TEXT_LEN:
+            return {
+                "listed": None,
+                "note": "page rendered but too little content to confirm -- possibly a wrong asset id or a page that didn't fully load",
+            }
         return {"listed": False}
     m = _STATTO_FOR_SALE_RE.search(text)
     if not m:
         return {"listed": True, "note": "shows FOR SALE but price could not be parsed"}
-    return {"listed": True, "listed_by": m.group(1).strip(), "price_algo": _parse_amount(m.group(2))}
+    return {
+        "listed": True,
+        "listed_by": m.group(1).strip(),
+        "price_algo": _parse_amount(m.group(2)),
+    }
 
 
 def _randgallery_asset_listing(asset_id: str, playwright_session: Any = None) -> dict[str, Any]:  # noqa: ANN401
@@ -158,6 +175,11 @@ def _randgallery_asset_listing(asset_id: str, playwright_session: Any = None) ->
         return {"error": "could not render randgallery.com asset page"}
     m = _RAND_CURRENT_PRICE_RE.search(text)
     if not m:
+        if len(text) < _MIN_REAL_ASSET_PAGE_TEXT_LEN:
+            return {
+                "listed": None,
+                "note": "page rendered but too little content to confirm -- possibly a wrong asset id or a page that didn't fully load",
+            }
         return {"listed": False}
     return {"listed": True, "price_algo": _parse_amount(m.group(1))}
 
@@ -169,7 +191,19 @@ def _exa_asset_listing(asset_id: str, playwright_session: Any = None) -> dict[st
     # Exa shows "Buy now" ahead of price on a listed item's own detail page,
     # and only "Make offer" (no "Buy now") when it isn't for sale -- confirmed
     # against a known-listed and a known-unlisted asset live 2026-08-10.
-    return {"listed": "buy now" in text.lower()}
+    low = text.lower()
+    if "buy now" in low:
+        return {"listed": True}
+    if "make offer" in low:
+        return {"listed": False}
+    # 2026-09-08 (Fable audit): neither marker present used to default to
+    # listed: False, indistinguishable from a genuinely-confirmed unlisted
+    # item -- a rendered-but-wrong page (bot block, wrong id, layout drift)
+    # gets an honest "couldn't tell" instead.
+    return {
+        "listed": None,
+        "note": "page rendered but neither 'Buy now' nor 'Make offer' was found -- possibly a wrong asset id or a page that didn't fully load",
+    }
 
 
 def _downbad_asset_listing(asset_id: str, playwright_session: Any = None) -> dict[str, Any]:  # noqa: ANN401
@@ -192,6 +226,14 @@ def _downbad_asset_listing(asset_id: str, playwright_session: Any = None) -> dic
         return {"listed": True, "price_algo": _parse_amount(m.group(1))}
     if "buy now" in text.lower():
         return {"listed": True, "note": "shows BUY NOW but price could not be parsed"}
+    # 2026-09-08 (Fable audit): none of the explicit markers matched -- same
+    # ambiguity as the other three marketplaces above, not a confirmed
+    # negative.
+    if len(text) < _MIN_REAL_ASSET_PAGE_TEXT_LEN:
+        return {
+            "listed": None,
+            "note": "page rendered but too little content to confirm -- possibly a wrong asset id or a page that didn't fully load",
+        }
     return {"listed": False}
 
 
@@ -199,7 +241,15 @@ def _tool_nft_asset_listing_status(
     asset_id: int | str,
     playwright_session: Any = None,  # noqa: ANN401 -- PlaywrightSession; injected from compose context, see writer_tools._wrap_browser_action
 ) -> dict[str, Any]:
-    """Whether a specific Algorand NFT (by ASA id) is CURRENTLY listed for sale, and at what price, across Downbad, Statto, Rand Gallery, and Exa Market -- and on which marketplace, since an item can be listed on one and not another (confirmed live: a Haramboiz piece was listed on Rand Gallery but showed only 'Make offer', not listed, on Exa Market at the same time). Slow (multiple page renders) -- expect several seconds."""
+    """Whether a specific Algorand NFT (by ASA id) is CURRENTLY listed for sale, and at what price, across Downbad, Statto, Rand Gallery, and Exa Market -- and on which marketplace, since an item can be listed on one and not another (confirmed live: a Haramboiz piece was listed on Rand Gallery but showed only 'Make offer', not listed, on Exa Market at the same time). Slow (multiple page renders) -- expect several seconds.
+
+    Per-marketplace `listed` is TRI-STATE (2026-09-08 Fable audit): `true`/
+    `false` for a confirmed positive/negative, `null` (with a `note`) when
+    the page rendered but showed neither marker -- a wrong asset id, a
+    bot-block, or a page that didn't fully load, none of which are the same
+    fact as "confirmed not listed." Treat `null` as "couldn't check this
+    marketplace," never as evidence the item isn't listed there.
+    """
     aid = str(asset_id).strip()
     if not aid.isdigit():
         return {"error": "asset_id must be numeric"}
@@ -287,7 +337,9 @@ _RAND_LISTINGS_RE = re.compile(r"Listings\s*\n(\d+)")
 def _randgallery_collection_stats(name: str, playwright_session: Any = None) -> dict[str, Any]:  # noqa: ANN401
     from urllib.parse import quote
 
-    text = _render(f"https://www.randgallery.com/collections/{quote(name.strip())}", playwright_session)
+    text = _render(
+        f"https://www.randgallery.com/collections/{quote(name.strip())}", playwright_session
+    )
     if text is None:
         return {"error": "could not render randgallery.com collection page"}
     floor_m = _RAND_FLOOR_RE.search(text)
@@ -388,6 +440,9 @@ NFT_MARKETPLACE_SCHEMAS: list[dict[str, Any]] = [
                 "sale, and at what price, on Downbad/Statto/Rand Gallery/Exa "
                 "Market -- an item can be listed on one marketplace and not "
                 "another, so check all four rather than assuming from one. "
+                "Per-marketplace `listed` can be null (with a note) when the "
+                "page rendered but couldn't be confirmed either way -- treat "
+                "that as 'could not check', never as 'not listed'. "
                 "Slow (several seconds, renders multiple pages)."
             ),
             "parameters": {

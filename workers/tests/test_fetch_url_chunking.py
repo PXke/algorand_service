@@ -122,6 +122,43 @@ def test_continue_reading_wrap_tracks_scroll_state(monkeypatch: pytest.MonkeyPat
     assert second["has_more"] is True
 
 
+def test_continue_reading_wrap_applies_the_spa_notfound_augmentation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression (2026-09-08, Fable audit): the scroll wrapper used to call _fetch_url_internal directly and skip every fetch_url safety augmentation entirely -- in the real compose path (which always goes through this wrapper), the SPA-not-found warning (lumirogue, 2026-08-10/12) and the github-archived-but-owner-still-shipping warning (Pera Wallet, 2026-07-20) never actually fired; only tests calling _tool_fetch_url directly ever exercised them."""
+    html = (
+        "<html><head><title>404</title></head><body>"
+        'Page Not Found\nThe page "terms" could not be found in this application.'
+        "</body></html>"
+    )
+
+    class _Resp:
+        status_code = 200
+        url = "https://lumirogue.com/terms"
+        headers: ClassVar[dict[str, str]] = {"content-type": "text/html"}
+        text = html
+
+        def raise_for_status(self) -> None:
+            return None
+
+    monkeypatch.setattr(
+        "app.modules.ai.research_tools._guarded_get",
+        lambda *_a, **_k: _Resp(),
+    )
+    monkeypatch.setattr(
+        "app.modules.scraper.crawler_registry.is_web_spa_enabled",
+        lambda: False,
+    )
+
+    handler = wt._wrap_fetch_url_scroll(
+        lambda **_kw: (_ for _ in ()).throw(AssertionError("should not call bare handler")),
+        {},
+    )
+    result = handler(url="https://lumirogue.com/terms", max_chars=5000)
+    assert result["text"].startswith("[CLIENT-SIDE ROUTE CHECK]")
+    assert "click_element" in result["text"]
+
+
 def test_fetch_url_past_end_hints(monkeypatch: pytest.MonkeyPatch) -> None:
     """Returns empty text with a hint when the requested offset is past the end of a short page."""
     html = "<html><body>short</body></html>"

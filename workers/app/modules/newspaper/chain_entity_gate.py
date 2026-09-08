@@ -348,10 +348,15 @@ def _auto_link_entities(
             # (algod can't disprove it); don't lend it an explorer link.
             unverified.append({"kind": kind, "value": value, "why": "untraced"})
             continue
+        # Digit-boundary guard: without it, linking asset/app id "500" would
+        # also match the "500" inside "2500 ALGO" -- both kinds are plain
+        # numeric ids, so both need it (2026-09-08 Fable audit: this guard
+        # existed for "asset" only, "app" used bare re.escape and could
+        # grab a trailing digit off an unrelated nearby number).
         pattern = (
-            re.compile(re.escape(value))
-            if kind != "asset"
-            else re.compile(rf"(?<![\d/]){re.escape(value)}(?![\d/])")
+            re.compile(rf"(?<![\d/]){re.escape(value)}(?![\d/])")
+            if kind in ("asset", "app")
+            else re.compile(re.escape(value))
         )
         for m in pattern.finditer(body):
             if _in_spans(m.start(), m.end(), spans):
