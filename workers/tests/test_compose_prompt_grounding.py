@@ -106,6 +106,16 @@ def test_stage2_generation_guidance_bans_attributing_trust_properties_to_algorit
     assert "Glicko-2" in mc._STAGE2_GENERATION_GUIDANCE
 
 
+def test_absence_is_data_extends_to_any_fetched_record() -> None:
+    """AlgoChess recompose #4 (2026-09-08): a draft correctly quoted a real settlement transaction's note fields, then padded on a plausible 'each player's rating before and after' clause with specific invented numbers -- confirmed fabricated by decoding the actual on-chain note (result/termination/addresses/move list only, no rating field) and by checking the compose session transcript (the invented numbers appear only in the model's own generated prose, never in any tool result). ABSENCE IS DATA already banned this exact failure shape for adoption counters; generalized to any fetched record so a claim (the project's FAQ) can't be silently 'confirmed' by inventing the field a real record doesn't have."""
+    assert "This principle extends to any structured record you fetch" in mc._writing_guidelines(
+        "2026-09-08"
+    )
+    assert "never silently invent a value to make the record match the claim" in (
+        mc._writing_guidelines("2026-09-08")
+    )
+
+
 def test_tools_guidance_requires_asset_affiliation_check() -> None:
     """Lumi Rogue incident (2026-08-11): two independent composes both cited an unrelated 'LUMI' ASA as the project's own token purely because lookup_asset_by_name matched the name -- Algorand names/tickers are not reserved, so a match is not affiliation. Pins the cross-check-the-creator-address rule."""
     assert "ASSET AFFILIATION CHECK" in mc._TOOLS_GUIDANCE
