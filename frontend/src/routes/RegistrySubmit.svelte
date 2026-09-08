@@ -1,13 +1,16 @@
 <script lang="ts">
   import {
     ecosystemApi,
+    ecosystemCategoryLabel,
     ECOSYSTEM_CATEGORIES,
+    ECOSYSTEM_CATEGORY_SUGGESTION_MAX_LENGTH,
     ECOSYSTEM_DESCRIPTION_MAX_LENGTH,
     ECOSYSTEM_DESCRIPTION_MIN_LENGTH,
     ECOSYSTEM_MAX_TAGS,
     ECOSYSTEM_NAME_MAX_LENGTH,
   } from '../lib/api/ecosystem'
   import { messages, t } from '../lib/i18n'
+  import { navigate } from '../lib/router'
   import { ApiException } from '../lib/api/client'
   import PageMeta from '../components/PageMeta.svelte'
   import { SITE_TAGLINE } from '../lib/seo'
@@ -16,6 +19,7 @@
   let url = $state('')
   let description = $state('')
   let category = $state('other')
+  let categorySuggestion = $state('')
   let tagsText = $state('')
   let contact = $state('')
   // Honeypot: real users never see or fill this (offscreen, not display:none
@@ -26,6 +30,8 @@
   let submitting = $state(false)
   let error = $state<string | null>(null)
   let result: { submissionId: string; statusUrl?: string } | null = $state(null)
+
+  const descriptionLeft = $derived(ECOSYSTEM_DESCRIPTION_MAX_LENGTH - description.length)
 
   function parseTags(): string[] {
     return tagsText
@@ -39,7 +45,7 @@
     e.preventDefault()
     error = null
     if (description.trim().length < ECOSYSTEM_DESCRIPTION_MIN_LENGTH) {
-      error = `Description must be at least ${ECOSYSTEM_DESCRIPTION_MIN_LENGTH} characters — one factual sentence.`
+      error = `The description needs at least ${ECOSYSTEM_DESCRIPTION_MIN_LENGTH} characters — one plain sentence about what the project does.`
       return
     }
     submitting = true
@@ -49,6 +55,7 @@
         url: url.trim(),
         description: description.trim(),
         category,
+        category_suggestion: categorySuggestion.trim(),
         tags: parseTags(),
         contact: contact.trim(),
         website,
@@ -64,73 +71,116 @@
 
 <PageMeta title="Submit a project" description={SITE_TAGLINE} path="/registry/submit" />
 
-<div class="page stack submit-page">
-  <header class="compact-head">
-    <p class="kicker">Registry</p>
+<div class="page submit">
+  <nav class="crumbs" aria-label="Breadcrumb">
+    <a
+      href="/registry"
+      onclick={(e) => {
+        e.preventDefault()
+        navigate('/registry')
+      }}
+    >
+      Registry
+    </a>
+  </nav>
+
+  <header class="head">
     <h1>Submit a project</h1>
-    <p class="lead muted">
-      Free, no wallet needed. A human reviews every submission, usually within 48 hours — this
-      page's own status link is your only notification, so bookmark it.
+    <p class="lead">
+      Free, no wallet needed. A person reviews every submission, usually within two days. Keep the
+      link this page gives you: it is the only way to check on your submission.
     </p>
   </header>
 
   {#if result}
-    <div class="sent panel">
-      <p class="kicker">Submitted</p>
-      <p>Thanks — your submission is pending review.</p>
+    <div class="sent">
+      <h2>Submitted</h2>
+      <p>Your project is in the review queue.</p>
       {#if result.statusUrl}
-        <p class="muted">
-          Check status any time at
-          <code>{result.statusUrl}</code>
-        </p>
+        <p>Check on it any time at <code>{result.statusUrl}</code></p>
       {/if}
+      <a
+        class="btn btn-outlined"
+        href="/registry"
+        onclick={(e) => {
+          e.preventDefault()
+          navigate('/registry')
+        }}
+      >
+        Back to the registry
+      </a>
     </div>
   {:else}
     <form class="fields" onsubmit={submit}>
       <label class="field">
-        <span>Name</span>
-        <input bind:value={name} required maxlength={ECOSYSTEM_NAME_MAX_LENGTH} placeholder="Project name" />
+        <span class="label">Project name</span>
+        <input bind:value={name} required maxlength={ECOSYSTEM_NAME_MAX_LENGTH} />
       </label>
+
       <label class="field">
-        <span>URL</span>
-        <input type="url" bind:value={url} required placeholder="https://example.com or your GitHub repo" />
-        <p class="hint muted">Your project's site — no separate site yet? Your GitHub repo works fine.</p>
+        <span class="label">Website</span>
+        <input type="url" bind:value={url} required placeholder="https://" />
+        <span class="hint">No site yet? A GitHub repository works.</span>
       </label>
+
       <label class="field">
-        <span>Description ({ECOSYSTEM_DESCRIPTION_MIN_LENGTH}-{ECOSYSTEM_DESCRIPTION_MAX_LENGTH} characters, one factual sentence)</span>
+        <span class="label">What it does</span>
         <textarea
-          rows="3"
+          rows="6"
           maxlength={ECOSYSTEM_DESCRIPTION_MAX_LENGTH}
           bind:value={description}
           required
-          placeholder="What does it do, plainly — no 'revolutionary' or 'the first'."
+          placeholder="What it does, in plain language. Skip the superlatives."
         ></textarea>
+        <span class="hint">
+          {ECOSYSTEM_DESCRIPTION_MIN_LENGTH} to {ECOSYSTEM_DESCRIPTION_MAX_LENGTH} characters.
+          Markdown is fine — multiple paragraphs, links, lists.{description.length
+            ? ` ${descriptionLeft} left.`
+            : ''}
+        </span>
       </label>
+
       <label class="field">
-        <span>Category</span>
+        <span class="label">Category</span>
         <select bind:value={category}>
           {#each ECOSYSTEM_CATEGORIES as c (c)}
-            <option value={c}>{c}</option>
+            <option value={c}>{ecosystemCategoryLabel(c)}</option>
           {/each}
         </select>
       </label>
+
+      {#if category === 'other'}
+        <label class="field">
+          <span class="label">Suggest a category name</span>
+          <input
+            bind:value={categorySuggestion}
+            maxlength={ECOSYSTEM_CATEGORY_SUGGESTION_MAX_LENGTH}
+            placeholder="e.g. Prediction markets"
+          />
+          <span class="hint">
+            Optional. None of the existing categories fit? Tell us what to call it — a reviewer
+            decides whether it becomes a real category.
+          </span>
+        </label>
+      {/if}
+
       <label class="field">
-        <span>Tags (comma-separated, up to {ECOSYSTEM_MAX_TAGS})</span>
+        <span class="label">Tags</span>
         <input bind:value={tagsText} placeholder="wallet, multisig" />
+        <span class="hint">Up to {ECOSYSTEM_MAX_TAGS}, separated by commas. Optional.</span>
       </label>
-      <p class="x402-note muted">
-        Sell a paid x402 endpoint? That belongs in
-        <a href="https://x402.pxke.me/list" target="_blank" rel="noopener noreferrer">the x402 marketplace</a>,
-        not here — this registry is the free, general Algorand ecosystem directory.
-      </p>
+
       <label class="field">
-        <span>Contact (optional, private — email or wallet, never shown publicly)</span>
-        <input bind:value={contact} placeholder="you@example.com" />
+        <span class="label">Contact</span>
+        <input bind:value={contact} placeholder="you@example.com or a wallet address" />
+        <span class="hint">Optional and never shown. Used only if the reviewer has a question.</span>
       </label>
+
       <label class="honeypot" aria-hidden="true">
         <span>Leave this field empty</span>
         <input bind:value={website} tabindex="-1" autocomplete="off" />
       </label>
+
       <div class="actions">
         <button class="btn btn-outlined send" type="submit" disabled={submitting}>
           {#if submitting}
@@ -138,57 +188,102 @@
           {/if}
           Submit for review
         </button>
+        <span class="aside">
+          Selling a paid x402 endpoint?
+          <a href="https://x402.pxke.me/list" target="_blank" rel="noopener noreferrer">List it on the marketplace</a>
+          instead.
+        </span>
       </div>
     </form>
   {/if}
 
   {#if error}
-    <p class="err banner">{error}</p>
+    <p class="err" role="alert">{error}</p>
   {/if}
 </div>
 
 <style>
-  .submit-page {
-    gap: 16px;
+  .submit {
+    display: flex;
+    flex-direction: column;
+    gap: 24px;
+    max-width: 640px;
   }
+
+  .crumbs {
+    font-size: 13px;
+  }
+  .crumbs a {
+    color: var(--muted);
+    text-decoration: none;
+  }
+  .crumbs a:hover {
+    color: var(--on-surface);
+    text-decoration: underline;
+    text-underline-offset: 3px;
+  }
+
+  .head {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .head h1 {
+    margin: 0;
+    font-size: clamp(24px, 3vw, 30px);
+    line-height: 1.15;
+    letter-spacing: -0.3px;
+  }
+  .lead {
+    margin: 0;
+    color: var(--muted);
+    font-size: 15px;
+    line-height: 1.5;
+  }
+
   .fields {
     display: flex;
     flex-direction: column;
-    gap: 12px;
-    max-width: var(--max-reading);
+    gap: 18px;
+  }
+  .field {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .label {
+    font-size: 14px;
+    font-weight: 600;
   }
   .hint {
-    margin: 4px 0 0;
-    font-size: 12px;
-  }
-  .x402-note {
-    margin: 0;
-    font-size: 12px;
-    max-width: var(--max-reading);
-  }
-  .x402-note a {
-    color: var(--accent);
-  }
-  .field span {
-    font-family: var(--font-mono);
-    font-size: 10.5px;
-    font-weight: 600;
-    letter-spacing: 0.7px;
-    text-transform: uppercase;
-    color: var(--muted);
+    color: var(--subtle);
+    font-size: 13px;
   }
   .field input,
   .field textarea,
   .field select {
+    width: 100%;
     background: var(--surface);
-    font-family: var(--font-mono);
-    font-size: 14px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-control);
+    color: var(--on-surface);
+    font-family: var(--font-sans);
+    font-size: 15px;
+    padding: 10px 12px;
   }
   .field textarea {
     font-family: var(--font-serif);
     font-size: 16px;
     line-height: 1.55;
+    resize: vertical;
   }
+  .field input:focus,
+  .field textarea:focus,
+  .field select:focus {
+    border-color: var(--accent);
+    outline: none;
+  }
+
   /* Honeypot: offscreen, not display:none/visibility:hidden — some simple
      bots skip those but still autofill an offscreen field. */
   .honeypot {
@@ -198,18 +293,28 @@
     height: 1px;
     overflow: hidden;
   }
+
   .actions {
     display: flex;
-    justify-content: flex-end;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 12px 20px;
     margin-top: 4px;
   }
   .send {
-    min-height: 48px;
+    min-height: 44px;
     padding-inline: 18px;
   }
   .send:disabled {
     opacity: 0.65;
     cursor: not-allowed;
+  }
+  .aside {
+    color: var(--subtle);
+    font-size: 13px;
+  }
+  .aside a {
+    color: var(--accent);
   }
   .spinner {
     width: 16px;
@@ -225,18 +330,36 @@
       transform: rotate(360deg);
     }
   }
+  @media (prefers-reduced-motion: reduce) {
+    .spinner {
+      animation: none;
+    }
+  }
+
   .sent {
     display: flex;
     flex-direction: column;
     align-items: flex-start;
     gap: 8px;
-    padding: 16px 20px;
-    max-width: var(--max-reading);
+    padding: 20px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-card);
+    background: var(--panel);
+  }
+  .sent h2 {
+    margin: 0;
+    font-size: 18px;
+  }
+  .sent p {
+    margin: 0;
   }
   .sent code {
-    font-size: 12px;
+    font-size: 13px;
+    overflow-wrap: anywhere;
   }
+
   .err {
+    margin: 0;
     color: var(--danger);
   }
 </style>

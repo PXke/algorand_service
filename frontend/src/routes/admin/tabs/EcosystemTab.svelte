@@ -274,6 +274,12 @@
               {#if detail.contact}
                 <p class="subtle">Private contact (admin-only): {detail.contact}</p>
               {/if}
+              {#if detail.category_suggestion}
+                <p class="subtle">
+                  Submitter suggested a new category: “{detail.category_suggestion}” — pick the
+                  closest existing category above, or leave as-is for now.
+                </p>
+              {/if}
               {#if detail.reachable === false}
                 <p class="warn">Currently unreachable (last checked liveness failed).</p>
               {/if}

@@ -1,11 +1,33 @@
 <script lang="ts">
-  import { ecosystemApi, type EcosystemEntry } from '../lib/api/ecosystem'
+  import {
+    ecosystemApi,
+    ecosystemCategoryLabel,
+    stripMarkdownToText,
+    type EcosystemEntry,
+  } from '../lib/api/ecosystem'
   import { activeLocale, messages, t } from '../lib/i18n'
   import { navigate } from '../lib/router'
   import { formatDispatchStamp } from '../lib/liveClock'
-  import { isHttp } from '../lib/sanitizeHtml'
+  import { isHttp, sanitizeArticleHtml } from '../lib/sanitizeHtml'
   import PageMeta from '../components/PageMeta.svelte'
   import { ApiException } from '../lib/api/client'
+
+  /**
+   * Minimal markdown render for a submitter-written project description
+   * (multi-line, links, lists -- 2026-09-08). Deliberately NOT
+   * Markdown.svelte: that component's glossary-popover/chart-render/
+   * image-proxy machinery is article-specific and would drag in a lot of
+   * unrelated behavior for a short project blurb. The one piece actually
+   * shared (not re-copied) is sanitizeArticleHtml -- the same {@html} +
+   * DOMPurify allowlist convention every markdown surface in this codebase
+   * uses (CLAUDE.md section 5), applied here with no custom renderer.
+   */
+  async function renderDescription(source: string): Promise<string> {
+    if (!source.trim()) return ''
+    const { marked } = await import('marked')
+    const html = marked.parse(source, { async: false, gfm: true, breaks: false }) as string
+    return sanitizeArticleHtml(html)
+  }
 
   let { slug }: { slug: string } = $props()
 
@@ -13,6 +35,7 @@
   let loading = $state(true)
   let error: 'notfound' | 'other' | null = $state(null)
   let badgeCopied = $state(false)
+  let descriptionHtml = $state('')
 
   $effect(() => {
     const _slug = slug
@@ -21,10 +44,14 @@
       loading = true
       error = null
       entry = null
+      descriptionHtml = ''
       try {
         const result = await ecosystemApi.fetchEntry(_slug)
         if (cancelled) return
         entry = result
+        const html = await renderDescription(result.description)
+        if (cancelled) return
+        descriptionHtml = html
       } catch (e) {
         if (cancelled) return
         error = e instanceof ApiException && e.statusCode === 404 ? 'notfound' : 'other'
@@ -42,6 +69,22 @@
     return formatDispatchStamp(epoch, $activeLocale)
   }
 
+  /** Show links as their host, not the full URL — the href carries the rest. */
+  function hostOf(url: string): string {
+    try {
+      return new URL(url).host.replace(/^www\./, '')
+    } catch {
+      return url
+    }
+  }
+
+  function go(path: string) {
+    return (e: MouseEvent) => {
+      e.preventDefault()
+      navigate(path)
+    }
+  }
+
   async function copyBadge() {
     if (!entry) return
     try {
@@ -55,226 +98,307 @@
 </script>
 
 {#if entry}
-  <PageMeta title={entry.name} description={entry.description} path={`/registry/${entry.slug}`} />
+  <PageMeta
+    title={entry.name}
+    description={stripMarkdownToText(entry.description)}
+    path={`/registry/${entry.slug}`}
+  />
 {:else}
   <PageMeta title="Algorand Open Registry" path={`/registry/${slug}`} />
 {/if}
 
-<div class="page stack">
+<div class="page detail">
   {#if loading}
-    <p class="muted">{t($messages, 'loading')}</p>
+    <p class="state" role="status">{t($messages, 'loading')}</p>
   {:else if error === 'notfound'}
-    <div class="empty">
+    <div class="notfound">
       <h1>Not found</h1>
-      <p class="muted">This registry entry doesn't exist, or is still awaiting review.</p>
-      <a
-        class="btn"
-        href="/registry"
-        onclick={(e) => {
-          e.preventDefault()
-          navigate('/registry')
-        }}
-      >
-        Back to the Registry
-      </a>
+      <p class="state">This entry doesn't exist, or is still awaiting review.</p>
+      <a class="btn" href="/registry" onclick={go('/registry')}>Back to the registry</a>
     </div>
   {:else if error === 'other'}
-    <p class="err">{t($messages, 'errorGeneric')}</p>
+    <p class="state err" role="alert">{t($messages, 'errorGeneric')}</p>
   {:else if entry}
-    <nav class="breadcrumb">
+    <nav class="crumbs" aria-label="Breadcrumb">
+      <a href="/registry" onclick={go('/registry')}>Registry</a>
+      <span aria-hidden="true">/</span>
       <a
-        href="/registry"
-        onclick={(e) => {
-          e.preventDefault()
-          navigate('/registry')
-        }}
+        href={`/registry?category=${encodeURIComponent(entry.category)}`}
+        onclick={go(`/registry?category=${encodeURIComponent(entry.category)}`)}
       >
-        Registry
+        {ecosystemCategoryLabel(entry.category)}
       </a>
-      <span aria-hidden="true">›</span>
-      <span>{entry.name}</span>
     </nav>
-    <header class="compact-head">
-      <p class="kicker">{entry.category}{entry.editor_pick ? ' · Editor’s pick' : ''}</p>
-      <h1>{entry.name}</h1>
-    </header>
-    <p class="description">{entry.description}</p>
 
-    <dl class="meta">
+    <header class="head">
+      <h1>{entry.name}</h1>
+      {#if descriptionHtml}
+        <div class="description">{@html descriptionHtml}</div>
+      {:else}
+        <p class="description">{entry.description}</p>
+      {/if}
+      <p class="links">
+        {#if isHttp(entry.url)}
+          <a class="btn btn-outlined" href={entry.url} target="_blank" rel="noopener noreferrer">
+            Visit {hostOf(entry.url)}
+          </a>
+        {/if}
+        {#if entry.repo_url && isHttp(entry.repo_url)}
+          <a class="btn btn-outlined" href={entry.repo_url} target="_blank" rel="noopener noreferrer">
+            Source code
+          </a>
+        {/if}
+      </p>
+    </header>
+
+    <dl class="facts">
       <div>
-        <dt>Website</dt>
+        <dt>Status</dt>
         <dd>
-          {#if isHttp(entry.url)}
-            <a href={entry.url} target="_blank" rel="noopener noreferrer">{entry.url}</a>
+          {#if entry.reachable === true}
+            Online{#if entry.last_probed_at_epoch}, checked {stamp(entry.last_probed_at_epoch)}{/if}
+          {:else if entry.reachable === false}
+            <span class="offline">Unreachable</span>{#if entry.last_probed_at_epoch}, last checked {stamp(entry.last_probed_at_epoch)}{/if}
           {:else}
-            <span>{entry.url}</span>
+            Not checked yet
           {/if}
         </dd>
       </div>
-      {#if entry.repo_url}
+      <div>
+        <dt>Stage</dt>
+        <dd>{entry.stage}{entry.open_source ? ', open source' : ''}</dd>
+      </div>
+      {#if entry.tags.length}
         <div>
-          <dt>Repository</dt>
-          <dd>
-            {#if isHttp(entry.repo_url)}
-              <a href={entry.repo_url} target="_blank" rel="noopener noreferrer">{entry.repo_url}</a>
-            {:else}
-              <span>{entry.repo_url}</span>
-            {/if}
-          </dd>
+          <dt>Tags</dt>
+          <dd>{entry.tags.join(', ')}</dd>
         </div>
       {/if}
       {#if entry.x402_enabled}
         <div>
           <dt>x402</dt>
           <dd>
-            <!-- Cross-domain: x402.pxke.me is a separate product/subdomain,
-                 not a route in this registry build's own router -- a plain
-                 external link, never client-side navigate(). -->
+            <!-- Cross-domain: x402.pxke.me is a separate product, not a route in
+                 this build's router — a plain external link, never navigate(). -->
+            Sells a paid endpoint.
             <a href="https://x402.pxke.me/directory" target="_blank" rel="noopener noreferrer">
-              Has a paid x402 endpoint — see the marketplace
+              See it on the marketplace
             </a>
           </dd>
         </div>
       {/if}
       <div>
-        <dt>Stage</dt>
-        <dd>{entry.stage}{entry.open_source ? ' · open source' : ''}</dd>
-      </div>
-      <div>
-        <dt>Liveness</dt>
-        <dd>
-          {#if entry.reachable === true}
-            <span class="live on">Reachable</span>{#if entry.last_probed_at_epoch}, last seen online {stamp(entry.last_probed_at_epoch)}{/if}
-          {:else if entry.reachable === false}
-            <span class="live off">Currently unreachable</span>
-          {:else}
-            <span class="muted">Not yet checked</span>
-          {/if}
-        </dd>
-      </div>
-      {#if entry.tags.length}
-        <div>
-          <dt>Tags</dt>
-          <dd>{entry.tags.join(' · ')}</dd>
-        </div>
-      {/if}
-      <div>
         <dt>Listed</dt>
-        <dd>{entry.source === 'seeded' ? 'Seeded from public ecosystem directories' : 'Submitted, human-reviewed'}{entry.reviewed_at_epoch ? `, ${stamp(entry.reviewed_at_epoch)}` : ''}</dd>
+        <dd>
+          {entry.source === 'seeded'
+            ? 'Seeded from public ecosystem directories'
+            : 'Submitted by the project and reviewed by a human'}{entry.reviewed_at_epoch
+            ? `, ${stamp(entry.reviewed_at_epoch)}`
+            : ''}
+          {#if entry.editor_pick}<span class="pick">Editor's pick</span>{/if}
+        </dd>
       </div>
     </dl>
 
-    <section class="badge-box">
-      <p class="kicker">Listed on PXke Algorand</p>
-      <img src={ecosystemApi.badgeUrl(entry.slug)} alt="Listed on PXke Algorand badge" width="164" height="20" />
-      <p class="muted">Embed this badge in your README to link back here.</p>
+    <section class="badge" aria-labelledby="badge-heading">
+      <div class="badge-text">
+        <h2 id="badge-heading">Link back with a badge</h2>
+        <p>Add this to your README. It links here and tells visitors the project is listed.</p>
+      </div>
+      <img
+        src={ecosystemApi.badgeUrl(entry.slug)}
+        alt="Listed on PXke Algorand badge"
+        width="164"
+        height="20"
+      />
       <pre class="snippet">{ecosystemApi.badgeMarkdownSnippet(entry.slug, entry.name)}</pre>
       <button class="btn btn-sm" type="button" onclick={copyBadge}>
-        {badgeCopied ? 'Copied!' : 'Copy markdown'}
+        {badgeCopied ? 'Copied' : 'Copy markdown'}
       </button>
     </section>
 
-    <p class="suggest-change">
-      Spot something wrong?
-      <a
-        href="/registry/submit"
-        onclick={(e) => {
-          e.preventDefault()
-          navigate('/registry/submit')
-        }}
-      >
-        Suggest a change
-      </a>
+    <p class="correction">
+      Something out of date?
+      <a href="/registry/submit" onclick={go('/registry/submit')}>Suggest a change</a>
     </p>
   {/if}
 </div>
 
 <style>
-  .breadcrumb {
-    font-family: var(--font-mono);
-    font-size: 11px;
-    letter-spacing: 0.4px;
-    text-transform: uppercase;
-    color: var(--muted);
+  .detail {
+    display: flex;
+    flex-direction: column;
+    gap: 28px;
+  }
+
+  .crumbs {
     display: flex;
     gap: 8px;
-    align-items: baseline;
+    font-size: 13px;
+    color: var(--subtle);
   }
-  .breadcrumb a {
-    color: var(--accent);
+  .crumbs a {
+    color: var(--muted);
     text-decoration: none;
   }
-  .breadcrumb a:hover {
+  .crumbs a:hover {
+    color: var(--on-surface);
     text-decoration: underline;
+    text-underline-offset: 3px;
+  }
+
+  .head {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+  .head h1 {
+    margin: 0;
+    font-size: clamp(26px, 3.4vw, 34px);
+    line-height: 1.12;
+    letter-spacing: -0.4px;
   }
   .description {
+    margin: 0;
     font-family: var(--font-serif);
-    font-size: 1.12rem;
-    line-height: 1.65;
-    max-width: 60ch;
-    color: var(--md-ink);
+    font-size: 1.15rem;
+    line-height: 1.6;
+    max-width: 58ch;
+    overflow-wrap: anywhere;
   }
-  .meta {
-    display: grid;
-    grid-template-columns: max-content 1fr;
-    gap: 8px 20px;
-    margin: 0;
-    font-size: 0.92rem;
+  /* Rendered markdown (see renderDescription) nests real <p>/<ul>/<a> --
+     reset browser default margins and pick up the same link styling used
+     elsewhere on the page rather than the .md component's article voice,
+     which is overkill for a short project blurb. */
+  .description :global(p) {
+    margin: 0 0 0.9em;
   }
-  .meta dt {
+  .description :global(p:last-child) {
+    margin-bottom: 0;
+  }
+  .description :global(ul),
+  .description :global(ol) {
+    margin: 0 0 0.9em;
+    padding-inline-start: 1.4em;
+  }
+  .description :global(li) {
+    margin-bottom: 0.3em;
+  }
+  .description :global(a) {
+    color: var(--accent);
+  }
+  .description :global(strong) {
+    font-weight: 700;
+  }
+  .description :global(code) {
     font-family: var(--font-mono);
-    font-size: 10.5px;
-    font-weight: 600;
-    letter-spacing: 0.6px;
-    text-transform: uppercase;
-    color: var(--subtle);
-    padding-top: 2px;
+    font-size: 0.85em;
+    padding: 0.1em 0.35em;
+    border-radius: 4px;
+    background: var(--callout);
   }
-  .meta dd {
+  .links {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin: 4px 0 0;
+  }
+
+  .facts {
+    display: grid;
+    grid-template-columns: max-content minmax(0, 1fr);
+    gap: 10px 24px;
     margin: 0;
-    word-break: break-word;
+    padding-top: 20px;
+    border-top: 1px solid var(--border);
+    font-size: 15px;
   }
-  .live.on {
-    color: var(--gain);
-    font-weight: 600;
+  .facts > div {
+    display: contents;
   }
-  .live.off {
+  .facts dt {
+    color: var(--subtle);
+  }
+  .facts dd {
+    margin: 0;
+    overflow-wrap: anywhere;
+  }
+  .facts dd a {
+    color: var(--accent);
+  }
+  .offline {
     color: var(--danger);
     font-weight: 600;
   }
-  .badge-box {
-    margin-top: 8px;
-    padding-top: 20px;
-    border-top: 1px solid var(--border);
+  .pick {
+    margin-inline-start: 8px;
+    color: var(--primary);
+    font-size: 13px;
+    font-weight: 500;
+  }
+
+  .badge {
     display: flex;
     flex-direction: column;
     align-items: flex-start;
-    gap: 8px;
+    gap: 10px;
+    padding: 20px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-card);
+    background: var(--panel);
+  }
+  .badge-text {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .badge h2 {
+    margin: 0;
+    font-size: 16px;
+  }
+  .badge-text p {
+    margin: 0;
+    color: var(--muted);
+    font-size: 14px;
+    max-width: 50ch;
   }
   .snippet {
+    margin: 0;
+    width: 100%;
     background: var(--surface);
     border: 1px solid var(--border);
     border-radius: var(--radius-control);
     padding: 10px 12px;
-    font-size: 11px;
-    max-width: 100%;
-    overflow-x: auto;
+    font-size: 12px;
+    line-height: 1.5;
     white-space: pre-wrap;
-    word-break: break-all;
+    overflow-wrap: anywhere;
   }
-  .suggest-change {
-    padding-top: 12px;
-    border-top: 1px solid var(--border);
-    font-size: 0.88rem;
+
+  .correction {
+    margin: 0;
+    color: var(--muted);
+    font-size: 14px;
   }
-  .empty {
-    text-align: start;
-    padding: 28px 0;
+  .correction a {
+    color: var(--accent);
   }
-  .empty h1 {
-    margin: 0 0 8px;
+
+  .state {
+    margin: 0;
+    color: var(--muted);
   }
-  .err {
+  .state.err {
     color: var(--danger);
+  }
+  .notfound {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 10px;
+    padding: 20px 0;
+  }
+  .notfound h1 {
+    margin: 0;
   }
 </style>

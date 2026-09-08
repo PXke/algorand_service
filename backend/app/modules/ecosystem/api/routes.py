@@ -60,6 +60,7 @@ def _admin_project_json(item: StoredProject) -> dict:
         "reject_reason": item.reject_reason,
         "last_http_status": item.last_http_status,
         "service_id": item.service_id,
+        "category_suggestion": item.category_suggestion,
     }
 
 
@@ -124,6 +125,7 @@ def ecosystem_submit(request: Request) -> Response | dict:
             x402_url=payload.x402_url,
             tags=list(payload.tags),
             contact=payload.contact,
+            category_suggestion=payload.category_suggestion,
         )
     except EcosystemError as exc:
         return json_error_from_platform(exc)

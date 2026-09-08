@@ -1,28 +1,118 @@
 <script lang="ts">
-  import { onMount } from 'svelte'
-  import { ecosystemApi, ECOSYSTEM_CATEGORIES, type EcosystemEntry } from '../lib/api/ecosystem'
+  import {
+    ecosystemApi,
+    ecosystemCategoryLabel,
+    stripMarkdownToText,
+    ECOSYSTEM_CATEGORIES,
+    type EcosystemEntry,
+  } from '../lib/api/ecosystem'
   import { messages, t } from '../lib/i18n'
-  import { navigate } from '../lib/router'
+  import { navigate, route } from '../lib/router'
   import { LatestOnly } from '../lib/asyncGuard'
   import PageMeta from '../components/PageMeta.svelte'
   import { ApiException } from '../lib/api/client'
   import { SITE_TAGLINE } from '../lib/seo'
 
+  // Fetched ONCE, unfiltered -- category/tag/text filtering all happen
+  // client-side below. This is what makes "hide empty categories" and a
+  // combined category+tag+text filter possible without round-tripping the
+  // server per facet. Caps out at the server's own ecosystem_list_max_results
+  // (100) -- fine at the registry's current size, but the real fix once it
+  // grows past that is server-side (Typesense) search, not raising this
+  // limit further.
   let entries: EcosystemEntry[] = $state([])
   let loading = $state(true)
-  let error = $state<string | null>(null)
+  let error: string | null = $state(null)
   let query = $state('')
-  let activeCategory = $state<string | null>(null)
+
+  // Category and tag both live in the URL (?category=slug&tag=slug) so a
+  // filtered view is a shareable link and the entry page's category link
+  // still lands on one.
+  const knownCategories = new Set<string>(ECOSYSTEM_CATEGORIES)
+  const activeCategory = $derived.by(() => {
+    const raw = $route.query.get('category') ?? ''
+    return knownCategories.has(raw) ? raw : null
+  })
+  const activeTag = $derived($route.query.get('tag') || null)
+
+  function withQuery(overrides: { category?: string | null; tag?: string | null }): string {
+    const category = 'category' in overrides ? overrides.category : activeCategory
+    const tag = 'tag' in overrides ? overrides.tag : activeTag
+    const params = new URLSearchParams()
+    if (category) params.set('category', category)
+    if (tag) params.set('tag', tag)
+    const qs = params.toString()
+    return qs ? `/registry?${qs}` : '/registry'
+  }
+
+  function selectCategory(category: string | null) {
+    if (category === activeCategory) return
+    // Changing category clears the tag filter -- a tag scoped to the old
+    // category may not even apply to entries in the new one.
+    navigate(withQuery({ category, tag: null }), false, false)
+  }
+
+  function selectTag(tag: string | null) {
+    navigate(withQuery({ tag: tag === activeTag ? null : tag }), false, false)
+  }
+
+  function onCategorySelectChange(e: Event) {
+    selectCategory((e.currentTarget as HTMLSelectElement).value || null)
+  }
+
+  // Entries within the active category (or all, if none) -- the base every
+  // other facet (tags, then text search) narrows further.
+  const inCategory = $derived.by(() =>
+    activeCategory ? entries.filter((e) => e.category === activeCategory) : entries,
+  )
+
+  // Only categories that actually have at least one entry are worth showing
+  // in the dropdown -- an "NFTs" option that leads to an empty page is dead
+  // weight, not a real choice.
+  const categoryOptions = $derived.by(() => {
+    const counts = new Map<string, number>()
+    for (const e of entries) counts.set(e.category, (counts.get(e.category) ?? 0) + 1)
+    return ECOSYSTEM_CATEGORIES.filter((c) => (counts.get(c) ?? 0) > 0).map((c) => ({
+      slug: c,
+      label: ecosystemCategoryLabel(c),
+      count: counts.get(c) ?? 0,
+    }))
+  })
+
+  // Tags are scoped to the active category (switching category reshuffles
+  // which tags make sense), but not to the text search -- search stays an
+  // orthogonal, always-available refinement.
+  const tagOptions = $derived.by(() => {
+    const counts = new Map<string, number>()
+    for (const e of inCategory) for (const tag of e.tags) counts.set(tag, (counts.get(tag) ?? 0) + 1)
+    return [...counts.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+  })
+
+  // If the active tag no longer applies under the current category (e.g. a
+  // direct link to an incompatible category+tag pair), fall through to the
+  // unfiltered-by-tag view rather than showing a confusing always-empty page.
+  const tagIsLive = $derived(!activeTag || tagOptions.some(([tag]) => tag === activeTag))
+
+  const byTag = $derived.by(() =>
+    activeTag && tagIsLive ? inCategory.filter((e) => e.tags.includes(activeTag)) : inCategory,
+  )
 
   const filtered = $derived.by(() => {
     const q = query.trim().toLowerCase()
-    return entries.filter(
+    if (!q) return byTag
+    return byTag.filter(
       (e) =>
-        !q ||
         e.name.toLowerCase().includes(q) ||
         e.description.toLowerCase().includes(q) ||
         e.tags.some((tag) => tag.toLowerCase().includes(q)),
     )
+  })
+
+  const heading = $derived.by(() => {
+    const parts: string[] = []
+    parts.push(activeCategory ? ecosystemCategoryLabel(activeCategory) : 'All projects')
+    if (activeTag && tagIsLive) parts.push(`#${activeTag}`)
+    return parts.join(' • ')
   })
 
   const inflight = new LatestOnly()
@@ -32,10 +122,7 @@
     loading = true
     error = null
     try {
-      const items = await ecosystemApi.fetchList({
-        category: activeCategory ?? undefined,
-        signal,
-      })
+      const items = await ecosystemApi.fetchList({ signal })
       if (stale()) return
       entries = items
     } catch (e) {
@@ -46,28 +133,38 @@
     }
   }
 
-  function selectCategory(category: string | null) {
-    activeCategory = activeCategory === category ? null : category
-    void load()
-  }
-
-  onMount(() => {
-    void load()
-  })
+  void load()
 </script>
 
 <PageMeta title="Algorand Open Registry" description={SITE_TAGLINE} path="/registry" />
 
-<div class="page stack">
-  <header class="compact-head">
-    <p class="kicker">Registry</p>
-    <h1>Algorand Open Registry</h1>
-    <p class="lead muted">
-      A free, human-reviewed directory of Algorand projects — wallets, DeFi, NFTs, developer
-      tools and more.
-    </p>
+<div class="page page-wide registry">
+  <h1 class="sr-only">Algorand Open Registry</h1>
+
+  <div class="toolbar">
+    <label class="search">
+      <span class="sr-only">{t($messages, 'navSearch')}</span>
+      <input
+        type="search"
+        bind:value={query}
+        placeholder="Search by name, description or tag"
+        autocomplete="off"
+        spellcheck="false"
+      />
+    </label>
+
+    <label class="category-select">
+      <span class="sr-only">Category</span>
+      <select value={activeCategory ?? ''} onchange={onCategorySelectChange}>
+        <option value="">All categories</option>
+        {#each categoryOptions as opt (opt.slug)}
+          <option value={opt.slug}>{opt.label} ({opt.count})</option>
+        {/each}
+      </select>
+    </label>
+
     <a
-      class="btn btn-outlined submit-cta"
+      class="btn btn-outlined submit-link"
       href="/registry/submit"
       onclick={(e) => {
         e.preventDefault()
@@ -76,158 +173,276 @@
     >
       Submit a project
     </a>
-  </header>
+  </div>
 
-  <nav class="chips" aria-label="Categories">
-    <button type="button" class="chip" class:active={activeCategory === null} onclick={() => selectCategory(null)}>
-      All
-    </button>
-    {#each ECOSYSTEM_CATEGORIES as category (category)}
-      <button
-        type="button"
-        class="chip"
-        class:active={activeCategory === category}
-        onclick={() => selectCategory(category)}
-      >
-        {category}
-      </button>
-    {/each}
-  </nav>
+  <div class="body">
+    <aside class="filters" aria-label="Tags">
+      <h2>Tags</h2>
+      {#if !tagOptions.length}
+        <p class="filters-empty">No tags yet.</p>
+      {:else}
+        <ul class="tag-list">
+          {#each tagOptions as [tag, count] (tag)}
+            <li>
+              <button
+                type="button"
+                class="tag-btn"
+                class:active={activeTag === tag && tagIsLive}
+                onclick={() => selectTag(tag)}
+              >
+                <span class="tag-name">#{tag}</span>
+                <span class="tag-count">{count}</span>
+              </button>
+            </li>
+          {/each}
+        </ul>
+      {/if}
+    </aside>
 
-  <label class="find">
-    <span class="sr-only">{t($messages, 'navSearch')}</span>
-    <span class="query-shell">
-      <span class="query-prompt" aria-hidden="true">›</span>
-      <input
-        type="search"
-        bind:value={query}
-        placeholder={t($messages, 'navSearch')}
-        autocomplete="off"
-        spellcheck="false"
-      />
-    </span>
-  </label>
+    <section class="results" aria-labelledby="results-heading">
+      <div class="results-head">
+        <h2 id="results-heading">{heading}</h2>
+        {#if !loading && !error && filtered.length}
+          <span class="count" aria-live="polite">
+            {filtered.length === 1 ? '1 project' : `${filtered.length} projects`}
+          </span>
+        {/if}
+      </div>
 
-  {#if loading}
-    <p class="muted">{t($messages, 'loading')}</p>
-  {:else if error}
-    <p class="err">{error}</p>
-  {:else if !filtered.length}
-    <p class="muted">{t($messages, 'searchEmptyTitle')}</p>
-  {:else}
-    <p class="hit-count">
-      {filtered.length}<span class="sep" aria-hidden="true">·</span>projects
-    </p>
-    <ul class="entry-list">
-      {#each filtered as entry (entry.slug)}
-        <li>
-          <a
-            class="entry"
-            href={`/registry/${encodeURIComponent(entry.slug)}`}
-            onclick={(e) => {
-              e.preventDefault()
-              navigate(`/registry/${encodeURIComponent(entry.slug)}`)
-            }}
-          >
-            <span class="entry-head">
-              <strong class="name">{entry.name}</strong>
-              {#if entry.editor_pick}<span class="pick-badge">Editor's pick</span>{/if}
-              <span class="live-dot" class:on={entry.reachable === true} class:off={entry.reachable === false} title={entry.reachable === false ? 'Currently unreachable' : 'Reachable'}></span>
-            </span>
-            <span class="def muted">{entry.description}</span>
-            {#if entry.tags.length}
-              <span class="tags">{entry.tags.join(' · ')}</span>
-            {/if}
-          </a>
-        </li>
-      {/each}
-    </ul>
-  {/if}
+      {#if loading}
+        <p class="state" role="status">{t($messages, 'loading')}</p>
+      {:else if error}
+        <p class="state err" role="alert">{error}</p>
+      {:else if !entries.length}
+        <div class="state empty">
+          <p>Nothing listed yet.</p>
+          <p>
+            Know a project that belongs here?
+            <a
+              href="/registry/submit"
+              onclick={(e) => {
+                e.preventDefault()
+                navigate('/registry/submit')
+              }}
+            >
+              Submit it
+            </a>
+            and a human will review it, usually within two days.
+          </p>
+        </div>
+      {:else if !filtered.length}
+        <div class="state empty">
+          <p>No projects match this filter{query.trim() ? ` and “${query.trim()}”` : ''}.</p>
+          {#if activeTag || activeCategory || query.trim()}
+            <button
+              type="button"
+              class="linkish"
+              onclick={() => {
+                query = ''
+                navigate('/registry', false, false)
+              }}
+            >
+              Clear all filters
+            </button>
+          {/if}
+        </div>
+      {:else}
+        <ul class="entries">
+          {#each filtered as entry (entry.slug)}
+            <li>
+              <a
+                class="entry"
+                href={`/registry/${encodeURIComponent(entry.slug)}`}
+                onclick={(e) => {
+                  e.preventDefault()
+                  navigate(`/registry/${encodeURIComponent(entry.slug)}`)
+                }}
+              >
+                <span class="entry-name">
+                  {entry.name}
+                  {#if entry.editor_pick}<span class="pick">Editor's pick</span>{/if}
+                  {#if entry.reachable === false}<span class="offline">Offline</span>{/if}
+                </span>
+                <span class="entry-desc">{stripMarkdownToText(entry.description)}</span>
+              </a>
+            </li>
+          {/each}
+        </ul>
+      {/if}
+    </section>
+  </div>
 </div>
 
 <style>
-  .submit-cta {
-    margin-top: 12px;
+  .registry {
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
   }
-  .chips {
+
+  /* Toolbar: search + category dropdown + the one call to action, all on
+     one row -- replaces the old oversized title (redundant with the
+     product-switcher's own "PXke Algorand Registry" branding above it). */
+  .toolbar {
     display: flex;
     flex-wrap: wrap;
-    gap: 6px;
-    overflow-x: auto;
-    padding-bottom: 2px;
-  }
-  .chip {
-    border: 1px solid var(--border);
-    background: var(--surface);
-    color: var(--muted);
-    font-size: 12px;
-    font-weight: 600;
-    padding: 6px 12px;
-    border-radius: 999px;
-    white-space: nowrap;
-  }
-  .chip.active {
-    background: var(--accent-soft);
-    color: var(--primary);
-    border-color: color-mix(in srgb, var(--primary) 35%, var(--border));
-  }
-  .find {
-    display: block;
-    max-width: 420px;
-  }
-  .query-shell {
-    display: flex;
     align-items: center;
-    gap: 8px;
+    gap: 12px;
+  }
+  .search {
+    flex: 1 1 260px;
+    min-width: 200px;
+  }
+  .search input {
+    width: 100%;
+    min-height: 44px;
+    padding: 0 14px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-control);
+    background: var(--surface);
+    color: var(--on-surface);
+    font-family: var(--font-sans);
+    font-size: 15px;
+    outline: none;
+  }
+  .search input:focus {
+    border-color: var(--accent);
+  }
+  .search input::placeholder {
+    color: var(--subtle);
+  }
+
+  .category-select {
+    flex: 0 1 240px;
+    min-width: 160px;
+  }
+  .category-select select {
+    width: 100%;
     min-height: 44px;
     padding: 0 12px;
     border: 1px solid var(--border);
     border-radius: var(--radius-control);
     background: var(--surface);
-  }
-  .query-shell:focus-within {
-    border-color: var(--accent);
-  }
-  .query-prompt {
-    font-family: var(--font-mono);
-    font-size: 16px;
-    font-weight: 600;
-    color: var(--accent);
-    line-height: 1;
-  }
-  .find input {
-    flex: 1;
-    min-width: 0;
-    border: 0;
-    background: transparent;
     color: var(--on-surface);
-    font-family: var(--font-mono);
-    font-size: 13px;
-    padding: 10px 0;
-    outline: none;
+    font-family: var(--font-sans);
+    font-size: 15px;
   }
-  .sr-only {
-    position: absolute;
-    width: 1px;
-    height: 1px;
-    overflow: hidden;
-    clip-path: inset(50%);
+
+  .submit-link {
+    flex: 0 0 auto;
+    margin-inline-start: auto;
   }
-  .hit-count {
+
+  /* Body: tags on the left, results in the middle -- the same two-column
+     shape the category index used before, just with the left column
+     repurposed (categories moved into the toolbar dropdown above). */
+  .body {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 24px;
+  }
+  @media (min-width: 700px) {
+    .body {
+      grid-template-columns: 200px minmax(0, 1fr);
+      gap: 36px;
+      align-items: start;
+    }
+  }
+
+  .filters {
+    display: none;
+    flex-direction: column;
+    gap: 10px;
+    position: sticky;
+    top: 16px;
+  }
+  @media (min-width: 700px) {
+    .filters {
+      display: flex;
+    }
+  }
+  .filters h2 {
     margin: 0;
-    font-family: var(--font-mono);
-    font-size: 10.5px;
+    font-size: 13px;
     font-weight: 600;
-    letter-spacing: 0.7px;
     text-transform: uppercase;
-    color: var(--muted);
-    font-variant-numeric: tabular-nums;
-  }
-  .hit-count .sep {
-    margin-inline: 6px;
+    letter-spacing: 0.04em;
     color: var(--subtle);
   }
-  .entry-list {
+  .filters-empty {
+    margin: 0;
+    color: var(--subtle);
+    font-size: 13px;
+  }
+  .tag-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+  .tag-btn {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 8px;
+    width: 100%;
+    border: 0;
+    border-inline-start: 2px solid transparent;
+    background: none;
+    padding: 5px 10px 5px 12px;
+    color: var(--muted);
+    font: inherit;
+    font-size: 14px;
+    text-align: start;
+    cursor: pointer;
+  }
+  .tag-btn:hover {
+    color: var(--on-surface);
+  }
+  .tag-btn.active {
+    color: var(--on-surface);
+    font-weight: 600;
+    border-inline-start-color: var(--accent);
+  }
+  .tag-count {
+    color: var(--subtle);
+    font-size: 12px;
+    font-variant-numeric: tabular-nums;
+  }
+  .tag-btn.active .tag-count {
+    color: var(--muted);
+  }
+
+  .results {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    min-width: 0;
+  }
+
+  .results-head {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 12px;
+    padding-bottom: 10px;
+    border-bottom: 1px solid var(--border);
+  }
+  .results-head h2 {
+    margin: 0;
+    font-size: 17px;
+    line-height: 1.3;
+  }
+  .count {
+    color: var(--subtle);
+    font-size: 13px;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+  }
+
+  .entries {
     list-style: none;
     margin: 0;
     padding: 0;
@@ -235,67 +450,96 @@
   .entry {
     display: flex;
     flex-direction: column;
-    gap: 4px;
+    gap: 3px;
     padding: 14px 0;
     border-bottom: 1px solid var(--border);
     color: inherit;
     text-decoration: none;
   }
+  .entries li:last-child .entry {
+    border-bottom: 0;
+  }
   .entry:hover {
     text-decoration: none;
-    background: color-mix(in srgb, var(--accent) 6%, transparent);
-    margin-inline: -10px;
-    padding-inline: 10px;
   }
-  .entry:hover .name {
+  .entry:hover .entry-name {
     text-decoration: underline;
     text-underline-offset: 3px;
-    text-decoration-thickness: 1.5px;
   }
-  .entry-head {
+  .entry-name {
     display: flex;
-    align-items: center;
-    gap: 8px;
-  }
-  .name {
+    align-items: baseline;
+    flex-wrap: wrap;
+    gap: 4px 10px;
     font-family: var(--font-display);
-    font-size: 1.02rem;
-    font-weight: 700;
-    letter-spacing: -0.2px;
+    font-size: 1rem;
+    font-weight: 600;
+    letter-spacing: -0.1px;
     color: var(--on-surface);
   }
-  .pick-badge {
-    font-size: 10.5px;
-    font-weight: 600;
-    padding: 2px 8px;
-    border-radius: 6px;
-    background: color-mix(in srgb, var(--primary) 12%, var(--panel));
+  .pick {
+    font-family: var(--font-sans);
+    font-size: 12px;
+    font-weight: 500;
     color: var(--primary);
   }
-  .live-dot {
-    width: 8px;
-    height: 8px;
-    border-radius: 50%;
-    background: var(--subtle);
-    flex-shrink: 0;
+  .offline {
+    font-family: var(--font-sans);
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--danger);
   }
-  .live-dot.on {
-    background: var(--gain);
-  }
-  .live-dot.off {
-    background: var(--danger);
-  }
-  .def {
+  .entry-desc {
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+    overflow: hidden;
     font-family: var(--font-serif);
     font-size: 0.95rem;
     line-height: 1.5;
+    color: var(--muted);
+    max-width: 62ch;
   }
-  .tags {
-    font-family: var(--font-mono);
-    font-size: 11px;
-    color: var(--subtle);
+
+  .state {
+    margin: 0;
+    color: var(--muted);
+    font-size: 15px;
   }
-  .err {
+  .state.err {
     color: var(--danger);
+  }
+  .empty {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 20px 0;
+    max-width: 44ch;
+  }
+  .empty p {
+    margin: 0;
+  }
+  .empty a {
+    color: var(--accent);
+  }
+  .linkish {
+    align-self: flex-start;
+    border: 0;
+    background: none;
+    padding: 0;
+    color: var(--accent);
+    font: inherit;
+    cursor: pointer;
+    text-decoration: underline;
+    text-underline-offset: 3px;
+  }
+
+  .sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
   }
 </style>

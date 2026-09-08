@@ -40,8 +40,9 @@ _ALLOWED_SCHEMES = frozenset({"http", "https"})
 _MAX_URL_LENGTH = 2048
 _MAX_NAME_LENGTH = 60
 _MIN_NAME_LENGTH = 2
-_MAX_DESCRIPTION_LENGTH = 200
+_MAX_DESCRIPTION_LENGTH = 500
 _MIN_DESCRIPTION_LENGTH = 20
+_MAX_CATEGORY_SUGGESTION_LENGTH = 60
 _GITHUB_PAGES_SUFFIX = ".github.io"
 
 # Social/badge/forge hosts a submission must not point at as its own url
@@ -98,7 +99,15 @@ def normalize_name(raw: str) -> str:
 
 
 def normalize_description(raw: str) -> str:
-    """Trim, length-bound, HTML-reject a submission's one-line description (design doc section 3.5: one factual sentence)."""
+    """Trim, length-bound, HTML-reject a submission's description.
+
+    Markdown (multi-line, links) is allowed -- rendered client-side through
+    the same `{@html}` + DOMPurify allowlist convention every other
+    markdown surface in this codebase uses (CLAUDE.md section 5); this is
+    the write-time half of that contract, same "reject raw HTML at the
+    door" posture x402_social's own markdown bodies already use (2026-09-08:
+    bumped from a 200-char one-liner to 500 chars / multi-line, owner ask).
+    """
     description = (raw or "").strip()
     if not (_MIN_DESCRIPTION_LENGTH <= len(description) <= _MAX_DESCRIPTION_LENGTH):
         raise EcosystemError(
@@ -110,6 +119,23 @@ def normalize_description(raw: str) -> str:
     except SocialError as exc:
         _reraise_as_ecosystem_error(exc)
     return description
+
+
+def normalize_category_suggestion(raw: str) -> str:
+    """Trim, length-bound, HTML-reject an optional free-text category suggestion. Never validated against CATEGORIES -- that's the point (see StoredProject.category_suggestion's own docstring)."""
+    suggestion = (raw or "").strip()
+    if not suggestion:
+        return ""
+    if len(suggestion) > _MAX_CATEGORY_SUGGESTION_LENGTH:
+        raise EcosystemError(
+            "invalid_request",
+            f"category_suggestion must be at most {_MAX_CATEGORY_SUGGESTION_LENGTH} characters",
+        )
+    try:
+        reject_embedded_html(suggestion, field_name="category_suggestion")
+    except SocialError as exc:
+        _reraise_as_ecosystem_error(exc)
+    return suggestion
 
 
 def normalize_url(raw: str, *, field_name: str = "url") -> str:
@@ -241,6 +267,7 @@ def submit_project(
     x402_url: str = "",
     tags: list[str] | None = None,
     contact: str = "",
+    category_suggestion: str = "",
 ) -> StoredProject:
     """Validate, liveness-check, and atomically create one pending submission.
 
@@ -261,6 +288,7 @@ def submit_project(
     clean_repo_url = normalize_url(repo_url, field_name="repo_url")
     clean_x402_url = normalize_url(x402_url, field_name="x402_url")
     clean_tags = validate_tags(tags or [])
+    clean_category_suggestion = normalize_category_suggestion(category_suggestion)
     domain = domain_key(clean_url)
     if not domain:
         raise EcosystemError("invalid_request", "url must include a host")
@@ -295,6 +323,7 @@ def submit_project(
         source=SOURCE_SUBMITTED,
         status=STATUS_PENDING,
         contact=(contact or "").strip()[:254],
+        category_suggestion=clean_category_suggestion,
         submitted_at_epoch=now_epoch,
         last_probed_at_epoch=now_epoch,
         reachable=liveness.reachable,
@@ -308,6 +337,7 @@ def submit_project(
 __all__ = [
     "domain_key",
     "existing_domain_message",
+    "normalize_category_suggestion",
     "normalize_description",
     "normalize_name",
     "normalize_tag",

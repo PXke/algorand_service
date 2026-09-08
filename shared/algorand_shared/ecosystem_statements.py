@@ -62,7 +62,7 @@ _CANONICAL_COLUMNS = (
     "slug, name, domain, url, repo_url, x402_url, description, category, tags, "
     "stage, open_source, source, status, editor_pick, contact, service_id, "
     "draft_description, submitted_at, reviewed_at, reviewed_by, reject_reason, "
-    "last_probed_at, reachable, last_http_status"
+    "last_probed_at, reachable, last_http_status, category_suggestion"
 )
 
 _PROJECTION_COLUMNS = (
@@ -92,7 +92,7 @@ class EcosystemStmts:
     )
     UPSERT = _Stmt(
         "INSERT INTO algorand_platform.ecosystem_projects "
-        f"({_CANONICAL_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        f"({_CANONICAL_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
     )
     DELETE = _Stmt("DELETE FROM algorand_platform.ecosystem_projects WHERE slug = ?")
     SET_LIVENESS = _Stmt(

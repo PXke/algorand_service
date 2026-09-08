@@ -130,6 +130,62 @@ def test_submit_success_creates_pending_entry(store: InMemoryProjectStore) -> No
     assert item.reachable is True
 
 
+def test_submit_accepts_a_500_char_multiline_description(store: InMemoryProjectStore) -> None:
+    """2026-09-08: description was bumped from a 200-char one-liner to 500 chars, multi-line/markdown allowed."""
+    long_description = (
+        "A multi-paragraph description with a [link](https://example.test).\n\n" * 6
+    )[:500]
+    resp = ecosystem_routes.ecosystem_submit(
+        _request(body=_submit_body(description=long_description))
+    )
+    assert resp["ok"] is True
+    item = store.get(resp["submission_id"])
+    assert item is not None
+    assert item.description == long_description.strip()
+    assert "\n" in item.description
+
+
+def test_submit_rejects_description_over_500_chars() -> None:
+    """The msgspec schema's own max_length=500 rejects an over-length body before submission_service even runs."""
+    resp = ecosystem_routes.ecosystem_submit(_request(body=_submit_body(description="x" * 501)))
+    assert resp.status_code == 400
+
+
+def test_submit_stores_the_category_suggestion(store: InMemoryProjectStore) -> None:
+    """2026-09-08: a free-text category suggestion is stored admin-side, never validated against CATEGORIES."""
+    resp = ecosystem_routes.ecosystem_submit(
+        _request(body=_submit_body(category="other", category_suggestion="Prediction markets"))
+    )
+    assert resp["ok"] is True
+    item = store.get(resp["submission_id"])
+    assert item is not None
+    assert item.category_suggestion == "Prediction markets"
+    assert item.category == "other"
+
+
+def test_submit_without_a_category_suggestion_defaults_to_empty(
+    store: InMemoryProjectStore,
+) -> None:
+    """No category_suggestion in the request body -- stored as empty, not None or missing."""
+    resp = ecosystem_routes.ecosystem_submit(_request(body=_submit_body()))
+    item = store.get(resp["submission_id"])
+    assert item is not None
+    assert item.category_suggestion == ""
+
+
+def test_category_suggestion_never_reaches_the_public_read() -> None:
+    """The admin-only field must never leak into a public serve, only the admin JSON."""
+    submit_resp = ecosystem_routes.ecosystem_submit(
+        _request(body=_submit_body(category_suggestion="Prediction markets"))
+    )
+    slug = submit_resp["submission_id"]
+    review_service.approve(slug, wallet="ADMINWALLET")
+
+    public = ecosystem_routes.ecosystem_detail(_request(method="GET", path_params={"slug": slug}))
+    assert isinstance(public, dict)
+    assert "category_suggestion" not in public
+
+
 def test_submit_honeypot_drops_silently(store: InMemoryProjectStore) -> None:
     """A filled honeypot field answers success but stores nothing."""
     resp = ecosystem_routes.ecosystem_submit(

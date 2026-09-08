@@ -828,8 +828,12 @@ class EcosystemSubmitRequest(msgspec.Struct, kw_only=True):
 
     name: Annotated[str, Meta(min_length=2, max_length=60)]
     url: Annotated[str, Meta(min_length=8, max_length=2048)]
-    description: Annotated[str, Meta(min_length=20, max_length=200)]
+    description: Annotated[str, Meta(min_length=20, max_length=500)]
     category: Annotated[str, Meta(max_length=32)] = "other"
+    # Free-text, shown only to the admin reviewer -- see
+    # StoredProject.category_suggestion's own docstring for why this never
+    # feeds the closed CATEGORIES enum directly.
+    category_suggestion: Annotated[str, Meta(max_length=60)] = ""
     repo_url: Annotated[str, Meta(max_length=2048)] = ""
     x402_url: Annotated[str, Meta(max_length=2048)] = ""
     tags: Annotated[list[Annotated[str, Meta(max_length=40)]], Meta(max_length=5)] = field(
@@ -850,7 +854,7 @@ class EcosystemDecisionRequest(msgspec.Struct, kw_only=True):
     decision: Literal["approve", "reject"]
     reason: Annotated[str, Meta(max_length=32)] = ""
     name: Annotated[str, Meta(max_length=60)] | None = None
-    description: Annotated[str, Meta(max_length=200)] | None = None
+    description: Annotated[str, Meta(max_length=500)] | None = None
     category: Annotated[str, Meta(max_length=32)] | None = None
     tags: Annotated[list[Annotated[str, Meta(max_length=40)]], Meta(max_length=5)] | None = None
 
@@ -859,7 +863,7 @@ class EcosystemUpdateRequest(msgspec.Struct, kw_only=True):
     """Request body for PUT /admin/ecosystem/:slug — free-form admin edit of any entry, regardless of status."""
 
     name: Annotated[str, Meta(max_length=60)] | None = None
-    description: Annotated[str, Meta(max_length=200)] | None = None
+    description: Annotated[str, Meta(max_length=500)] | None = None
     category: Annotated[str, Meta(max_length=32)] | None = None
     tags: Annotated[list[Annotated[str, Meta(max_length=40)]], Meta(max_length=5)] | None = None
     stage: Annotated[str, Meta(max_length=16)] | None = None

@@ -49,6 +49,7 @@ def _row_to_project(row: object) -> StoredProject:
         contact=getattr(row, "contact", None) or "",
         service_id=getattr(row, "service_id", None) or "",
         draft_description=getattr(row, "draft_description", None) or "",
+        category_suggestion=getattr(row, "category_suggestion", None) or "",
         submitted_at_epoch=_epoch(getattr(row, "submitted_at", None)),
         reviewed_at_epoch=_epoch(getattr(row, "reviewed_at", None)),
         reviewed_by=getattr(row, "reviewed_by", None) or "",
@@ -85,6 +86,7 @@ def _canonical_params(item: StoredProject) -> tuple:
         _dt(item.last_probed_at_epoch),
         item.reachable,
         item.last_http_status or None,
+        item.category_suggestion,
     )
 
 

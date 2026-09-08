@@ -108,6 +108,13 @@ class StoredProject:
     contact: str = ""
     service_id: str = ""
     draft_description: str = ""
+    # Free-text, submitter-suggested category name -- shown only to an admin
+    # reviewer (design doc's closed-enum category stays closed; this is not
+    # auto-applied to `category`, which always stays one of CATEGORIES). Set
+    # only when the submitter picked "other" and had something more specific
+    # in mind (2026-09-08, owner ask: "allow people to suggest new
+    # categories").
+    category_suggestion: str = ""
     submitted_at_epoch: int = 0
     reviewed_at_epoch: int = 0
     reviewed_by: str = ""

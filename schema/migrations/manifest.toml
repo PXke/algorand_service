@@ -1046,3 +1046,11 @@ file = "backend/schema/migrations/app/123_drop_x402_promo_redemptions_v1.cql"
 tier = "prod"
 status = "active"
 description = "Drops x402_promo_redemptions (v1), superseded by x402_promo_redemptions_v2 since 101_x402_promo_multi_redeem.cql (2026-09-01) and confirmed dead 2026-09-07 (no live INSERT/SELECT anywhere in current code). All 5 rows are operator/probe test data (LIVETEST-*, MARKETING-SCAN-TEST), zero real customer redemptions -- full export archived at docs/adr/archived-data/x402_promo_redemptions_v1_final_export_20260907.txt before this drop, matching this repo's established retire-then-drop pattern (069/074/078/079/081/082/085/086)."
+
+[[migrations]]
+stream = "app"
+version = "124"
+file = "backend/schema/migrations/app/124_ecosystem_category_suggestion.cql"
+tier = "prod"
+status = "active"
+description = "Adds ecosystem_projects.category_suggestion (nullable text, purely additive) -- a free-text, submitter-suggested category name for the Algorand Open Registry (owner ask 2026-09-08: 'allow people to suggest new categories'), admin-review-only, never validated against the closed CATEGORIES enum and never served on a public read. See app/modules/ecosystem/models/domain.py's StoredProject.category_suggestion and services/submission_service.py's normalize_category_suggestion."

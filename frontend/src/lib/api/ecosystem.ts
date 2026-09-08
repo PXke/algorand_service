@@ -30,6 +30,32 @@ export const ECOSYSTEM_CATEGORIES = [
 ] as const
 export type EcosystemCategory = (typeof ECOSYSTEM_CATEGORIES)[number]
 
+/** Human names for the closed category enum (design doc §4), in enum order. The slug stays the API/URL value. */
+export const ECOSYSTEM_CATEGORY_LABELS: Record<EcosystemCategory, string> = {
+  wallets: 'Wallets & key management',
+  'defi-exchange': 'Exchanges & AMMs',
+  'defi-lending': 'Lending, stablecoins & yield',
+  nfts: 'NFTs & collectibles',
+  gaming: 'Gaming & metaverse',
+  identity: 'Identity, names & credentials',
+  rwa: 'Real-world assets',
+  payments: 'Payments & commerce',
+  infrastructure: 'Infrastructure & nodes',
+  devtools: 'Developer tools & SDKs',
+  analytics: 'Explorers & analytics',
+  governance: 'Governance & DAOs',
+  interop: 'Oracles & bridges',
+  security: 'Security & auditing',
+  agents: 'AI & agents',
+  enterprise: 'Enterprise & impact',
+  media: 'Education & media',
+  other: 'Other',
+}
+
+export function ecosystemCategoryLabel(slug: string): string {
+  return (ECOSYSTEM_CATEGORY_LABELS as Record<string, string>)[slug] ?? slug
+}
+
 export const ECOSYSTEM_REJECT_REASONS = [
   'not_algorand',
   'unreachable',
@@ -41,8 +67,29 @@ export const ECOSYSTEM_REJECT_REASONS = [
 
 export const ECOSYSTEM_NAME_MAX_LENGTH = 60
 export const ECOSYSTEM_DESCRIPTION_MIN_LENGTH = 20
-export const ECOSYSTEM_DESCRIPTION_MAX_LENGTH = 200
+// Multi-line + links, markdown-formatted (2026-09-08, owner ask) -- rendered
+// through Markdown.svelte-equivalent {@html} + DOMPurify on the entry page
+// (see RegistryEntry.svelte), a plain stripped-to-text preview in the list
+// (see stripMarkdownToText below).
+export const ECOSYSTEM_DESCRIPTION_MAX_LENGTH = 500
 export const ECOSYSTEM_MAX_TAGS = 5
+export const ECOSYSTEM_CATEGORY_SUGGESTION_MAX_LENGTH = 60
+
+/** Crude markdown-syntax stripper for a compact list preview -- the full render (links, emphasis, multi-line) is reserved for the entry detail page (RegistryEntry.svelte); a dense list of many rows has no room for it. Not a security boundary (that's sanitizeArticleHtml, only used where markdown is actually rendered as HTML) -- this never touches {@html}, so a missed edge case just leaves stray punctuation in a text node, not a vulnerability. */
+export function stripMarkdownToText(source: string): string {
+  return source
+    .replace(/```[\s\S]*?```/g, ' ') // fenced code blocks
+    .replace(/`([^`]+)`/g, '$1') // inline code
+    .replace(/!\[([^\]]*)\]\([^)]*\)/g, '$1') // images -> alt text
+    .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1') // links -> link text
+    .replace(/^#{1,6}\s+/gm, '') // headings
+    .replace(/^>\s?/gm, '') // blockquotes
+    .replace(/[*_]{1,3}([^*_]+)[*_]{1,3}/g, '$1') // bold/italic
+    .replace(/^[-*+]\s+/gm, '') // bullet markers
+    .replace(/\s*\n+\s*/g, ' ') // collapse line breaks to a single line
+    .replace(/\s{2,}/g, ' ')
+    .trim()
+}
 
 export type EcosystemEntry = {
   slug: string
@@ -70,6 +117,10 @@ export type EcosystemSubmitPayload = {
   url: string
   description: string
   category: string
+  // Free text, shown only to the admin reviewer -- never validated against
+  // the closed category enum. Typically only meaningful when category is
+  // "other".
+  category_suggestion?: string
   repo_url?: string
   x402_url?: string
   tags?: string[]
@@ -121,14 +172,16 @@ export const ecosystemApi = {
     submissionId: string,
     signal?: AbortSignal,
   ): Promise<EcosystemSubmissionStatus> {
-    return (await api.getJson(
-      `/api/v1/ecosystem/submissions/${encodeURIComponent(submissionId)}`,
-      { signal },
-    )) as unknown as EcosystemSubmissionStatus
+    return (await api.getJson(`/api/v1/ecosystem/submissions/${encodeURIComponent(submissionId)}`, {
+      signal,
+    })) as unknown as EcosystemSubmissionStatus
   },
 
   async submit(payload: EcosystemSubmitPayload): Promise<EcosystemSubmitResult> {
-    return (await api.postJson('/api/v1/ecosystem/submit', payload)) as unknown as EcosystemSubmitResult
+    return (await api.postJson(
+      '/api/v1/ecosystem/submit',
+      payload,
+    )) as unknown as EcosystemSubmitResult
   },
 
   badgeUrl(slug: string): string {
