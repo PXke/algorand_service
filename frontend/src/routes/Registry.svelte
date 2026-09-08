@@ -35,6 +35,17 @@
   })
   const activeTag = $derived($route.query.get('tag') || null)
 
+  // Tag row can run to 60+ distinct values on "All projects" -- capped at
+  // a page-load-friendly count with an explicit toggle, rather than
+  // burying the results below several lines of chips (2026-09-08 Fable
+  // review). Collapses again whenever the category changes, since a new
+  // category means a new (usually shorter) tag set.
+  let tagsExpanded = $state(false)
+  $effect(() => {
+    void activeCategory
+    tagsExpanded = false
+  })
+
   function withQuery(overrides: { category?: string | null; tag?: string | null }): string {
     const category = 'category' in overrides ? overrides.category : activeCategory
     const tag = 'tag' in overrides ? overrides.tag : activeTag
@@ -83,6 +94,13 @@
     for (const e of inCategory) for (const tag of e.tags) counts.set(tag, (counts.get(tag) ?? 0) + 1)
     return [...counts.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
   })
+
+  const TAG_ROW_LIMIT = 12
+  const visibleTagOptions = $derived(
+    tagsExpanded || tagOptions.length <= TAG_ROW_LIMIT
+      ? tagOptions
+      : tagOptions.slice(0, TAG_ROW_LIMIT),
+  )
 
   // If the active tag no longer applies under the current category (e.g. a
   // direct link to an incompatible category+tag pair), fall through to the
@@ -143,28 +161,30 @@
          brought back per owner feedback (2026-09-08), but living in the
          page's own left gutter instead of a bordered sidebar that ate into
          the reading measure. -->
-    <aside class="categories-rail" aria-label="Categories">
-      <ul>
-        <li>
-          <button type="button" class:active={!activeCategory} onclick={() => selectCategory(null)}>
-            <span>All projects</span>
-            <span class="cat-count">{entries.length}</span>
-          </button>
-        </li>
-        {#each categoryOptions as opt (opt.slug)}
+    {#if categoryOptions.length}
+      <aside class="categories-rail" aria-label="Categories">
+        <ul>
           <li>
-            <button
-              type="button"
-              class:active={activeCategory === opt.slug}
-              onclick={() => selectCategory(opt.slug)}
-            >
-              <span>{opt.label}</span>
-              <span class="cat-count">{opt.count}</span>
+            <button type="button" class:active={!activeCategory} onclick={() => selectCategory(null)}>
+              <span>All projects</span>
+              <span class="cat-count">{entries.length}</span>
             </button>
           </li>
-        {/each}
-      </ul>
-    </aside>
+          {#each categoryOptions as opt (opt.slug)}
+            <li>
+              <button
+                type="button"
+                class:active={activeCategory === opt.slug}
+                onclick={() => selectCategory(opt.slug)}
+              >
+                <span>{opt.label}</span>
+                <span class="cat-count">{opt.count}</span>
+              </button>
+            </li>
+          {/each}
+        </ul>
+      </aside>
+    {/if}
 
     <!-- The reading column: capped at 700px and centered on the page by the
          layout grid's equal-width outer tracks (categories on the left,
@@ -184,8 +204,8 @@
       </div>
 
       {#if tagOptions.length}
-        <div class="tag-row" aria-label="Tags">
-          {#each tagOptions as [tag, count] (tag)}
+        <div class="tag-row" role="group" aria-label="Tags">
+          {#each visibleTagOptions as [tag, count] (tag)}
             <button
               type="button"
               class="tag-btn"
@@ -196,6 +216,11 @@
               <span class="tag-count">{count}</span>
             </button>
           {/each}
+          {#if tagOptions.length > TAG_ROW_LIMIT}
+            <button type="button" class="tag-btn tag-more" onclick={() => (tagsExpanded = !tagsExpanded)}>
+              {tagsExpanded ? 'Show fewer tags' : `+${tagOptions.length - TAG_ROW_LIMIT} more`}
+            </button>
+          {/if}
         </div>
       {/if}
 
@@ -321,21 +346,45 @@
     color: var(--subtle);
   }
 
-  /* Three tracks, the outer two EQUAL width -- that's what centers the
-     700px reading column on the page. Categories float in the left
-     gutter; the right gutter stays empty on purpose (owner spec,
-     2026-09-08: "categories | text (700px) | empty", not a boxed
-     two-column sidebar layout). */
+  /* Three tiers, not one breakpoint (2026-09-08 Fable review: a single
+     860px cutover put the rail's own ~240px floating width up against a
+     shrinking gutter, and it silently ran off the left edge of the
+     viewport from 860px up to roughly 1290px -- laptop/half-screen widths,
+     not an edge case). Below 960px there's no gutter worth floating in at
+     all, so the rail becomes a horizontal chip row. From 960px to 1279px
+     it's a plain two-column layout -- rail beside text, offset right of
+     true center, but never off-screen. Only at >=1280px is there enough
+     room for the outer-equal-tracks trick that actually centers the 700px
+     column (owner spec: "categories | text (700px) | empty"). */
   .layout {
     display: grid;
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
     gap: 20px;
   }
-  @media (min-width: 860px) {
+  @media (min-width: 960px) and (max-width: 1279.98px) {
+    .layout {
+      grid-template-columns: minmax(0, 240px) minmax(0, 700px);
+      gap: 32px;
+      align-items: start;
+    }
+    .main {
+      grid-column: 2;
+    }
+  }
+  @media (min-width: 1280px) {
     .layout {
       grid-template-columns: minmax(0, 1fr) minmax(0, 700px) minmax(0, 1fr);
       gap: 32px;
       align-items: start;
+    }
+    .categories-rail {
+      grid-column: 1;
+    }
+    .main {
+      grid-column: 2;
+    }
+    .layout-spacer {
+      grid-column: 3;
     }
   }
 
@@ -346,20 +395,29 @@
     min-width: 0;
   }
 
+  /* Deliberately empty at every width -- see the template comment -- but
+     only actually part of the grid (and thus only actually centering
+     anything) once the 3-track tier is active. */
   .layout-spacer {
     display: none;
   }
-  @media (min-width: 860px) {
+  @media (min-width: 1280px) {
     .layout-spacer {
       display: block;
     }
   }
 
   /* Floating list, not a bordered panel -- narrow, right-aligned toward the
-     text column, no background/border of its own. Below 860px there's no
+     text column, no background/border of its own. Below 960px there's no
      gutter to float in, so it becomes a horizontal scrolling chip row
      instead of disappearing (2026-09-08 Fable review: a facet that only
-     exists on desktop is a bug, not a simplification). */
+     exists on desktop is a bug, not a simplification). The rail's own
+     `minmax(0, 1fr)` fallback base on `.layout` (not a bare `1fr`) is what
+     stops this chip row from forcing the whole page to scroll sideways
+     once there are enough categories to overflow a phone's width -- an
+     un-guarded `1fr` track takes its min-content size from the unwrapped
+     row instead of shrinking to fit (same Fable review; this bit the live
+     site before there were enough categories to trigger it). */
   .categories-rail ul {
     list-style: none;
     margin: 0;
@@ -375,17 +433,19 @@
   .categories-rail ul::-webkit-scrollbar {
     display: none;
   }
-  @media (min-width: 860px) {
+  @media (min-width: 960px) {
     .categories-rail {
       justify-self: end;
       width: max-content;
       max-width: 240px;
       position: sticky;
-      top: 16px;
+      /* Clears the sticky masthead (64px at this width, see app.css's own
+         `scroll-padding-top: calc(64px + …)`) -- without this the rail
+         scrolled UNDER the masthead bar instead of stopping below it. */
+      top: calc(64px + 16px);
     }
     .categories-rail ul {
       flex-direction: column;
-      flex-wrap: wrap;
       gap: 2px;
       overflow-x: visible;
     }
@@ -408,7 +468,7 @@
     text-align: end;
     cursor: pointer;
   }
-  @media (min-width: 860px) {
+  @media (min-width: 960px) {
     .categories-rail button {
       border: 0;
       border-inline-end: 2px solid transparent;
@@ -421,12 +481,15 @@
   .categories-rail button:hover {
     color: var(--on-surface);
   }
+  /* No font-weight change on active -- the accent border already carries
+     that signal, and bolding shifted this row's own natural width, which
+     wrapped the two longest category labels only when they became active
+     (2026-09-08 Fable review). */
   .categories-rail button.active {
     color: var(--on-surface);
-    font-weight: 600;
     border-color: var(--accent);
   }
-  @media (min-width: 860px) {
+  @media (min-width: 960px) {
     .categories-rail button.active {
       border-inline-end-color: var(--accent);
       border-block-color: transparent;
@@ -477,6 +540,15 @@
   }
   .tag-btn.active .tag-count {
     color: var(--muted);
+  }
+  /* Dashed, not solid -- this toggles the list's own length, it isn't a
+     filter like its siblings, and shouldn't look like one. */
+  .tag-more {
+    border-style: dashed;
+    color: var(--subtle);
+  }
+  .tag-more:hover {
+    color: var(--on-surface);
   }
 
   .results {
