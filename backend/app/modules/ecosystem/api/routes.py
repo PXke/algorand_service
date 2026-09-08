@@ -44,6 +44,12 @@ def _public_project_json(item: StoredProject) -> dict:
         "editor_pick": item.editor_pick,
         "last_probed_at_epoch": item.last_probed_at_epoch,
         "reachable": item.reachable,
+        # Just a status code, not sensitive -- exposed so the entry page can
+        # say what was actually measured ("Site responded (HTTP 200)")
+        # instead of an unqualified "Online" (2026-09-08 Fable review: that
+        # wording overclaimed for a site that could be parked or wound down
+        # while still answering 200 -- this check never reads the body).
+        "last_http_status": item.last_http_status,
         "submitted_at_epoch": item.submitted_at_epoch,
         "reviewed_at_epoch": item.reviewed_at_epoch,
     }
@@ -58,7 +64,6 @@ def _admin_project_json(item: StoredProject) -> dict:
         "draft_description": item.draft_description,
         "reviewed_by": item.reviewed_by,
         "reject_reason": item.reject_reason,
-        "last_http_status": item.last_http_status,
         "service_id": item.service_id,
         "category_suggestion": item.category_suggestion,
     }

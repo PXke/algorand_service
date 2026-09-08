@@ -114,3 +114,23 @@ def test_a_paid_x402_product_off_the_memory_store_is_registered(
     client = testing.TestClient(create_app())
     resp = client.simulate_get("/api/v1/x402/board")
     assert resp.status_code != 404
+
+
+def test_ecosystem_left_on_the_memory_store_is_not_registered(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Same gate as the paid x402 products above, applied to the free registry (2026-09-08 Fable review: this gate did not exist at all before -- ecosystem_enabled alone registered the routes regardless of durability, so an unset/regressed ECOSYSTEM_STORE would silently serve the Algorand Open Registry from a per-process dict that a gunicorn restart erases, with no error anywhere)."""
+    monkeypatch.setattr(falcon_main_settings, "ecosystem_enabled", True)
+    monkeypatch.setattr(falcon_main_settings, "ecosystem_store", "memory")
+    client = testing.TestClient(create_app())
+    resp = client.simulate_get("/api/v1/ecosystem")
+    assert resp.status_code == 404
+
+
+def test_ecosystem_off_the_memory_store_is_registered(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The mirror of the test above: a non-memory store setting registers the registry's routes."""
+    monkeypatch.setattr(falcon_main_settings, "ecosystem_enabled", True)
+    monkeypatch.setattr(falcon_main_settings, "ecosystem_store", "cassandra")
+    client = testing.TestClient(create_app())
+    resp = client.simulate_get("/api/v1/ecosystem")
+    assert resp.status_code != 404

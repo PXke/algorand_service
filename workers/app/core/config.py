@@ -1720,6 +1720,12 @@ ECOSYSTEM_PROBE_TIMEOUT_SECONDS = env_float("ECOSYSTEM_PROBE_TIMEOUT_SECONDS", 5
 # Bounded scan of ecosystem_projects (a small, fully-enumerable table -- see
 # EcosystemStmts.LIST_ALL's own docstring), never unbounded.
 ECOSYSTEM_PROBE_MAX_ENTRIES = env_int("ECOSYSTEM_PROBE_MAX_ENTRIES", 500)
+# Same convention as X402_PROBE_MAX_BODY_BYTES -- a liveness check only
+# needs to confirm the body exists / match a parking-page signature (see
+# ecosystem_probe/service.py's check_reachable), never the full page.
+# Previously uncapped: net_guard.guarded_get's own default (20MB) applied
+# by omission (2026-09-08 Fable review).
+ECOSYSTEM_PROBE_MAX_BODY_BYTES = env_int("ECOSYSTEM_PROBE_MAX_BODY_BYTES", 64 * 1024)
 # Pricing-model change (owner decision 2026-09-06, migration 114): a listing
 # no longer survives on a one-time paid term -- it survives for as long as
 # it keeps passing health probes. Every HEALTHY probe (reachable AND

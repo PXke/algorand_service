@@ -51,6 +51,14 @@ def _entry(slug: str, url: str = "https://example.test/") -> RegistryEntry:
 # --------------------------------------------------------------------------- #
 # check_reachable
 # --------------------------------------------------------------------------- #
+@pytest.fixture(autouse=True)
+def _not_parked(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Default the parking-page check to "not parked" for every test in this module except the ones specifically exercising it below -- fails the same way is_source_parked_or_expired itself fails open (False), and keeps every pre-existing test in this file from making a second, unmocked real fetch."""
+    monkeypatch.setattr(
+        "app.modules.ecosystem_probe.service.is_source_parked_or_expired", lambda _url: False
+    )
+
+
 def test_check_reachable_true_under_500(monkeypatch: pytest.MonkeyPatch) -> None:
     """A < 500 response counts as reachable, matching ecosystem_sync._reachable's own bar."""
     monkeypatch.setattr(
@@ -71,6 +79,41 @@ def test_check_reachable_false_on_5xx(monkeypatch: pytest.MonkeyPatch) -> None:
     reachable, status = check_reachable("https://example.test/")
     assert reachable is False
     assert status == 503
+
+
+def test_check_reachable_false_when_the_body_matches_a_parking_page(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression test (2026-09-08, the 'downbad' problem): a 200 response whose body matches a known parking-page signature reads as unreachable, not alive -- the transport-only check alone would have called this reachable."""
+    monkeypatch.setattr(
+        "app.modules.ecosystem_probe.service.guarded_get",
+        lambda *_a, **_kw: SimpleNamespace(status_code=200),
+    )
+    monkeypatch.setattr(
+        "app.modules.ecosystem_probe.service.is_source_parked_or_expired", lambda _url: True
+    )
+    reachable, status = check_reachable("https://example.test/")
+    assert reachable is False
+    assert status == 200  # the real transport status is still reported, just not "alive"
+
+
+def test_check_reachable_never_checks_parking_when_already_unreachable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The parking check is skipped (no second fetch) once the transport check has already failed -- nothing left to narrow."""
+
+    def _must_not_be_called(_url: str) -> bool:
+        raise AssertionError("must not check for parking on an already-unreachable entry")
+
+    monkeypatch.setattr(
+        "app.modules.ecosystem_probe.service.guarded_get",
+        lambda *_a, **_kw: SimpleNamespace(status_code=503),
+    )
+    monkeypatch.setattr(
+        "app.modules.ecosystem_probe.service.is_source_parked_or_expired", _must_not_be_called
+    )
+    reachable, _status = check_reachable("https://example.test/")
+    assert reachable is False
 
 
 def test_check_reachable_never_raises_on_network_error(monkeypatch: pytest.MonkeyPatch) -> None:

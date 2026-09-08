@@ -152,7 +152,17 @@ def create_app() -> falcon.App:
     register_search_routes(router)
     register_contact_routes(router)
     register_glossary_routes(router)
-    if settings.ecosystem_enabled:
+    # Gated a second time on its own store setting, same reasoning
+    # _register_x402_routes below documents for every paid product: "memory"
+    # is a per-process dict, and under gunicorn's multiple worker processes a
+    # submission written on one worker is invisible to a read that lands on
+    # another. Not a paid product, so nothing is charged either way -- but a
+    # registry that silently drops/hides submissions depending on which
+    # worker served the request is broken all the same. Registering only
+    # when durable means an unset/regressed ECOSYSTEM_STORE fails LOUD (every
+    # route 404s) instead of silently serving from memory (2026-09-08 Fable
+    # review: found no gate here at all, unlike every sibling module).
+    if settings.ecosystem_enabled and settings.ecosystem_store != "memory":
         register_ecosystem_routes(router)
     register_sharing_routes(router)
     if settings.suggestions_enabled:

@@ -5,6 +5,15 @@ helper `app.modules.crawler.ecosystem_sync._reachable` already uses for
 exactly this "cheap liveness probe" purpose (CLAUDE.md section 3: no new
 copy of existing logic). A per-URL failure never aborts the sweep; only
 Celery's SoftTimeLimitExceeded propagates (CLAUDE.md invariant 6).
+
+`check_reachable` also runs `is_source_parked_or_expired` (2026-09-08 Fable
+review, the "downbad" problem: a wound-down project can still answer a
+normal 200 with no content-level check ever catching it) -- reused, not
+copied, from `app.modules.newspaper.source_liveness`, which already exists
+in this same service/venv for the identical "a normal 200 can still be a
+dead domain" shape (root-caused 2026-08-27 on arima.io). Same fail-open
+posture: a parking-marker match only ever narrows an already-"alive" result
+to "not really," it can never turn a genuine failure into a false positive.
 """
 
 from __future__ import annotations
@@ -17,9 +26,14 @@ from typing import Protocol
 from celery.exceptions import SoftTimeLimitExceeded
 
 from app.core.cassandra import get_cassandra_session
-from app.core.config import ECOSYSTEM_PROBE_MAX_ENTRIES, ECOSYSTEM_PROBE_TIMEOUT_SECONDS
+from app.core.config import (
+    ECOSYSTEM_PROBE_MAX_BODY_BYTES,
+    ECOSYSTEM_PROBE_MAX_ENTRIES,
+    ECOSYSTEM_PROBE_TIMEOUT_SECONDS,
+)
 from app.core.net_guard import guarded_get
 from app.core.statements import EcosystemStmts
+from app.modules.newspaper.source_liveness import is_source_parked_or_expired
 
 logger = logging.getLogger(__name__)
 
@@ -96,8 +110,15 @@ def check_reachable(url: str) -> tuple[bool, int]:
             url,
             headers={"User-Agent": "Mozilla/5.0 (compatible; pxke-registry-probe)"},
             timeout=ECOSYSTEM_PROBE_TIMEOUT_SECONDS,
+            max_bytes=ECOSYSTEM_PROBE_MAX_BODY_BYTES,
         )
-        return resp.status_code < _ALIVE_STATUS_CEILING, resp.status_code
+        alive = resp.status_code < _ALIVE_STATUS_CEILING
+        # Only worth the second fetch when the first one already looked
+        # alive -- an already-failing/5xx entry doesn't need a parking-page
+        # check on top.
+        if alive and is_source_parked_or_expired(url):
+            alive = False
+        return alive, resp.status_code
     except SoftTimeLimitExceeded:
         raise
     except Exception:
