@@ -240,13 +240,47 @@ def test_submit_unreachable_url_rejected(
 
 
 def test_submit_5xx_counts_as_unreachable(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Design doc section 3.1: '< 500 counts as alive' -- a 500 response itself does not."""
+    """Only a real 2xx counts as alive (tightened 2026-09-08 -- see liveness.py's own docstring)."""
     monkeypatch.setattr(
         "app.modules.ecosystem.services.liveness.check_target",
         lambda url, **_kw: UptimeResult(
             final_url=url,
             reachable=True,
             http_status=503,
+            response_time_ms=10,
+            resolved_ip="1.2.3.4",
+            error="",
+        ),
+    )
+    resp = ecosystem_routes.ecosystem_submit(_request(body=_submit_body()))
+    assert resp.status_code == 422
+
+
+def test_submit_404_counts_as_unreachable(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Regression test (2026-09-08, owner ask): a 404/401/etc. used to pass the old '< 500' bar as 'alive' -- a real 404 is not a working listing, only 2xx counts now."""
+    monkeypatch.setattr(
+        "app.modules.ecosystem.services.liveness.check_target",
+        lambda url, **_kw: UptimeResult(
+            final_url=url,
+            reachable=True,
+            http_status=404,
+            response_time_ms=10,
+            resolved_ip="1.2.3.4",
+            error="",
+        ),
+    )
+    resp = ecosystem_routes.ecosystem_submit(_request(body=_submit_body()))
+    assert resp.status_code == 422
+
+
+def test_submit_401_counts_as_unreachable(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A 401 response counts as unreachable, same as 404."""
+    monkeypatch.setattr(
+        "app.modules.ecosystem.services.liveness.check_target",
+        lambda url, **_kw: UptimeResult(
+            final_url=url,
+            reachable=True,
+            http_status=401,
             response_time_ms=10,
             resolved_ip="1.2.3.4",
             error="",

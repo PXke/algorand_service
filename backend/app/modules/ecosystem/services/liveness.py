@@ -14,12 +14,18 @@ from dataclasses import dataclass
 from app.core.config import settings
 from app.modules.x402_uptime.services.checker import check_target
 
-# Same bar the crawler's own ecosystem_sync._reachable uses, cited by the
-# design doc section 3.1: "< 500 counts as alive". check_target()'s own
-# `reachable` flag means only "got a transport-level HTTP response at all"
-# (any status, including 5xx) -- this module's ALIVE_STATUS_CEILING applies
-# the additional status-code bar on top of that.
-ALIVE_STATUS_CEILING = 500
+# check_target()'s own `reachable` flag means only "got a transport-level
+# HTTP response at all" -- any status, including 4xx/5xx, counts. That was
+# also this module's own bar until 2026-09-08 ("< 500 counts as alive",
+# design doc section 3.1) -- too loose in practice: a 404 (page gone), 401/
+# 403 (gated), or any other 4xx genuinely means "not a working listing,"
+# not "basically fine because it's under 500." Only a real 2xx success
+# counts as alive now. check_target already follows redirects internally
+# (up to max_redirects) before returning, so the status seen here is
+# already the terminal one -- a 3xx surviving to this point means the
+# redirect chain never resolved, which is correctly NOT alive either.
+ALIVE_STATUS_LOW = 200
+ALIVE_STATUS_HIGH = 300  # exclusive upper bound
 
 
 @dataclass(frozen=True)
@@ -37,10 +43,8 @@ def check_liveness(url: str, *, max_redirects: int = 3) -> LivenessCheck:
         timeout_s=settings.ecosystem_liveness_timeout_seconds,
         max_redirects=max_redirects,
     )
-    alive = result.reachable and (
-        result.http_status == 0 or result.http_status < ALIVE_STATUS_CEILING
-    )
+    alive = result.reachable and ALIVE_STATUS_LOW <= result.http_status < ALIVE_STATUS_HIGH
     return LivenessCheck(reachable=alive, http_status=result.http_status)
 
 
-__all__ = ["ALIVE_STATUS_CEILING", "LivenessCheck", "check_liveness"]
+__all__ = ["ALIVE_STATUS_HIGH", "ALIVE_STATUS_LOW", "LivenessCheck", "check_liveness"]

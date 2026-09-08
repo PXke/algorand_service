@@ -44,7 +44,11 @@ logger = logging.getLogger(__name__)
 _PENDING = "pending"
 _APPROVED = "approved"
 _RECHECK_STATUSES = (_PENDING, _APPROVED)
-_ALIVE_STATUS_CEILING = 500
+# Mirrors backend's ecosystem/services/liveness.py's identical 2026-09-08
+# tightening: only a real 2xx counts as alive now, not "anything under
+# 500" -- a 404/401/403/etc. genuinely means "not a working listing."
+_ALIVE_STATUS_LOW = 200
+_ALIVE_STATUS_HIGH = 300  # exclusive upper bound
 
 
 @dataclass(frozen=True)
@@ -93,7 +97,7 @@ class CassandraRegistryRepository:
 
 
 def check_reachable(url: str) -> tuple[bool, int]:
-    """SSRF-guarded reachability check; never raises except SoftTimeLimitExceeded. Mirrors ecosystem_sync._reachable's own "< 500 counts as alive" bar.
+    """SSRF-guarded reachability check; never raises except SoftTimeLimitExceeded. Only a real 2xx counts as alive (2026-09-08 tightening -- see module docstring and backend's identical liveness.py change).
 
     SoftTimeLimitExceeded is caught and re-raised explicitly, ahead of the
     generic except below, so a soft-limit interrupt mid-fetch propagates to
@@ -112,10 +116,10 @@ def check_reachable(url: str) -> tuple[bool, int]:
             timeout=ECOSYSTEM_PROBE_TIMEOUT_SECONDS,
             max_bytes=ECOSYSTEM_PROBE_MAX_BODY_BYTES,
         )
-        alive = resp.status_code < _ALIVE_STATUS_CEILING
+        alive = _ALIVE_STATUS_LOW <= resp.status_code < _ALIVE_STATUS_HIGH
         # Only worth the second fetch when the first one already looked
-        # alive -- an already-failing/5xx entry doesn't need a parking-page
-        # check on top.
+        # alive -- an already-failing/4xx/5xx entry doesn't need a
+        # parking-page check on top.
         if alive and is_source_parked_or_expired(url):
             alive = False
         return alive, resp.status_code

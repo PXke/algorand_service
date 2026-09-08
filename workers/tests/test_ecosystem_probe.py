@@ -59,8 +59,8 @@ def _not_parked(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
-def test_check_reachable_true_under_500(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A < 500 response counts as reachable, matching ecosystem_sync._reachable's own bar."""
+def test_check_reachable_true_on_2xx(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A real 2xx response counts as reachable."""
     monkeypatch.setattr(
         "app.modules.ecosystem_probe.service.guarded_get",
         lambda *_a, **_kw: SimpleNamespace(status_code=200),
@@ -71,7 +71,7 @@ def test_check_reachable_true_under_500(monkeypatch: pytest.MonkeyPatch) -> None
 
 
 def test_check_reachable_false_on_5xx(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A 5xx response counts as unreachable, same '< 500 counts as alive' bar."""
+    """A 5xx response counts as unreachable."""
     monkeypatch.setattr(
         "app.modules.ecosystem_probe.service.guarded_get",
         lambda *_a, **_kw: SimpleNamespace(status_code=503),
@@ -79,6 +79,28 @@ def test_check_reachable_false_on_5xx(monkeypatch: pytest.MonkeyPatch) -> None:
     reachable, status = check_reachable("https://example.test/")
     assert reachable is False
     assert status == 503
+
+
+def test_check_reachable_false_on_404(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Regression test (2026-09-08, owner ask): a 404 used to pass the old '< 500' bar as 'alive' -- only 2xx counts now."""
+    monkeypatch.setattr(
+        "app.modules.ecosystem_probe.service.guarded_get",
+        lambda *_a, **_kw: SimpleNamespace(status_code=404),
+    )
+    reachable, status = check_reachable("https://example.test/")
+    assert reachable is False
+    assert status == 404
+
+
+def test_check_reachable_false_on_401(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A 401 response counts as unreachable, same as 404."""
+    monkeypatch.setattr(
+        "app.modules.ecosystem_probe.service.guarded_get",
+        lambda *_a, **_kw: SimpleNamespace(status_code=401),
+    )
+    reachable, status = check_reachable("https://example.test/")
+    assert reachable is False
+    assert status == 401
 
 
 def test_check_reachable_false_when_the_body_matches_a_parking_page(
