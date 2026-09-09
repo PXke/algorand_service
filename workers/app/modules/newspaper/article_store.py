@@ -86,7 +86,28 @@ def _sanitize_body(body: str) -> str:
     the writer's output is LLM-composed markdown and could contain a raw
     `<script>`/`<iframe>`/`onerror=` payload that the frontend's `marked`
     renderer would otherwise pass straight through to `{@html}`.
+
+    The body is Markdown source, not HTML, so `nh3.clean()` is only run when
+    the text actually contains real HTML tag syntax. `nh3.clean()` parses
+    its input as a full HTML document and re-serializes it, which entity-
+    encodes bare `<`/`>`/`&`/quote characters in ordinary text nodes as part
+    of correct HTML serialization -- harmless for real HTML, but it silently
+    corrupts plain Markdown prose containing those characters naturally
+    (an on-chain note like `r=1748>1643`, a URL query string `?a=1&b=2`, a
+    bare comparison). `nh3.is_html()` runs the same HTML5 tag tokenizer
+    `clean()` itself uses internally, so it reliably detects every case
+    `clean()` would need to alter (including obfuscated payloads: uppercase
+    `<SCRIPT>`, spaced `< script >`, comment-wrapped, `javascript:` hrefs --
+    all verified `True`) while returning `False` for text with no genuine
+    tag syntax at all, which is left untouched rather than round-tripped
+    through an HTML serializer. `getattr` guards a build lacking `is_html`
+    (added after the `nh3>=0.2.18` floor pinned in pyproject.toml) so that
+    environment falls back to the prior always-clean behaviour rather than
+    skipping sanitization outright.
     """
+    is_html = getattr(nh3, "is_html", None)
+    if is_html is not None and not is_html(body):
+        return body.strip()
     return nh3.clean(
         body,
         tags=_SANITIZE_ALLOWED_TAGS,

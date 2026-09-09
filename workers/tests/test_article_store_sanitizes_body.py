@@ -56,6 +56,69 @@ def test_insert_stored_article_strips_script_tag_from_body(
     assert "world" in body
 
 
+def test_insert_stored_article_strips_onerror_attribute_from_body(
+    fake_cassandra_session: MagicMock,
+) -> None:
+    """A disallowed event-handler attribute is still stripped.
+
+    The nh3.is_html() fast-path added to skip corrupting plain prose (see
+    _sanitize_body) must not skip sanitizing real embedded HTML: is_html()
+    detects tag syntax with the same tokenizer nh3.clean() itself uses, so
+    this body (containing a real `<img ...>` tag) is not eligible for the
+    skip and is still fully cleaned.
+    """
+    insert_stored_article(
+        service_id="svc",
+        title="T",
+        summary="S",
+        body='Hello <img src=x onerror="alert(1)"> world',
+        trigger_txid="tx",
+        trigger_round=1,
+        source_url="https://example.com",
+        publish_to_feed=False,
+    )
+
+    body = _article_insert_params(fake_cassandra_session)[_INSERT_BODY_INDEX]
+    assert "onerror" not in body
+    assert "alert(1)" not in body
+    assert "Hello" in body
+    assert "world" in body
+
+
+def test_insert_stored_article_preserves_bare_markdown_prose_characters(
+    fake_cassandra_session: MagicMock,
+) -> None:
+    """Regression: a body with no real HTML tags must survive verbatim.
+
+    Plain Markdown prose containing bare `>`/`&`/`<` (e.g. a quoted on-chain
+    transaction note or a URL query string) must not get entity-encoded into
+    `&gt;`/`&amp;`/`&lt;` by nh3.clean() treating the Markdown source as HTML
+    to be re-serialized. Confirmed root cause: nh3.clean() on
+    "r=1748>1643,1666>1727" (no `<tag>` anywhere) returns
+    "r=1748&gt;1643,1666&gt;1727".
+    """
+    body = (
+        "The transaction note read `r=1748>1643,1666>1727` and the source "
+        "link was https://example.com/x?a=1&b=2. Compare: 3 < 5 and 5 > 3."
+    )
+    insert_stored_article(
+        service_id="svc",
+        title="T",
+        summary="S",
+        body=body,
+        trigger_txid="tx",
+        trigger_round=1,
+        source_url="https://example.com",
+        publish_to_feed=False,
+    )
+
+    stored = _article_insert_params(fake_cassandra_session)[_INSERT_BODY_INDEX]
+    assert stored == body
+    assert "&gt;" not in stored
+    assert "&lt;" not in stored
+    assert "&amp;" not in stored
+
+
 def _draft_row(aid: object) -> MagicMock:
     row = MagicMock()
     row.article_id = aid
