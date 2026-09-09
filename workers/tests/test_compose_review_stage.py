@@ -41,6 +41,19 @@ class TestRevisionLengthRule:
         assert "Trim padding/filler" in rule
         assert "NO length limit" not in rule
 
+    def test_needs_factual_fix_is_narrow_and_distinct_from_needs_depth(self) -> None:
+        """Root-caused 2026-09-09 (design review before shipping): a WRONG factcheck verdict on an otherwise-clean draft must get a NARROW, surgical instruction, not needs_depth's broad "improve narrative synthesis/technical depth/critical distance" rewrite -- a one-sentence factual error must not license a whole-piece restructure it never asked for."""
+        rule = _revision_length_rule(too_long=False, needs_depth=False, needs_factual_fix=True)
+        assert "Correct or hedge EXACTLY" in rule
+        assert "Change NOTHING else" in rule
+        assert "Improve narrative synthesis" not in rule
+
+    def test_needs_depth_wins_over_needs_factual_fix_when_both_true(self) -> None:
+        """When the style rubric ALSO flagged this pass, the broad instruction already covers fixing everything flagged (factual concerns included) -- needs_depth takes precedence over needs_factual_fix, never the other way around."""
+        rule = _revision_length_rule(too_long=False, needs_depth=True, needs_factual_fix=True)
+        assert "Improve narrative synthesis" in rule
+        assert "Correct or hedge EXACTLY" not in rule
+
 
 class _FakeMistral:
     def __init__(self, revised: dict) -> None:
@@ -476,6 +489,106 @@ def test_low_quality_llm_triggers_revision(monkeypatch: pytest.MonkeyPatch) -> N
     assert out["body"] == "deeper revised body with more detail"
     reviews = [e for e in trace if e["tool"] == "review_draft"]
     assert len(reviews) == 3  # initial grade + 2 rechecks
+
+
+def test_factual_wrong_claim_forces_narrow_revision_when_style_passes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A WRONG factcheck verdict on an otherwise-clean draft (style rubric passes, nothing else flagged) must still force exactly one revision pass, and that pass's prompt must carry the narrow surgical-correction instruction, not the broad needs_depth rewrite."""
+    monkeypatch.setattr(
+        "app.modules.newspaper.article_grader.grade_article_draft",
+        lambda **_kw: {"grade": 10.0, "issues": []},
+    )
+    monkeypatch.setattr(
+        "app.modules.newspaper.article_quality_llm.grade_article_quality_llm",
+        lambda **_kw: {
+            "narrative_synthesis": 5,
+            "technical_depth": 5,
+            "critical_distance": 5,
+            "repetition": 5,
+            "issues": [],
+        },
+    )
+    factcheck_results = iter(
+        [
+            {
+                "claims": [
+                    {
+                        "claim": "Only the creator can update or delete an application.",
+                        "verdict": "wrong",
+                        "why": "any account can submit that call",
+                    }
+                ]
+            },
+            {"claims": [{"claim": "Only the creator can update...", "verdict": "correct"}]},
+        ]
+    )
+    monkeypatch.setattr(
+        "app.modules.newspaper.article_quality_llm.check_factual_claims",
+        lambda **_kw: next(factcheck_results),
+    )
+    seq = _SequenceMistral(
+        [{"title": "T2", "body": "the corrected claim, hedged to what is actually true"}]
+    )
+
+    out = _review_and_revise(
+        seq,
+        {"title": "T", "body": "a piece with one wrong protocol claim"},
+        system="sys",
+        gen_user="u",
+        trace=[],
+    )
+
+    assert seq.calls == 1
+    assert "Correct or hedge EXACTLY" in seq.sent_users[0]
+    assert "factual concern (wrong)" in seq.sent_users[0]
+    assert "Improve narrative synthesis" not in seq.sent_users[0]
+    assert out["body"] == "the corrected claim, hedged to what is actually true"
+
+
+def test_factual_overstated_alone_does_not_trigger_revision(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An "overstated" (not "wrong") verdict, with a clean style rubric and nothing else flagged, must not by itself force a revision pass -- it's still persisted on the review record for a human reviewer, but a hedge-worthy claim is not automatically rewritten."""
+    monkeypatch.setattr(
+        "app.modules.newspaper.article_grader.grade_article_draft",
+        lambda **_kw: {"grade": 10.0, "issues": []},
+    )
+    monkeypatch.setattr(
+        "app.modules.newspaper.article_quality_llm.grade_article_quality_llm",
+        lambda **_kw: {
+            "narrative_synthesis": 5,
+            "technical_depth": 5,
+            "critical_distance": 5,
+            "repetition": 5,
+            "issues": [],
+        },
+    )
+    monkeypatch.setattr(
+        "app.modules.newspaper.article_quality_llm.check_factual_claims",
+        lambda **_kw: {
+            "claims": [{"claim": "Algorand is very fast.", "verdict": "overstated", "why": "vague"}]
+        },
+    )
+    fake = _FakeMistral({"title": "T2", "body": "should never be called"})
+    trace: list[dict] = []
+
+    out = _review_and_revise(
+        fake,
+        {"title": "T", "body": "a piece with one overstated but not wrong claim"},
+        system="sys",
+        gen_user="u",
+        trace=trace,
+    )
+
+    assert fake.calls == 0  # no revision fired
+    assert out["body"] == "a piece with one overstated but not wrong claim"
+    reviews = [e for e in trace if e["tool"] == "review_draft"]
+    assert len(reviews) == 1
+    assert any(
+        "factual concern (overstated)" in c
+        for c in reviews[0]["result"].get("factual_concerns", [])
+    )
 
 
 def test_revision_stops_once_max_passes_reached(monkeypatch: pytest.MonkeyPatch) -> None:

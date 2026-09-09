@@ -226,6 +226,7 @@ def test_review_and_revise_merges_final_cumulative_rubric_usage_once(
                 "repetition": 5,
                 "issues": [],
             },
+            "factcheck": {"model": "disabled", "claims": None},
         }
 
     monkeypatch.setattr(mc, "_grade_current_draft", _fake_grade_current_draft)
@@ -328,6 +329,7 @@ def test_run_two_stage_compose_folds_digest_and_rubric_usage_into_extra_usage(
                 "repetition": 5,
                 "issues": [],
             },
+            "factcheck": {"model": "disabled", "claims": None},
         }
 
     monkeypatch.setattr(mc, "_grade_current_draft", _fake_grade_current_draft)
@@ -432,6 +434,7 @@ def test_compose_final_aggregate_includes_rubric_and_digest_usage(
                 "repetition": 5,
                 "issues": [],
             },
+            "factcheck": {"model": "disabled", "claims": None},
         }
 
     monkeypatch.setattr(mc, "_grade_current_draft", _fake_grade_current_draft)

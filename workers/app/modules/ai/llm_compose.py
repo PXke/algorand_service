@@ -423,10 +423,15 @@ def _writing_guidelines(today: str) -> str:
         "quoted a settlement transaction's real note fields (result, termination "
         "reason, both addresses, the move list) and then added a plausible "
         "'each player's rating before and after' clause with specific invented "
-        "numbers — the project's FAQ claims ratings are recorded there, but the "
-        "actual note format carries no such field, and the invented numbers "
-        "appeared nowhere in any tool result; a correct draft would have "
-        "reported that exact mismatch instead.\n"
+        "numbers — the project's FAQ claims ratings are recorded there, but THAT "
+        "SPECIFIC transaction's note carried no such field, and the invented "
+        "numbers appeared nowhere in any tool result; a correct draft would have "
+        "reported that exact mismatch instead. (The project later shipped a "
+        "newer note format that genuinely does carry a rating pair — the "
+        "lesson generalizes to describing exactly what the SPECIFIC record you "
+        "fetched contains, whichever way that cuts, never assuming a field is "
+        "present OR absent from what a claim or an earlier format led you to "
+        "expect.)\n"
         "- STRICT QUOTE GROUNDING: Never include a quotation unless that exact "
         "word-for-word text is visible in a tool result.\n"
         "- PAGE COPY IS NOT GROUND TRUTH FOR STAKES: a dapp's own rendered text/UI "
@@ -1986,9 +1991,12 @@ def _grade_current_draft(
     is_special_edition: bool = False,
     debug: dict | None = None,
 ) -> dict:
-    """Run the deterministic heuristic grader and the LLM quality rubric, merging the rubric result into the returned review dict under "quality". Either grader's failure degrades to an error marker rather than raising. The rubric's LLM call gets its wall-clock window recorded via _note_llm_call (the deterministic grader is not an LLM call and is not timed)."""
+    """Run the deterministic heuristic grader, the LLM quality rubric, and the LLM factcheck audit, merging the rubric result into the returned review dict under "quality" and the factcheck result under "factcheck". Each grader's failure degrades to an error marker rather than raising. Each LLM call gets its own wall-clock window recorded via _note_llm_call (the deterministic grader is not an LLM call and is not timed)."""
     from app.modules.newspaper.article_grader import fuse_quality_into_grade, grade_article_draft
-    from app.modules.newspaper.article_quality_llm import grade_article_quality_llm
+    from app.modules.newspaper.article_quality_llm import (
+        check_factual_claims,
+        grade_article_quality_llm,
+    )
 
     try:
         review = grade_article_draft(
@@ -2003,7 +2011,15 @@ def _grade_current_draft(
         quality = {"model": "llm_rubric_error", "error": str(exc)[:200], "issues": []}
     finally:
         _note_llm_call(debug, "quality_rubric", rubric_started_at_ms, _now_ms())
+    factcheck_started_at_ms = _now_ms()
+    try:
+        factcheck = check_factual_claims(title=title, body=body, client=quality_llm)
+    except Exception as exc:
+        factcheck = {"model": "llm_factcheck_error", "error": str(exc)[:200], "claims": None}
+    finally:
+        _note_llm_call(debug, "factcheck", factcheck_started_at_ms, _now_ms())
     review["quality"] = quality
+    review["factcheck"] = factcheck
     return fuse_quality_into_grade(review, quality)
 
 
@@ -2167,8 +2183,11 @@ def _collect_fixable_issues(
     research_user: str | None,
     link_check_cache: dict,
     chain_check_cache: dict,
+    factcheck: dict | None = None,
 ) -> list[str]:
-    """Gather every revision-worthy issue across the schema check, quality rubric, and the four deterministic gates, stashing each gate's own findings onto `review` for the trace/telemetry record."""
+    """Gather every revision-worthy issue across the schema check, quality rubric, the factcheck audit, and the four deterministic gates, stashing each gate's own findings onto `review` for the trace/telemetry record."""
+    from app.modules.newspaper.article_quality_llm import factcheck_forcing_issues, factcheck_issues
+
     issues = list(review.get("issues") or [])
     # "headline" issues are the structural enforcement of the house headline
     # style: the prompt states the rules, but only this deterministic check +
@@ -2177,6 +2196,20 @@ def _collect_fixable_issues(
         i for i in issues if i.startswith(("too long", "structure", "schema", "headline"))
     ]
     quality_fixable: list[str] = list(quality.get("issues") or []) if needs_revision else []
+
+    # factcheck (2026-09-09): every overstated/wrong protocol-mechanics claim
+    # is persisted for a human reviewer regardless of severity, but only a
+    # WRONG verdict is placed FIRST in the fixable list -- ahead of every
+    # other category -- so it survives _build_revision_prompt's fixable[:10]
+    # truncation and the reviser sees it before anything else. "overstated"
+    # claims never force a revision pass on their own (factcheck_forcing_issues
+    # excludes them); see factcheck_needs_revision's own docstring.
+    factual_fixable: list[str] = []
+    if factcheck:
+        all_concerns = factcheck_issues(factcheck)
+        if all_concerns:
+            review["factual_concerns"] = all_concerns
+        factual_fixable = factcheck_forcing_issues(factcheck)
 
     link_fixable = _link_gate_issues(body, trace, link_check_cache)
     if link_fixable:
@@ -2198,7 +2231,8 @@ def _collect_fixable_issues(
         review["stale_deadlines"] = stale_deadline_fixable
 
     return (
-        schema_fixable
+        factual_fixable
+        + schema_fixable
         + quality_fixable
         + link_fixable
         + chain_fixable
@@ -2235,8 +2269,23 @@ _REVISION_NO_SHRINK_RULE = (
 )
 
 
-def _revision_length_rule(*, too_long: bool, needs_depth: bool) -> str:
-    """The scope instruction for a revision prompt: what to fix, and (for everything except too_long) an explicit "don't shrink it" rule instead of a numeric word-count target."""
+def _revision_length_rule(
+    *, too_long: bool, needs_depth: bool, needs_factual_fix: bool = False
+) -> str:
+    """The scope instruction for a revision prompt: what to fix, and (for everything except too_long) an explicit "don't shrink it" rule instead of a numeric word-count target.
+
+    ``needs_factual_fix`` (2026-09-09): a factcheck-flagged WRONG claim gets a
+    NARROW, surgical instruction distinct from ``needs_depth``'s broad
+    "improve narrative synthesis/technical depth/critical distance" rewrite
+    -- a factual-only trigger on an otherwise-5/5 draft must not license a
+    whole-piece restructure it never asked for (root-caused via review before
+    shipping: a factual-only trigger folded into the broad needs_depth branch
+    would send a correctly-scored draft into an unnecessarily wide rewrite,
+    exactly the kind of regression risk the best-of-N scoring exists to
+    catch, but is cheaper to avoid in the first place). Only reached when
+    needs_depth is False -- a style-triggered revision already licenses
+    fixing everything flagged, factual concerns included.
+    """
     if too_long:
         return "Trim padding/filler to bring it under the limit, but keep every real fact."
     if needs_depth:
@@ -2261,6 +2310,18 @@ def _revision_length_rule(*, too_long: bool, needs_depth: bool) -> str:
             "because a point recurs. Do NOT invent quotes, partnerships, or "
             "numbers. " + _REVISION_NO_SHRINK_RULE
         )
+    if needs_factual_fix:
+        return (
+            "Correct or hedge EXACTLY the specific claim(s) named in the factual "
+            "concern(s) above — verify what your own knowledge (or a fresh tool "
+            "lookup, if one could settle it) actually supports, then either fix "
+            "the claim to state it correctly or soften it to what's actually "
+            "verifiable (e.g. 'whether X depends on Y' instead of asserting X as "
+            "settled). Change NOTHING else in the piece — this is a narrow, "
+            "surgical correction, not a pass to improve narrative synthesis, "
+            "technical depth, or add new material. Do NOT invent quotes, "
+            "partnerships, or numbers. " + _REVISION_NO_SHRINK_RULE
+        )
     return (
         "PRESERVE every fact — only REORGANIZE the existing prose into section "
         "headings and short paragraphs; move comparative data into a Markdown "
@@ -2276,6 +2337,7 @@ def _build_revision_prompt(
     *,
     too_long: bool,
     needs_depth: bool,
+    needs_factual_fix: bool = False,
 ) -> str:
     issues_block = "\n".join(f"- {i}" for i in fixable[:10])
     carried_block = ""
@@ -2285,7 +2347,9 @@ def _build_revision_prompt(
             "do NOT reintroduce them while addressing the list above:\n"
             + "\n".join(f"- {i}" for i in already_fixed[:10])
         )
-    length_rule = _revision_length_rule(too_long=too_long, needs_depth=needs_depth)
+    length_rule = _revision_length_rule(
+        too_long=too_long, needs_depth=needs_depth, needs_factual_fix=needs_factual_fix
+    )
     return (
         gen_user + f"\n\nA reviewer flagged these problems:\n{issues_block}\n\n"
         f"{length_rule} You have tool access again for this revision, specifically "
@@ -2554,7 +2618,10 @@ def _run_grade_revise_loop(
     flag is bad" complaint this addresses.
     """
     from app.core.config import LLM_TEMP_WRITE, WRITER_QUALITY_LLM_MIN_SCORE
-    from app.modules.newspaper.article_quality_llm import quality_needs_revision
+    from app.modules.newspaper.article_quality_llm import (
+        factcheck_needs_revision,
+        quality_needs_revision,
+    )
 
     def _note_revision_failure(reason: str, raw: str = "") -> None:
         # Surface WHY the revision didn't happen instead of silently keeping the
@@ -2614,6 +2681,7 @@ def _run_grade_revise_loop(
             title, summary, body, quality_llm, is_special_edition=is_special_edition, debug=debug
         )
         quality = review["quality"]
+        factcheck = review["factcheck"]
         _record_grade(
             trace, debug, current, review, title=title, body=body, revise_count=revise_count
         )
@@ -2630,6 +2698,7 @@ def _run_grade_revise_loop(
             research_user=research_user,
             link_check_cache=link_check_cache,
             chain_check_cache=chain_check_cache,
+            factcheck=factcheck,
         )
 
         score = _draft_score(review, needs_revision=needs_revision)
@@ -2667,12 +2736,19 @@ def _run_grade_revise_loop(
         ever_raised.update(fixable)
         too_long = any(i.startswith("too long") for i in fixable)
         needs_depth = needs_revision
+        # A WRONG factcheck verdict gets the narrow surgical-correction
+        # instruction ONLY when it's the sole trigger -- if the style rubric
+        # ALSO flagged this pass (needs_depth True), that broader instruction
+        # already covers fixing everything flagged, factual concerns included
+        # (see _revision_length_rule's own docstring).
+        needs_factual_fix = factcheck_needs_revision(factcheck) and not needs_depth
         revise_user = _build_revision_prompt(
             gen_user,
             fixable,
             already_fixed,
             too_long=too_long,
             needs_depth=needs_depth,
+            needs_factual_fix=needs_factual_fix,
         )
         gen_system = system + _STAGE2_GENERATION_GUIDANCE
 

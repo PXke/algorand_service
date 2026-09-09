@@ -223,3 +223,164 @@ def quality_needs_revision(quality: dict[str, Any], *, min_score: int) -> bool:
         if score is not None and int(score) < min_score:
             return True
     return False
+
+
+# Root-caused 2026-09-09 (AlgoChess, post-self-grounding-fix): a recomposed
+# article stated "under Algorand's rules only the address that created an
+# application can submit a transaction that updates or deletes it" as flat
+# fact -- false (any account can submit that call; success depends entirely
+# on the application's own approval-program logic). No deterministic gate
+# catches this class: it isn't a claim attributed to a specific fetched
+# record (the record-attribution gate in unsourced_specifics_gate.py is
+# blind to it by construction), it's the model asserting something wrong
+# from its OWN general knowledge. When the operator asked the same model
+# family that exact question directly and open-endedly, it answered
+# correctly -- the knowledge exists, nothing in the pipeline ever asked for
+# it. This is a SEPARATE call (not a 5th dimension bolted onto
+# _QUALITY_RUBRIC above) for failure isolation, its own token budget (a
+# claim list with per-claim reasoning needs more room than the 4-dimension
+# rubric's shared cap), and because "strict editor grading prose" is the
+# wrong persona for a correctness audit.
+#
+# Deliberately a claim-EXTRACTION prompt, not an open "does anything look
+# wrong" question: a vague open question reproduces the same skim behavior
+# that missed the error in the first place (the model only caught it when
+# forced to attend to that EXACT claim). Extraction forces the same
+# attention the operator's direct question got. Deliberately NOT a 1-5
+# score either -- forcing a score on "is this correct" invites the same
+# lazy default-high grading that let a separate deterministic gate score
+# 0.98 "factuality" on the article that actually contained the original
+# fabrication; a free per-claim verdict is more likely to produce a real
+# answer.
+#
+# Deliberately scoped to PROTOCOL/MECHANICS claims only (how Algorand/AVM/
+# ASA/app-call/consensus mechanics work as a general system), explicitly
+# excluding project-specific facts the piece attributes to a source ("the
+# FAQ says...", a fetched on-chain record) -- the grader has no access to
+# sources, so treating every sourced claim as "unverifiable" would just
+# have it relitigate the deterministic gates' job and flag true, correctly
+# sourced claims as suspicious.
+_FACTCHECK_PROMPT = (
+    "You are auditing an Algorand-focused news draft for factual correctness in "
+    "its PROTOCOL/TECHNICAL-MECHANICS claims — a separate task from grading its "
+    "prose quality.\n\n"
+    "List every claim in the piece about how the Algorand PROTOCOL, the AVM, "
+    "smart contracts/applications, ASAs, or consensus actually work AS A GENERAL "
+    "MECHANISM. Do NOT include: project-specific facts the piece attributes to a "
+    "source ('the FAQ says...', 'the page states...', a quoted on-chain record) "
+    "— those are sourcing questions for a different check, not general-knowledge "
+    "questions; or anything the piece already hedges as unverified/undisclosed.\n\n"
+    "For each protocol/mechanics claim you find, verify it against your own "
+    "knowledge and give it a verdict:\n"
+    '- "correct": accurate as stated.\n'
+    '- "overstated": broadly right but asserts more certainty or scope than is '
+    "actually true.\n"
+    '- "wrong": factually incorrect.\n\n'
+    "Also include any internal contradiction — two passages in the SAME piece "
+    "stating incompatible facts about the same thing — as its own claim entry.\n\n"
+    "Output a single JSON object with exactly this shape:\n"
+    '{"claims": [{"claim": "the exact sentence or clause, verbatim", "verdict": '
+    '"correct", "why": "one line, only for overstated/wrong entries"}]}\n'
+    "List every protocol/mechanics claim you evaluated, INCLUDING ones scored "
+    '"correct" — an empty claims list on a piece that discusses smart-contract '
+    "or protocol mechanics is itself a sign nothing was actually checked, not "
+    "evidence everything is fine; if the piece truly makes no such claims, "
+    'return {"claims": []} and nothing else.\n'
+    "JSON SAFETY: Return JSON only — no markdown fences or prose. In claim/why "
+    "strings use single quotes for any quoted text, or avoid double quotes "
+    "entirely; never emit unescaped double quotes inside JSON string values."
+)
+
+_FALLBACK_FACTCHECK: dict[str, Any] = {
+    "model": "llm_factcheck_error",
+    "claims": None,
+}
+
+
+def check_factual_claims(
+    *, title: str, body: str, client: MistralProvider | None = None
+) -> dict[str, Any]:
+    """Audit the piece's protocol/technical-mechanics claims against the model's own knowledge — catches a confidently-wrong general-knowledge assertion that no source-grounding gate can see (see the module-level 2026-09-09 note above _FACTCHECK_PROMPT). ``claims: None`` (as opposed to ``[]``) marks "the model never actually returned a claims list" (a disabled/skipped/errored/missing-key run) so a caller never mistakes silence for a clean bill of health — the same missing-key-is-not-empty stance quality_needs_revision's callers already take (2026-07-16 partial-scores incident, CLAUDE.md invariant 8)."""
+    from app.core.config import WRITER_QUALITY_LLM_ENABLED
+    from app.modules.ai.llm_purpose_router import get_llm_digest_client
+
+    if not WRITER_QUALITY_LLM_ENABLED:
+        return {"model": "disabled", "claims": None}
+    text_body = (body or "").strip()
+    if not text_body:
+        return {"model": "skipped", "claims": None}
+    llm: MistralProvider = client or get_llm_digest_client()
+    try:
+        from app.core.config import LLM_TEMP_RESEARCH
+
+        messages = [
+            {"role": "system", "content": _FACTCHECK_PROMPT},
+            {
+                "role": "user",
+                "content": (f"Title: {title}\n\nBody:\n{text_body}\n\nReturn JSON only."),
+            },
+        ]
+        parsed = llm.chat_json_object(messages, temperature=LLM_TEMP_RESEARCH, max_tokens=2000)
+        if not isinstance(parsed, dict):
+            raise ValueError("non-object LLM factcheck response")
+        claims = parsed.get("claims")
+        if not isinstance(claims, list):
+            # A response with no parseable claims list is a missing-key case,
+            # not "nothing wrong" -- retry once, same stance as _graded_scores.
+            retry = llm.chat_json_object(messages, temperature=LLM_TEMP_RESEARCH, max_tokens=2000)
+            claims = retry.get("claims") if isinstance(retry, dict) else None
+            if not isinstance(claims, list):
+                fallback = dict(_FALLBACK_FACTCHECK)
+                fallback["error"] = "no claims list after retry"
+                return fallback
+        clean_claims = [c for c in claims if isinstance(c, dict) and c.get("claim")]
+        return {"model": "llm_factcheck", "claims": clean_claims}
+    except Exception as exc:
+        logger.warning("LLM factcheck failed: %s", exc, exc_info=True)
+        fallback = dict(_FALLBACK_FACTCHECK)
+        fallback["error"] = str(exc)[:200]
+        return fallback
+
+
+def factcheck_concerns(factcheck: dict[str, Any]) -> list[dict[str, str]]:
+    """Claims scored overstated/wrong — the actionable subset of check_factual_claims' output."""
+    claims = factcheck.get("claims")
+    if not isinstance(claims, list):
+        return []
+    return [
+        c for c in claims if isinstance(c, dict) and c.get("verdict") in ("wrong", "overstated")
+    ]
+
+
+def factcheck_needs_revision(factcheck: dict[str, Any]) -> bool:
+    """True only when a claim is scored WRONG — "overstated" is surfaced as feedback but does not force a revision pass on its own (a hedge is a smaller ask than a rewrite; only a flat error forces one)."""
+    claims = factcheck.get("claims")
+    if not isinstance(claims, list):
+        return False
+    return any(isinstance(c, dict) and c.get("verdict") == "wrong" for c in claims)
+
+
+def _format_concern(c: dict[str, Any]) -> str:
+    claim = str(c.get("claim", "")).strip()
+    verdict = c.get("verdict")
+    why = str(c.get("why", "")).strip()
+    label = "factual concern (wrong)" if verdict == "wrong" else "factual concern (overstated)"
+    text = f'{label}: "{claim}"'
+    if why:
+        text += f" — {why}"
+    return text
+
+
+def factcheck_issues(factcheck: dict[str, Any]) -> list[str]:
+    """Every overstated/wrong claim as a human-readable string, for the persisted review record (review["factual_concerns"]) a human sees in the review queue regardless of whether it forced a revision — see factcheck_forcing_issues for the narrower, revision-triggering subset."""
+    return [_format_concern(c) for c in factcheck_concerns(factcheck)]
+
+
+def factcheck_forcing_issues(factcheck: dict[str, Any]) -> list[str]:
+    """Only WRONG-verdict claims, formatted — the subset that actually forces a revision pass. "overstated" is real feedback (factcheck_issues carries it into the persisted record) but is a smaller ask than a rewrite, so it does not by itself put the draft back into the revision loop."""
+    claims = factcheck.get("claims")
+    if not isinstance(claims, list):
+        return []
+    return [
+        _format_concern(c) for c in claims if isinstance(c, dict) and c.get("verdict") == "wrong"
+    ]
