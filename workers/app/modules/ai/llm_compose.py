@@ -36,7 +36,7 @@ logger = logging.getLogger(__name__)
 # guidelines, _ARTICLE_FORMAT_RULES, recency/profile rules, etc). Stamped onto
 # every stored article so analytics can correlate a prompt edit with a shift in
 # grades/engagement instead of guessing from deploy timestamps.
-PROMPT_VERSION = "2026-09-08"
+PROMPT_VERSION = "2026-09-09"
 
 # Same four counters compose_sessions' INSERT columns carry (prompt_tokens/
 # completion_tokens/total_tokens/cached_tokens) -- the single vocabulary every
@@ -1141,7 +1141,18 @@ _NARRATIVE_GUIDANCE = (
     "refund — never build a lede on a label you inferred from the amount "
     "(flagged 2026-09-08: a draft opened on a real payout as 'the winner gets "
     "paid' when the amount was more consistent with a stake refund, and "
-    "nothing in the Digest said which)."
+    "nothing in the Digest said which).\n"
+    "ON-CHAIN RECORDS ARE EXHAUSTIVE: the Research Digest's '### ON-CHAIN RECORDS "
+    "VERIFIED' section is the complete record of every transaction note, ARC-69 "
+    "metadata field, or application-state value actually looked up this pass — if "
+    "a specific field (a note's contents, a metadata attribute, a stored rating) "
+    "is not shown there, it was never fetched and does not exist for this "
+    "article. Never describe what a transaction note or metadata field 'shows' "
+    "or 'carries' beyond exactly what that section states, and never fill in a "
+    "plausible-sounding value for a field the section doesn't mention "
+    "(root-caused 2026-09-09: a settlement transaction's note field was written "
+    "up as carrying two players' before/after ratings that no lookup in that "
+    "pass ever actually found)."
 )
 
 
@@ -1488,23 +1499,172 @@ def _extract_identity_facts(trace: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def _format_full_research_trace(trace: list[dict]) -> str:
-    """Every tool call in the trace, only lightly truncated — the RESEARCH_DIGEST_MODE=raw alternative to an LLM-synthesized digest. Caps exist only to keep one pathological result (a huge page dump) from blowing the prompt, not to compress normal-sized results the way _format_research_digest's tighter caps (25 calls, 1500 chars/result — tuned for feeding INTO a synthesis prompt, not for being Stage 2's ground truth directly) do."""
-    import json as _json
+# Tools whose result reads on-chain (or testnet) data directly -- the
+# highest fabrication-risk category (see unsourced_specifics_gate.py's own,
+# narrower _RECORD_TOOLS for the companion POST-HOC claim check -- that set
+# is scoped to which tools count as verifying a record-attributed claim
+# specifically; this one is broader, every chain_tools.py handler, purely
+# for grouping the WRITER'S digest so this category gets the best
+# "attention real estate": placed first, kept closest to full length, and
+# never silently absent).
+_CHAIN_RECORD_TOOLS = frozenset(
+    {
+        "lookup_account",
+        "lookup_asset",
+        "lookup_application",
+        "lookup_application_account",
+        "lookup_asset_by_name",
+        "lookup_first_funding",
+        "lookup_account_transactions",
+        "lookup_transaction_note",
+        "lookup_arc69_metadata",
+        "lookup_asset_transactions",
+        "get_asset_transaction_volume",
+        "nft_collection_distribution_timeline",
+        "get_asset_holder_share",
+        "lookup_asset_holders",
+        "trace_asset_creator",
+        "get_consensus_stats",
+        "testnet_lookup",
+        "application_boxes",
+        "round_to_date",
+    }
+)
+# Tools whose result is fetched/scraped web-page content -- the least
+# information-dense category (mostly boilerplate/navigation/markup around a
+# few real sentences), so it gets the smallest per-result char budget below.
+_WEB_SOURCE_TOOLS = frozenset(
+    {
+        "fetch_url",
+        "search_crawled_pages",
+        "search_web",
+        "click_element",
+        "type_into_page",
+        "capture_screenshot",
+        "play_interactive",
+        "extract_pdf_from_page",
+        "fetch_google_doc",
+        "discourse_forum",
+        "grep_frontend_bundle",
+        "inspect_network_hosts",
+        "medium_api_article_list",
+    }
+)
 
-    lines: list[str] = []
+# Per-result character budgets by category -- NOT one flat cap for every
+# tool. A record lookup is a few hundred chars and information-dense; a
+# scraped page is mostly chrome. Args stay small everywhere -- they're the
+# model's own request, never evidence.
+_ARGS_MAX_CHARS = 500
+_RECORD_RESULT_MAX_CHARS = 6000
+_WEB_RESULT_MAX_CHARS = 2000
+_OTHER_RESULT_MAX_CHARS = 4000
+
+
+def _dedup_and_filter_trace(trace: list[dict]) -> list[dict]:
+    """Drop trace entries carrying zero information for a reader, and collapse exact reruns to their first occurrence. Presentation-only: never touches the raw trace list itself -- the deterministic gates' own grounding corpus still reads the ORIGINAL, unfiltered trace (see fact_align.grounding_entries), this is only what the WRITER'S digest shows.
+
+    Drops only entries whose result is an explicit ``{"error": ...}`` (the
+    established convention -- see CLAUDE.md invariant 2.8). A genuine
+    zero/empty finding (e.g. "0K+ Credentials issued") is NOT an error and
+    is kept: that is real negative evidence a writer needs to debunk a
+    fabricated positive claim (the GoPlausible incident), not noise.
+    """
+    seen: set[tuple[str, str]] = set()
+    out: list[dict] = []
     for entry in trace:
         tool = str(entry.get("tool", ""))
         if not tool:
             continue
+        result = entry.get("result")
+        if isinstance(result, dict) and "error" in result:
+            continue
         try:
-            args_s = _json.dumps(entry.get("arguments", {}), separators=(",", ":"))[:500]
-            result_s = _json.dumps(entry.get("result", {}), separators=(",", ":"))[:8000]
-        except Exception:
-            args_s = str(entry.get("arguments", ""))[:500]
-            result_s = str(entry.get("result", ""))[:8000]
-        lines.append(f"- {tool}({args_s}) -> {result_s}")
-    return "\n".join(lines)
+            args_key = json.dumps(entry.get("arguments", {}), sort_keys=True, default=str)
+        except (TypeError, ValueError):
+            args_key = str(entry.get("arguments", ""))
+        key = (tool, args_key)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(entry)
+    return out
+
+
+def _format_trace_entry(entry: dict, *, result_max_chars: int) -> str:
+    tool = str(entry.get("tool", ""))
+    try:
+        args_s = json.dumps(entry.get("arguments", {}), separators=(",", ":"))[:_ARGS_MAX_CHARS]
+        result_s = json.dumps(entry.get("result", {}), separators=(",", ":"))[:result_max_chars]
+    except (TypeError, ValueError):
+        args_s = str(entry.get("arguments", ""))[:_ARGS_MAX_CHARS]
+        result_s = str(entry.get("result", ""))[:result_max_chars]
+    return f"- {tool}({args_s}) -> {result_s}"
+
+
+def _trace_section(title: str, lines: list[str], empty_note: str) -> str:
+    body = "\n".join(lines) if lines else f"({empty_note})"
+    return f"### {title}\n{body}"
+
+
+def _format_full_research_trace(trace: list[dict]) -> str:
+    """Categorized, deduped, error-filtered trace text — the RESEARCH_DIGEST_MODE=raw alternative to an LLM-synthesized digest (see _synthesize_research_digest).
+
+    Root-caused 2026-09-09 (AlgoChess incident, digest-attention followup):
+    the prior version was one flat chronological list of every entry
+    (including {"error": ...} noise and exact-duplicate reruns), one
+    8000-char cap for every tool regardless of value. A fabricated
+    on-chain-note claim slipped through partly because the one real record
+    lookup that mattered sat at line 143 of 188 undifferentiated lines —
+    exactly the "lost in the middle" shape attention research describes for
+    long, undifferentiated contexts.
+
+    Now: entries are deduped/error-filtered first (_dedup_and_filter_trace),
+    then grouped into three sections ordered by fabrication risk — ON-CHAIN
+    RECORDS (chain_tools.py lookups) first and least-truncated, WEB SOURCES
+    (scraped/fetched pages) most-truncated (least information-dense), OTHER
+    FINDINGS (search/market/social/misc) in between. Every section always
+    renders, even empty — an explicit "no on-chain records were looked up
+    this pass" is itself useful negative evidence right before a writer
+    about to claim something about a transaction or metadata field. Returns
+    "" only when there is nothing usable at all (empty trace, or every
+    entry filtered as an error) — same short-circuit the caller already
+    relies on.
+    """
+    entries = _dedup_and_filter_trace(trace)
+    if not entries:
+        return ""
+    chain: list[str] = []
+    web: list[str] = []
+    other: list[str] = []
+    for entry in entries:
+        tool = str(entry.get("tool", ""))
+        if tool in _CHAIN_RECORD_TOOLS:
+            chain.append(_format_trace_entry(entry, result_max_chars=_RECORD_RESULT_MAX_CHARS))
+        elif tool in _WEB_SOURCE_TOOLS:
+            web.append(_format_trace_entry(entry, result_max_chars=_WEB_RESULT_MAX_CHARS))
+        else:
+            other.append(_format_trace_entry(entry, result_max_chars=_OTHER_RESULT_MAX_CHARS))
+
+    return "\n\n".join(
+        [
+            _trace_section(
+                "ON-CHAIN RECORDS VERIFIED",
+                chain,
+                "no on-chain record lookups were made this research pass -- do not "
+                "describe what a transaction note, metadata field, or application "
+                "state contains",
+            ),
+            _trace_section(
+                "WEB SOURCES EXPLORED", web, "no web pages were fetched this research pass"
+            ),
+            _trace_section(
+                "OTHER RESEARCH FINDINGS",
+                other,
+                "no other tool calls were made this research pass",
+            ),
+        ]
+    )
 
 
 _GAP_EXTRACTION_PROMPT = (

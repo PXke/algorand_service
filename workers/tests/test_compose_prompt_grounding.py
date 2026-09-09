@@ -713,3 +713,10 @@ def test_round_budget_guidance_reflects_a_changed_ceiling(monkeypatch: pytest.Mo
 def test_research_phase_guidance_includes_round_budget() -> None:
     """Every real two-stage research call site goes through _research_phase_guidance(trace), not the static _RESEARCH_PHASE_GUIDANCE constant -- confirm the round-budget nudge actually reaches them."""
     assert "RESEARCH BUDGET" in mc._research_phase_guidance([])
+
+
+def test_narrative_guidance_pins_on_chain_records_are_exhaustive() -> None:
+    """Root-cause regression (2026-09-09, AlgoChess incident, digest-attention followup): the bookend reminder that the Research Digest's '### ON-CHAIN RECORDS VERIFIED' section is the complete record of what was actually looked up -- placed right before 'Write it now.' (the end of Stage 2's user prompt) so it's fresh in context, not just once far above the digest."""
+    assert "ON-CHAIN RECORDS ARE EXHAUSTIVE" in mc._NARRATIVE_GUIDANCE
+    assert "### ON-CHAIN RECORDS VERIFIED" in mc._NARRATIVE_GUIDANCE
+    assert "never fetched and does not exist" in mc._NARRATIVE_GUIDANCE
