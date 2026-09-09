@@ -39,6 +39,16 @@ composed; a PLATFORM-lane pick is reverted to pending with its priority
 boosted above the current top of the pool, a documented best-effort (not
 guaranteed) fallback -- see that function's own docstring for the full
 reasoning and trade-offs.
+
+2026-09-09: the human slot is no longer left permanently empty for a day
+nobody pinned. Superseded owner decision -- the original "no platform
+backfill" choice was deliberate but, in practice, meant real daily
+throughput silently sat below NEWS_MAX_ARTICLES_PER_DAY on every unpinned
+day, which turned out to be the actual cause of more than one real
+zero-publish day. select_to_compose_for_day's own once-daily run is now
+treated as the cutoff: unpinned by the time it runs -> the freed slot goes
+to the platform pool instead. See that function's own docstring for the
+exact rule.
 """
 
 from __future__ import annotations
@@ -186,7 +196,24 @@ def _rank_platform_picks(
 
 
 def select_to_compose_for_day(day: str, *, now: datetime | None = None) -> dict[str, object]:
-    """Select `day`'s compose lineup: one human slot (only when pinned -- otherwise left EMPTY, no platform backfill, an explicit owner decision against overcomposing to compensate) plus N-1 platform slots (N = NEWS_MAX_ARTICLES_PER_DAY) filled by the top-priority PENDING artifacts, respecting the 1-pending-per-service dedup, excluding whatever the human already picked, and the new-service-vs-update pool floors (see _rank_platform_picks).
+    """Select `day`'s compose lineup: one human slot (when pinned by the time this runs) plus platform slots (see below) filled by the top-priority PENDING artifacts, respecting the 1-pending-per-service dedup, excluding whatever the human already picked, and the new-service-vs-update pool floors (see _rank_platform_picks).
+
+    2026-09-09 (superseding the original "left EMPTY, no platform backfill"
+    design, an explicit owner decision to reverse it -- see the reclaim
+    module's own commit history for the earlier reasoning this replaces):
+    the human slot is a CUTOFF, not a standing reservation. This function
+    already only runs the pin check once per day (the daily
+    `select-to-compose-for-today` beat, ~00:05 UTC by default -- see
+    `TO_COMPOSE_SELECT_CRON_HOUR`/`_MINUTE`) -- that single run IS the
+    cutoff. If nobody pinned an artifact for `day` by the moment this runs,
+    the freed slot goes to the platform pool instead of sitting unfilled for
+    the whole day: platform_n is N (NEWS_MAX_ARTICLES_PER_DAY) when unpinned,
+    N-1 when pinned, so the day's total slot count is always N either way.
+    Root cause this fixes: a human slot that's pinned only some days was
+    silently capping real throughput below NEWS_MAX_ARTICLES_PER_DAY on
+    every unpinned day, with no recovery for that day once the cutoff beat
+    had already run (owner-confirmed real-world cause of multiple
+    zero-publish days).
 
     Idempotency note: re-running this for a `day` that already has rows
     clears the to_compose rows first, but an artifact this function already
@@ -214,7 +241,7 @@ def select_to_compose_for_day(day: str, *, now: datetime | None = None) -> dict[
 
     human_pick = next((a for a in pending if a.human_pick_day == day), None)
 
-    platform_n = max(0, cfg.NEWS_MAX_ARTICLES_PER_DAY - 1)
+    platform_n = max(0, cfg.NEWS_MAX_ARTICLES_PER_DAY - (1 if human_pick is not None else 0))
     pool_cache: dict[str, str] = {}
     platform_picks = _rank_platform_picks(
         pending, human_pick=human_pick, platform_n=platform_n, pool_cache=pool_cache
@@ -712,7 +739,12 @@ def preview_to_compose_for_day(day: str) -> dict[str, object]:
     pending = list_pending_artifacts()
     human_pick = next((a for a in pending if a.human_pick_day == day), None)
 
-    platform_n = max(0, cfg.NEWS_MAX_ARTICLES_PER_DAY - 1)
+    # Mirrors select_to_compose_for_day's own cutoff/backfill rule (see its
+    # docstring): platform_n is N when nobody's pinned `day` yet, N-1 once
+    # someone has. For a future day this is only a snapshot -- a pin can
+    # still land before the real cutoff beat runs -- but for `day` == today,
+    # after that beat has already run, this matches the real selection.
+    platform_n = max(0, cfg.NEWS_MAX_ARTICLES_PER_DAY - (1 if human_pick is not None else 0))
     pool_cache: dict[str, str] = {}
     platform_picks = _rank_platform_picks(
         pending, human_pick=human_pick, platform_n=platform_n, pool_cache=pool_cache

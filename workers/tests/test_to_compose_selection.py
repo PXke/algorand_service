@@ -21,13 +21,19 @@ from conftest import FakeArtifactSession
 
 
 @pytest.mark.usefixtures("fake_artifact_session")
-def test_human_slot_stays_empty_when_no_pin_by_cutoff() -> None:
-    """Explicit owner decision: if nobody pinned an artifact for the day, slot 0 stays UNFILLED -- the platform must never backfill it to avoid overcomposing."""
+def test_human_slot_unpinned_by_cutoff_is_backfilled_by_platform(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """2026-09-09: the human slot is a cutoff, not a standing reservation -- if nobody pinned an artifact for the day by the time selection runs, the freed slot goes to the platform pool (an extra platform pick, not lane='human') instead of sitting empty."""
     from algorand_shared.artifact_store import insert_artifact
     from algorand_shared.to_compose_selection import (
         list_to_compose_for_day,
         select_to_compose_for_day,
     )
+
+    from app.core import config as cfg
+
+    monkeypatch.setattr(cfg, "NEWS_MAX_ARTICLES_PER_DAY", 2)  # unpinned -> 2 platform slots, not 1
 
     insert_artifact(service_id="svc-a", url=None, channel="brief", content="a")
     insert_artifact(service_id="svc-b", url=None, channel="brief", content="b")
@@ -35,8 +41,10 @@ def test_human_slot_stays_empty_when_no_pin_by_cutoff() -> None:
     result = select_to_compose_for_day("2026-08-26")
 
     assert result["human_picked"] is False
+    assert result["platform_slots_available"] == 2
+    assert result["platform_slots_filled"] == 2
     lanes = [row["lane"] for row in list_to_compose_for_day("2026-08-26")]
-    assert "human" not in lanes
+    assert lanes == ["platform", "platform"]
 
 
 @pytest.mark.usefixtures("fake_artifact_session")
@@ -98,16 +106,17 @@ def test_a_pin_for_a_different_day_is_not_used() -> None:
 
 
 @pytest.mark.usefixtures("fake_artifact_session")
-def test_platform_fills_n_minus_1_slots_by_priority(monkeypatch: pytest.MonkeyPatch) -> None:
-    """With no human pick, N-1 platform slots go to the top-priority pending artifacts."""
+def test_platform_fills_n_slots_by_priority_when_unpinned(monkeypatch: pytest.MonkeyPatch) -> None:
+    """With no human pick, ALL N platform slots (the freed human slot included, see the cutoff/backfill rule) go to the top-priority pending artifacts."""
     from algorand_shared.artifact_store import insert_artifact, update_artifact_priority
     from algorand_shared.to_compose_selection import (
         list_to_compose_for_day,
         select_to_compose_for_day,
     )
+
     from app.core import config as cfg
 
-    monkeypatch.setattr(cfg, "NEWS_MAX_ARTICLES_PER_DAY", 3)  # N=3 -> 2 platform slots
+    monkeypatch.setattr(cfg, "NEWS_MAX_ARTICLES_PER_DAY", 3)  # N=3, unpinned -> 3 platform slots
 
     ids = []
     for i, prio in enumerate([1.0, 9.0, 5.0, 7.0]):
@@ -117,29 +126,34 @@ def test_platform_fills_n_minus_1_slots_by_priority(monkeypatch: pytest.MonkeyPa
         update_artifact_priority(aid, prio)
         ids.append(aid)
     # priorities: svc-0=1.0, svc-1=9.0, svc-2=5.0, svc-3=7.0
-    # top-2 by priority: svc-1 (9.0), svc-3 (7.0)
+    # top-3 by priority: svc-1 (9.0), svc-3 (7.0), svc-2 (5.0)
 
     result = select_to_compose_for_day("2026-08-26")
 
     assert result["human_picked"] is False
-    assert result["platform_slots_available"] == 2
-    assert result["platform_slots_filled"] == 2
+    assert result["platform_slots_available"] == 3
+    assert result["platform_slots_filled"] == 3
     rows = list_to_compose_for_day("2026-08-26")
-    assert [r["lane"] for r in rows] == ["platform", "platform"]
-    assert [r["artifact_id"] for r in rows] == [ids[1], ids[3]]
+    assert [r["lane"] for r in rows] == ["platform", "platform", "platform"]
+    assert [r["artifact_id"] for r in rows] == [ids[1], ids[3], ids[2]]
 
 
 @pytest.mark.usefixtures("fake_artifact_session")
-def test_platform_fill_respects_one_pending_per_service_dedup(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_platform_fill_respects_one_pending_per_service_dedup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Two DIFFERENT artifacts can never coexist pending for the same service_id (insert_artifact's own dedup already guarantees this), so the platform fill naturally never double-picks one service -- this pins that guarantee end to end through selection."""
     from algorand_shared.artifact_store import insert_artifact, update_artifact_priority
     from algorand_shared.to_compose_selection import (
         list_to_compose_for_day,
         select_to_compose_for_day,
     )
+
     from app.core import config as cfg
 
-    monkeypatch.setattr(cfg, "NEWS_MAX_ARTICLES_PER_DAY", 4)  # N=4 -> 3 platform slots
+    monkeypatch.setattr(
+        cfg, "NEWS_MAX_ARTICLES_PER_DAY", 4
+    )  # unpinned -> 4 platform slots available
 
     # Same service_id twice: insert_artifact's dedup means only the SECOND
     # survives as pending for "svc-same".
@@ -148,7 +162,9 @@ def test_platform_fill_respects_one_pending_per_service_dedup(monkeypatch: pytes
         service_id="svc-same", url=None, channel="crawler", content="new diff"
     )
     update_artifact_priority(newest_id, 8.0)
-    other_id, _ = insert_artifact(service_id="svc-other", url=None, channel="crawler", content="other")
+    other_id, _ = insert_artifact(
+        service_id="svc-other", url=None, channel="crawler", content="other"
+    )
     update_artifact_priority(other_id, 6.0)
 
     result = select_to_compose_for_day("2026-08-26")
@@ -160,7 +176,9 @@ def test_platform_fill_respects_one_pending_per_service_dedup(monkeypatch: pytes
 
 
 @pytest.mark.usefixtures("fake_artifact_session")
-def test_platform_fill_excludes_the_human_picks_own_service(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_platform_fill_excludes_the_human_picks_own_service(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """'N-1 platform slots ... excluding whatever the human already picked' -- a second pending artifact for the SAME service_id as the human pick must not also take a platform slot."""
     from algorand_shared.artifact_store import (
         insert_artifact,
@@ -171,11 +189,14 @@ def test_platform_fill_excludes_the_human_picks_own_service(monkeypatch: pytest.
         list_to_compose_for_day,
         select_to_compose_for_day,
     )
+
     from app.core import config as cfg
 
     monkeypatch.setattr(cfg, "NEWS_MAX_ARTICLES_PER_DAY", 3)
 
-    human_id, _ = insert_artifact(service_id="svc-human", url=None, channel="brief", content="pinned")
+    human_id, _ = insert_artifact(
+        service_id="svc-human", url=None, channel="brief", content="pinned"
+    )
     pin_artifact_for_day(human_id, "2026-08-26")
     update_artifact_priority(human_id, 10.0)
 
@@ -198,11 +219,14 @@ def test_selected_artifacts_leave_the_pending_lane(
     """Both the human pick and every platform pick transition pending -> selected and drop out of the pending index."""
     from algorand_shared.artifact_store import SELECTED, insert_artifact, pin_artifact_for_day
     from algorand_shared.to_compose_selection import select_to_compose_for_day
+
     from app.core import config as cfg
 
     monkeypatch.setattr(cfg, "NEWS_MAX_ARTICLES_PER_DAY", 2)
 
-    human_id, _ = insert_artifact(service_id="svc-human", url=None, channel="brief", content="pinned")
+    human_id, _ = insert_artifact(
+        service_id="svc-human", url=None, channel="brief", content="pinned"
+    )
     pin_artifact_for_day(human_id, "2026-08-26")
     platform_id, _ = insert_artifact(service_id="svc-p", url=None, channel="crawler", content="p")
 
@@ -214,18 +238,43 @@ def test_selected_artifacts_leave_the_pending_lane(
 
 
 @pytest.mark.usefixtures("fake_artifact_session")
-def test_platform_slots_available_floors_at_zero_when_cap_is_one(monkeypatch: pytest.MonkeyPatch) -> None:
-    """N=1 (the minimum allowed cap) leaves zero platform slots -- must not go negative or (an earlier bug caught by this test) admit one extra artifact via an off-by-one in the fill loop's break check."""
+def test_platform_slots_available_floors_at_zero_when_cap_is_one_and_pinned(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """N=1 (the minimum allowed cap) PINNED leaves zero platform slots -- must not go negative or (an earlier bug caught by this test) admit one extra artifact via an off-by-one in the fill loop's break check."""
+    from algorand_shared.artifact_store import insert_artifact, pin_artifact_for_day
+    from algorand_shared.to_compose_selection import select_to_compose_for_day
+
+    from app.core import config as cfg
+
+    monkeypatch.setattr(cfg, "NEWS_MAX_ARTICLES_PER_DAY", 1)
+    human_id, _ = insert_artifact(service_id="svc-human", url=None, channel="brief", content="a")
+    pin_artifact_for_day(human_id, "2026-08-26")
+    insert_artifact(service_id="svc-b", url=None, channel="brief", content="b")
+
+    result = select_to_compose_for_day("2026-08-26")
+    assert result["human_picked"] is True
+    assert result["platform_slots_available"] == 0
+    assert result["platform_slots_filled"] == 0
+
+
+@pytest.mark.usefixtures("fake_artifact_session")
+def test_platform_takes_the_whole_slot_at_cap_one_when_unpinned(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """N=1 UNPINNED: the one slot the day has goes to the platform pick instead of sitting empty -- the cutoff/backfill rule applies even at the minimum cap."""
     from algorand_shared.artifact_store import insert_artifact
     from algorand_shared.to_compose_selection import select_to_compose_for_day
+
     from app.core import config as cfg
 
     monkeypatch.setattr(cfg, "NEWS_MAX_ARTICLES_PER_DAY", 1)
     insert_artifact(service_id="svc-a", url=None, channel="brief", content="a")
 
     result = select_to_compose_for_day("2026-08-26")
-    assert result["platform_slots_available"] == 0
-    assert result["platform_slots_filled"] == 0
+    assert result["human_picked"] is False
+    assert result["platform_slots_available"] == 1
+    assert result["platform_slots_filled"] == 1
 
 
 @pytest.mark.usefixtures("fake_artifact_session")
@@ -295,11 +344,14 @@ def test_preview_matches_what_select_would_actually_pick(monkeypatch: pytest.Mon
         preview_to_compose_for_day,
         select_to_compose_for_day,
     )
+
     from app.core import config as cfg
 
-    monkeypatch.setattr(cfg, "NEWS_MAX_ARTICLES_PER_DAY", 3)  # N=3 -> 2 platform slots
+    monkeypatch.setattr(cfg, "NEWS_MAX_ARTICLES_PER_DAY", 3)  # pinned -> N=3, 2 platform slots
 
-    human_id, _ = insert_artifact(service_id="svc-human", url=None, channel="brief", content="pinned")
+    human_id, _ = insert_artifact(
+        service_id="svc-human", url=None, channel="brief", content="pinned"
+    )
     pin_artifact_for_day(human_id, "2026-08-26")
     ids = [human_id]
     for i, prio in enumerate([9.0, 5.0, 1.0]):
@@ -482,9 +534,10 @@ def test_rank_platform_picks_dedup_still_keys_on_literal_service_id(
     _mock_coverage(monkeypatch, covered={"algorand-forum"})
     from algorand_shared.artifact_store import insert_artifact, update_artifact_priority
     from algorand_shared.to_compose_selection import select_to_compose_for_day
+
     from app.core import config as cfg
 
-    monkeypatch.setattr(cfg, "NEWS_MAX_ARTICLES_PER_DAY", 3)  # platform_n = 2
+    monkeypatch.setattr(cfg, "NEWS_MAX_ARTICLES_PER_DAY", 3)  # unpinned -> platform_n = 3
 
     id_a, _ = insert_artifact(
         service_id="forum-topic:1",
@@ -515,15 +568,25 @@ def test_new_service_pool_gets_its_guaranteed_floor_even_at_lower_priority(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The core guarantee: with plenty of candidates in both pools, the new-service pool still gets its floor share of platform slots even when every new-service candidate is lower priority than every update candidate -- otherwise a saturating established service would starve new-service coverage entirely."""
-    from algorand_shared.artifact_store import insert_artifact, update_artifact_priority
+    from algorand_shared.artifact_store import (
+        insert_artifact,
+        pin_artifact_for_day,
+        update_artifact_priority,
+    )
     from algorand_shared.to_compose_selection import select_to_compose_for_day
+
     from app.core import config as cfg
 
-    monkeypatch.setattr(cfg, "NEWS_MAX_ARTICLES_PER_DAY", 5)  # platform_n = 4
+    monkeypatch.setattr(cfg, "NEWS_MAX_ARTICLES_PER_DAY", 5)  # pinned -> platform_n = 4
     monkeypatch.setattr(cfg, "ARTIFACT_NEW_SERVICE_MIN_SHARE", 0.5)  # floor 2 / 2
 
     covered = {f"svc-old-{i}" for i in range(4)}
     _mock_coverage(monkeypatch, covered=covered)
+
+    human_id, _ = insert_artifact(
+        service_id="svc-human", url=None, channel="brief", content="pinned"
+    )
+    pin_artifact_for_day(human_id, "2026-08-26")
 
     new_ids = []
     for i, prio in enumerate([1.0, 2.0]):  # LOW priority, never-covered services
@@ -562,15 +625,25 @@ def test_thin_new_service_pool_is_backfilled_from_update_pool(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """When the new-service pool doesn't have enough eligible candidates to fill its own floor, the leftover slot(s) backfill from the update pool rather than leaving a platform slot empty."""
-    from algorand_shared.artifact_store import insert_artifact, update_artifact_priority
+    from algorand_shared.artifact_store import (
+        insert_artifact,
+        pin_artifact_for_day,
+        update_artifact_priority,
+    )
     from algorand_shared.to_compose_selection import select_to_compose_for_day
+
     from app.core import config as cfg
 
-    monkeypatch.setattr(cfg, "NEWS_MAX_ARTICLES_PER_DAY", 5)  # platform_n = 4
+    monkeypatch.setattr(cfg, "NEWS_MAX_ARTICLES_PER_DAY", 5)  # pinned -> platform_n = 4
     monkeypatch.setattr(cfg, "ARTIFACT_NEW_SERVICE_MIN_SHARE", 0.5)  # floor 2 / 2
 
     covered = {f"svc-old-{i}" for i in range(5)}
     _mock_coverage(monkeypatch, covered=covered)
+
+    human_id, _ = insert_artifact(
+        service_id="svc-human", url=None, channel="brief", content="pinned"
+    )
+    pin_artifact_for_day(human_id, "2026-08-26")
 
     # Only ONE new-service candidate exists -- the pool is thin relative to
     # its floor of 2.
@@ -606,13 +679,23 @@ def test_thin_update_pool_is_backfilled_from_new_service_pool(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Symmetric to the new-service-pool-thin case: when the UPDATE pool is what's thin, its shortfall backfills from the new-service pool instead."""
-    from algorand_shared.artifact_store import insert_artifact, update_artifact_priority
+    from algorand_shared.artifact_store import (
+        insert_artifact,
+        pin_artifact_for_day,
+        update_artifact_priority,
+    )
     from algorand_shared.to_compose_selection import select_to_compose_for_day
+
     from app.core import config as cfg
 
-    monkeypatch.setattr(cfg, "NEWS_MAX_ARTICLES_PER_DAY", 5)  # platform_n = 4
+    monkeypatch.setattr(cfg, "NEWS_MAX_ARTICLES_PER_DAY", 5)  # pinned -> platform_n = 4
     monkeypatch.setattr(cfg, "ARTIFACT_NEW_SERVICE_MIN_SHARE", 0.5)  # floor 2 / 2
     _mock_coverage(monkeypatch, covered=set())  # nothing is covered -> update pool is EMPTY
+
+    human_id, _ = insert_artifact(
+        service_id="svc-human", url=None, channel="brief", content="pinned"
+    )
+    pin_artifact_for_day(human_id, "2026-08-26")
 
     new_ids = []
     for i, prio in enumerate([9.0, 8.0, 7.0, 6.0]):
@@ -626,7 +709,7 @@ def test_thin_update_pool_is_backfilled_from_new_service_pool(
 
     assert result["platform_slots_filled"] == 4
     assert result["platform_pool_counts"] == {"new_service": 4, "update": 0}
-    chosen = {sel["artifact_id"] for sel in result["selections"]}
+    chosen = {sel["artifact_id"] for sel in result["selections"] if sel["lane"] == "platform"}
     assert set(new_ids) == chosen
 
 
@@ -635,13 +718,25 @@ def test_surplus_slot_beyond_the_floor_goes_to_next_highest_priority_regardless_
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Floors are a MINIMUM, not a partition: once both pools' floors are satisfied, a leftover slot (here, from odd platform_n not dividing evenly) goes to whichever pool has the next-highest-priority remaining candidate -- an already-covered service's second-best update can still win it over a weak new-service candidate. This is the explicit owner carve-out: "if some project did a big rework, the big rework would probably [earn] priority"."""
-    from algorand_shared.artifact_store import insert_artifact, update_artifact_priority
+    from algorand_shared.artifact_store import (
+        insert_artifact,
+        pin_artifact_for_day,
+        update_artifact_priority,
+    )
     from algorand_shared.to_compose_selection import select_to_compose_for_day
+
     from app.core import config as cfg
 
-    monkeypatch.setattr(cfg, "NEWS_MAX_ARTICLES_PER_DAY", 4)  # platform_n = 3 (odd -> 1 surplus)
+    monkeypatch.setattr(
+        cfg, "NEWS_MAX_ARTICLES_PER_DAY", 4
+    )  # pinned -> platform_n = 3 (odd -> 1 surplus)
     monkeypatch.setattr(cfg, "ARTIFACT_NEW_SERVICE_MIN_SHARE", 0.5)  # floor 1 / 1
     _mock_coverage(monkeypatch, covered={"svc-old-a", "svc-old-b"})
+
+    human_id, _ = insert_artifact(
+        service_id="svc-human", url=None, channel="brief", content="pinned"
+    )
+    pin_artifact_for_day(human_id, "2026-08-26")
 
     # A single, LOW-priority new-service candidate -- it still claims the
     # guaranteed floor slot.
@@ -665,7 +760,7 @@ def test_surplus_slot_beyond_the_floor_goes_to_next_highest_priority_regardless_
     # to the update pool's SECOND artifact (next-highest priority overall),
     # not forced into the (exhausted) new-service pool.
     assert result["platform_pool_counts"] == {"new_service": 1, "update": 2}
-    chosen = {sel["artifact_id"] for sel in result["selections"]}
+    chosen = {sel["artifact_id"] for sel in result["selections"] if sel["lane"] == "platform"}
     assert chosen == {new_id, old_a_id, old_b_id}
 
 
@@ -824,9 +919,12 @@ def test_reset_and_reselect_produces_a_fresh_valid_selection(
         reset_and_reselect_for_day,
         select_to_compose_for_day,
     )
+
     from app.core import config as cfg
 
-    monkeypatch.setattr(cfg, "NEWS_MAX_ARTICLES_PER_DAY", 2)
+    monkeypatch.setattr(
+        cfg, "NEWS_MAX_ARTICLES_PER_DAY", 1
+    )  # unpinned -> exactly 1 competed-for slot
 
     low_id, _ = insert_artifact(service_id="svc-low", url=None, channel="brief", content="low")
     update_artifact_priority(low_id, 1.0)
@@ -862,12 +960,15 @@ def test_preview_pool_field_present_for_every_pending_item_not_just_selected(
     )
     from algorand_shared.artifact_store import insert_artifact, update_artifact_priority
     from algorand_shared.to_compose_selection import preview_to_compose_for_day
+
     from app.core import config as cfg
 
-    monkeypatch.setattr(cfg, "NEWS_MAX_ARTICLES_PER_DAY", 2)  # platform_n = 1
+    monkeypatch.setattr(cfg, "NEWS_MAX_ARTICLES_PER_DAY", 1)  # unpinned -> platform_n = 1
     _mock_coverage(monkeypatch, covered={"svc-covered"})
 
-    covered_id, _ = insert_artifact(service_id="svc-covered", url=None, channel="crawler", content="a")
+    covered_id, _ = insert_artifact(
+        service_id="svc-covered", url=None, channel="crawler", content="a"
+    )
     update_artifact_priority(covered_id, 5.0)
     unselected_id, _ = insert_artifact(
         service_id="svc-fresh", url=None, channel="crawler", content="b"
@@ -936,8 +1037,12 @@ def test_find_stale_selected_ignores_already_composed_or_discarded() -> None:
         select_to_compose_for_day,
     )
 
-    composed_id, _ = insert_artifact(service_id="svc-composed", url=None, channel="brief", content="a")
-    discarded_id, _ = insert_artifact(service_id="svc-discarded", url=None, channel="brief", content="b")
+    composed_id, _ = insert_artifact(
+        service_id="svc-composed", url=None, channel="brief", content="a"
+    )
+    discarded_id, _ = insert_artifact(
+        service_id="svc-discarded", url=None, channel="brief", content="b"
+    )
     select_to_compose_for_day("2026-08-25")
     mark_artifact_status(composed_id, COMPOSED)
     mark_artifact_status(discarded_id, DISCARDED)
@@ -1039,7 +1144,9 @@ def test_reclaim_stale_selected_only_deletes_the_reclaimed_slot_not_the_whole_da
     )
 
     human_id, _ = insert_artifact(service_id="svc-human", url=None, channel="brief", content="a")
-    platform_id, _ = insert_artifact(service_id="svc-platform", url=None, channel="brief", content="b")
+    platform_id, _ = insert_artifact(
+        service_id="svc-platform", url=None, channel="brief", content="b"
+    )
     pin_for_tomorrow(human_id, today=dt.date(2026, 8, 24))
     select_to_compose_for_day("2026-08-25")
     mark_artifact_status(platform_id, COMPOSED)  # the platform slot already composed successfully

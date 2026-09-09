@@ -616,7 +616,7 @@ def _drain_one_to_compose_slot(
 
 @celery_app.task(name="app.tasks.newspaper.select_to_compose_for_today")
 def select_to_compose_for_today_task() -> dict[str, object]:
-    """Daily beat: pick today's `to_compose` slate -- the human pin an admin set yesterday via "pin for tomorrow" (see artifact_store.pin_artifact_for_day / to_compose_selection.pin_for_tomorrow) plus N-1 top-priority platform picks. See to_compose_selection.select_to_compose_for_day for the full selection rule (including why an unpinned human slot is left empty, never backfilled).
+    """Daily beat: pick today's `to_compose` slate -- the human pin an admin set yesterday via "pin for tomorrow" (see artifact_store.pin_artifact_for_day / to_compose_selection.pin_for_tomorrow), if any, plus top-priority platform picks. This run IS the human-slot cutoff: if `day` isn't pinned by the time this fires, the freed slot goes to the platform pool instead of sitting empty (2026-09-09). See to_compose_selection.select_to_compose_for_day for the full rule.
 
     Guarded to be a no-op if `day`'s slate is already populated -- e.g. by
     an admin "Redo"/pin action taken for tomorrow before this beat rolls
