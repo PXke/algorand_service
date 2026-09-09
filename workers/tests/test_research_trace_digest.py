@@ -1,4 +1,4 @@
-"""The DeepSeek raw-mode research digest (_format_full_research_trace): categorized, deduped, error-filtered trace text handed to Stage 2 as ground truth.
+"""The DeepSeek raw-mode research digest (_format_full_research_trace): categorized, deduped trace text handed to Stage 2 as ground truth.
 
 Root-caused 2026-09-09 (AlgoChess incident, digest-attention followup): the
 prior version was one flat chronological list of every trace entry
@@ -23,21 +23,45 @@ def test_empty_trace_returns_empty_string() -> None:
     assert mc._format_full_research_trace([]) == ""
 
 
-def test_all_error_entries_returns_empty_string() -> None:
-    """A trace made entirely of errors has nothing usable -- same empty short-circuit as a genuinely empty trace."""
+def test_all_error_entries_produces_a_failed_fetches_only_digest() -> None:
+    """Root-cause regression (2026-09-09, design review before shipping): errors used to be dropped entirely, which silently dropped a fetch_url DNS failure's "hint" field too -- the MyAlgo incident's DEFUNCT-domain instruction. A trace of nothing but errors must still produce a real (non-empty) digest, with those errors visible in FAILED FETCHES, not fall back to the empty-trace short-circuit."""
     trace = [_entry("fetch_url", {"error": "dns resolution failed"})]
-    assert mc._format_full_research_trace(trace) == ""
+    out = mc._format_full_research_trace(trace)
+    assert out != ""
+    assert "### FAILED FETCHES" in out
+    assert "dns resolution failed" in out
 
 
-def test_error_entries_dropped_but_zero_findings_kept() -> None:
-    """A tool ERROR carries no information and is dropped; a genuine ZERO/EMPTY finding (the GoPlausible incident's "0K+ Credentials issued") is real negative evidence and must survive."""
+def test_error_entry_hint_field_survives_into_failed_fetches() -> None:
+    """The DEFUNCT-domain "hint" field (research_tools._fetch_failure_hint, the MyAlgo incident's actual fix) must reach the writer, not just the bare error string."""
+    trace = [
+        _entry(
+            "fetch_url",
+            {
+                "url": "https://myalgo.com",
+                "error": "dns resolution failed",
+                "hint": "this domain does not resolve — the project is likely DEFUNCT or abandoned",
+            },
+        )
+    ]
+    out = mc._format_full_research_trace(trace)
+    failed_section = out.split("### FAILED FETCHES")[1]
+    assert "DEFUNCT" in failed_section
+
+
+def test_error_entries_kept_separately_and_zero_findings_still_survive() -> None:
+    """A tool ERROR is kept (in FAILED FETCHES), not dropped; a genuine ZERO/EMPTY finding (the GoPlausible incident's "0K+ Credentials issued") is real negative evidence and must survive in its normal section, unaffected."""
     trace = [
         _entry("fetch_url", {"error": "timeout"}),
         _entry("fetch_url", {"body": "0K+ Credentials issued. 0+ Events & hackathons."}),
     ]
     out = mc._format_full_research_trace(trace)
-    assert "timeout" not in out
+    assert "timeout" in out
+    assert "### FAILED FETCHES" in out
     assert "0K+ Credentials issued" in out
+    # The zero-finding must NOT be miscategorized into FAILED FETCHES.
+    web_section = out.split("### WEB SOURCES EXPLORED")[1].split("### OTHER RESEARCH FINDINGS")[0]
+    assert "0K+ Credentials issued" in web_section
 
 
 def test_exact_duplicate_calls_deduped_to_first_occurrence() -> None:
@@ -107,21 +131,69 @@ def test_record_results_truncated_less_aggressively_than_web_results() -> None:
     assert len(records_section) > len(web_section)
 
 
-def test_section_order_is_records_then_web_then_other() -> None:
+def test_section_order_is_records_interactive_web_other_failed() -> None:
     """Sections are ordered by fabrication risk (records first, closest to the top of the digest), not alphabetically or by trace order."""
     trace = [
         _entry("search_x", {"posts": []}),
         _entry("fetch_url", {"body": "page"}),
         _entry("lookup_transaction_note", {"note": "..."}),
+        _entry("play_interactive", {"screen": "board"}),
+        _entry("fetch_url", {"error": "timeout"}),
     ]
     out = mc._format_full_research_trace(trace)
     records_i = out.index("### ON-CHAIN RECORDS VERIFIED")
+    interactive_i = out.index("### PRODUCT/INTERACTIVE EXPERIENCE EXPLORED")
     web_i = out.index("### WEB SOURCES EXPLORED")
     other_i = out.index("### OTHER RESEARCH FINDINGS")
-    assert records_i < web_i < other_i
+    failed_i = out.index("### FAILED FETCHES")
+    assert records_i < interactive_i < web_i < other_i < failed_i
 
 
 def test_entries_with_no_tool_name_skipped() -> None:
     """A malformed entry with no tool name contributes nothing rather than a blank '- ()' line."""
     trace = [{"tool": "", "arguments": {}, "result": {"x": 1}}]
     assert mc._format_full_research_trace(trace) == ""
+
+
+def test_interactive_tools_grouped_under_their_own_section() -> None:
+    """play_interactive/capture_screenshot/click_element/type_into_page get their own section, separate from passive web fetches -- deliberate product exploration, not a generic page dump."""
+    trace = [
+        _entry("play_interactive", {"screen": "board state"}),
+        _entry("capture_screenshot", {"description": "the play screen"}),
+        _entry("fetch_url", {"body": "unrelated page text"}),
+    ]
+    out = mc._format_full_research_trace(trace)
+    interactive_section = out.split("### PRODUCT/INTERACTIVE EXPERIENCE EXPLORED")[1].split(
+        "### WEB SOURCES EXPLORED"
+    )[0]
+    assert "play_interactive(" in interactive_section
+    assert "capture_screenshot(" in interactive_section
+    assert "fetch_url(" not in interactive_section
+
+
+def test_interactive_results_get_the_generous_record_tier_budget() -> None:
+    """Root-cause regression (2026-09-09, design review before shipping): interactive-tool results used to share the small 2000-char WEB budget, directly undercutting THE SCENE INCLUDES THE PRODUCT ITSELF (a writer can't weight product-experience material the digest itself already cut down). Interactive results now get the same generous budget as on-chain records."""
+    huge_text = "x" * 10_000
+    trace = [
+        _entry("play_interactive", {"screen": huge_text}),
+        _entry("fetch_url", {"body": huge_text}),
+    ]
+    out = mc._format_full_research_trace(trace)
+    interactive_section = out.split("### PRODUCT/INTERACTIVE EXPERIENCE EXPLORED")[1].split(
+        "### WEB SOURCES EXPLORED"
+    )[0]
+    web_section = out.split("### WEB SOURCES EXPLORED")[1].split("### OTHER RESEARCH FINDINGS")[0]
+    assert len(interactive_section) > len(web_section)
+
+
+def test_failed_retry_after_error_with_same_args_keeps_both_entries() -> None:
+    """Root-cause regression (2026-09-09, found while testing the error-visibility fix): a failed fetch_url call retried with the SAME url/args, succeeding the second time, must keep BOTH entries -- deduping on (tool, args) alone treated the successful retry as a "duplicate" of the failure and silently dropped the one result that actually matters."""
+    trace = [
+        _entry("fetch_url", {"error": "timeout"}, arguments={"url": "https://example.com"}),
+        _entry(
+            "fetch_url", {"body": "the real page content"}, arguments={"url": "https://example.com"}
+        ),
+    ]
+    out = mc._format_full_research_trace(trace)
+    assert "timeout" in out
+    assert "the real page content" in out

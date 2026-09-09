@@ -52,6 +52,34 @@ def test_record_claim_with_record_read_passes() -> None:
     assert "record_read" not in r.failed_rules
 
 
+def test_memo_trigger_does_not_match_inside_an_unrelated_word() -> None:
+    """Root-cause regression (2026-09-09, design review before shipping): the old plain substring check for the "memo" trigger matched inside unrelated words containing that substring ("commemorate", "memory") -- a piece about browser memory or a memorial event must not spuriously require a record-reading tool call."""
+    src = "The library warns against persisting a mnemonic in browser memory, and the project will commemorate its anniversary."
+    r = c.check_completeness(src, tool_trace='{"search_web": "..."}')
+    assert "record_read" not in r.failed_rules
+
+
+def test_memo_trigger_still_matches_as_a_whole_word() -> None:
+    """The word-boundary fix must not break the real trigger it's guarding."""
+    src = "The payment's memo explains the transfer's purpose."
+    r = c.check_completeness(src, tool_trace='{"search_web": "..."}')
+    assert "record_read" in r.failed_rules
+
+
+def test_record_read_required_any_matches_the_value_check_tool_set() -> None:
+    """Root-cause regression (2026-09-09, design review before shipping): required_any used to be a narrower, independently-drifting copy of unsourced_specifics_gate's RECORD_TOOLS -- a claim genuinely grounded via fetch_url (a raw indexer JSON fetch, which the record-attributed-value check already treats as a legitimate record read) could pass that check and still fail this one on the exact same sentence. Both now share RECORD_READ_TOOLS."""
+    from app.modules.gatekeeper.fact_align import RECORD_READ_TOOLS
+
+    src = "The transaction note field carries each player's rating before and after."
+    r = c.check_completeness(
+        src,
+        tool_trace='{"fetch_url": {"url": "https://mainnet-idx.algonode.cloud/v2/transactions/X"}}',
+    )
+    assert "fetch_url" in RECORD_READ_TOOLS
+    assert r.passed
+    assert "record_read" not in r.failed_rules
+
+
 def test_named_persons_unscreened() -> None:
     """Lists named persons lacking a sanctions/PEP screen, empty once the trace shows one ran."""
     src = "Founder Jane Doe and CEO Mike Smith spoke."

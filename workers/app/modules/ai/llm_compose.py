@@ -1548,6 +1548,22 @@ _CHAIN_RECORD_TOOLS = frozenset(
         "round_to_date",
     }
 )
+# Tools that actively EXPLORE a product/interactive experience -- a real
+# game screen, a clicked-through flow, a captured screenshot -- as opposed
+# to a passive page scrape. Deliberate exploration deserves the same
+# "attention real estate" as an on-chain record (its own section, a
+# generous budget), and lumping it with generic page dumps (as this file
+# did until 2026-09-09) directly undercut THE SCENE INCLUDES THE PRODUCT
+# ITSELF (_NARRATIVE_GUIDANCE): the writer can't weight product-experience
+# material the digest itself just cut down to 2000 chars.
+_INTERACTIVE_TOOLS = frozenset(
+    {
+        "play_interactive",
+        "capture_screenshot",
+        "click_element",
+        "type_into_page",
+    }
+)
 # Tools whose result is fetched/scraped web-page content -- the least
 # information-dense category (mostly boilerplate/navigation/markup around a
 # few real sentences), so it gets the smallest per-result char budget below.
@@ -1556,10 +1572,6 @@ _WEB_SOURCE_TOOLS = frozenset(
         "fetch_url",
         "search_crawled_pages",
         "search_web",
-        "click_element",
-        "type_into_page",
-        "capture_screenshot",
-        "play_interactive",
         "extract_pdf_from_page",
         "fetch_google_doc",
         "discourse_forum",
@@ -1575,33 +1587,45 @@ _WEB_SOURCE_TOOLS = frozenset(
 # model's own request, never evidence.
 _ARGS_MAX_CHARS = 500
 _RECORD_RESULT_MAX_CHARS = 6000
+_INTERACTIVE_RESULT_MAX_CHARS = 6000
 _WEB_RESULT_MAX_CHARS = 2000
 _OTHER_RESULT_MAX_CHARS = 4000
+_FAILED_RESULT_MAX_CHARS = 300
 
 
 def _dedup_and_filter_trace(trace: list[dict]) -> list[dict]:
-    """Drop trace entries carrying zero information for a reader, and collapse exact reruns to their first occurrence. Presentation-only: never touches the raw trace list itself -- the deterministic gates' own grounding corpus still reads the ORIGINAL, unfiltered trace (see fact_align.grounding_entries), this is only what the WRITER'S digest shows.
+    """Drop trace entries carrying no tool name, and collapse exact reruns to their first occurrence. Presentation-only: never touches the raw trace list itself -- the deterministic gates' own grounding corpus still reads the ORIGINAL, unfiltered trace (see fact_align.grounding_entries), this is only what the WRITER'S digest shows.
 
-    Drops only entries whose result is an explicit ``{"error": ...}`` (the
-    established convention -- see CLAUDE.md invariant 2.8). A genuine
-    zero/empty finding (e.g. "0K+ Credentials issued") is NOT an error and
-    is kept: that is real negative evidence a writer needs to debunk a
-    fabricated positive claim (the GoPlausible incident), not noise.
+    Keeps ``{"error": ...}`` entries (routed to their own FAILED FETCHES
+    section by _format_full_research_trace, not dropped -- see that
+    function's docstring for why: a fetch_url DNS failure carries a "hint"
+    field with the actionable DEFUNCT-domain instruction, the MyAlgo
+    incident's fix, and dropping the whole entry silently dropped that
+    hint from what the writer sees). A genuine zero/empty finding (e.g.
+    "0K+ Credentials issued") was never an error shape to begin with and
+    is unaffected either way: that is real negative evidence a writer
+    needs to debunk a fabricated positive claim (the GoPlausible incident).
+
+    The dedup key includes whether the result was an error (found via a
+    test written alongside this fix, 2026-09-09): a failed fetch_url call
+    retried with the SAME url/args, succeeding the second time, must keep
+    BOTH entries -- (tool, args) alone would treat the successful retry as
+    a "duplicate" of the failure and silently drop the one result that
+    actually matters.
     """
-    seen: set[tuple[str, str]] = set()
+    seen: set[tuple[str, str, bool]] = set()
     out: list[dict] = []
     for entry in trace:
         tool = str(entry.get("tool", ""))
         if not tool:
             continue
-        result = entry.get("result")
-        if isinstance(result, dict) and "error" in result:
-            continue
         try:
             args_key = json.dumps(entry.get("arguments", {}), sort_keys=True, default=str)
         except (TypeError, ValueError):
             args_key = str(entry.get("arguments", ""))
-        key = (tool, args_key)
+        result = entry.get("result")
+        is_error = isinstance(result, dict) and "error" in result
+        key = (tool, args_key, is_error)
         if key in seen:
             continue
         seen.add(key)
@@ -1620,45 +1644,76 @@ def _format_trace_entry(entry: dict, *, result_max_chars: int) -> str:
     return f"- {tool}({args_s}) -> {result_s}"
 
 
+def _format_failed_entry(entry: dict) -> str:
+    """Compact one-line format for a failed tool call -- the error plus any actionable ``hint`` (e.g. the DEFUNCT-domain instruction a DNS failure carries, see research_tools._fetch_failure_hint), never the full raw error payload, which is mostly noise once the fact of failure is recorded."""
+    tool = str(entry.get("tool", ""))
+    result = entry.get("result") if isinstance(entry.get("result"), dict) else {}
+    try:
+        args_s = json.dumps(entry.get("arguments", {}), separators=(",", ":"))[:_ARGS_MAX_CHARS]
+    except (TypeError, ValueError):
+        args_s = str(entry.get("arguments", ""))[:_ARGS_MAX_CHARS]
+    error = str(result.get("error", ""))[:_FAILED_RESULT_MAX_CHARS]
+    hint = str(result.get("hint", ""))[:_FAILED_RESULT_MAX_CHARS]
+    line = f"- {tool}({args_s}) -> ERROR: {error}"
+    if hint:
+        line += f" | {hint}"
+    return line
+
+
 def _trace_section(title: str, lines: list[str], empty_note: str) -> str:
     body = "\n".join(lines) if lines else f"({empty_note})"
     return f"### {title}\n{body}"
 
 
 def _format_full_research_trace(trace: list[dict]) -> str:
-    """Categorized, deduped, error-filtered trace text — the RESEARCH_DIGEST_MODE=raw alternative to an LLM-synthesized digest (see _synthesize_research_digest).
+    """Categorized, deduped trace text — the RESEARCH_DIGEST_MODE=raw alternative to an LLM-synthesized digest (see _synthesize_research_digest).
 
     Root-caused 2026-09-09 (AlgoChess incident, digest-attention followup):
-    the prior version was one flat chronological list of every entry
-    (including {"error": ...} noise and exact-duplicate reruns), one
+    the prior version was one flat chronological list of every entry, one
     8000-char cap for every tool regardless of value. A fabricated
     on-chain-note claim slipped through partly because the one real record
     lookup that mattered sat at line 143 of 188 undifferentiated lines —
     exactly the "lost in the middle" shape attention research describes for
     long, undifferentiated contexts.
 
-    Now: entries are deduped/error-filtered first (_dedup_and_filter_trace),
-    then grouped into three sections ordered by fabrication risk — ON-CHAIN
-    RECORDS (chain_tools.py lookups) first and least-truncated, WEB SOURCES
-    (scraped/fetched pages) most-truncated (least information-dense), OTHER
-    FINDINGS (search/market/social/misc) in between. Every section always
-    renders, even empty — an explicit "no on-chain records were looked up
-    this pass" is itself useful negative evidence right before a writer
-    about to claim something about a transaction or metadata field. Returns
-    "" only when there is nothing usable at all (empty trace, or every
-    entry filtered as an error) — same short-circuit the caller already
-    relies on.
+    Now: entries are deduped first (_dedup_and_filter_trace), then grouped
+    into five sections ordered by fabrication risk — ON-CHAIN RECORDS
+    (chain_tools.py lookups) first and least-truncated, PRODUCT/INTERACTIVE
+    EXPERIENCE (play_interactive/capture_screenshot/click_element/
+    type_into_page — deliberate exploration, same generous budget as
+    records; see _INTERACTIVE_TOOLS' own comment for why this used to be
+    lumped with passive page dumps and cut down before the writer ever saw
+    it), WEB SOURCES (passive scraped/fetched pages, most-truncated —
+    least information-dense), OTHER FINDINGS (search/market/social/misc),
+    and FAILED FETCHES last (errors, compact one-liners — kept, not
+    dropped: a fetch_url DNS failure carries an actionable "hint" field,
+    e.g. the MyAlgo incident's DEFUNCT-domain instruction, that the writer
+    must still see even though the fetch itself produced no content).
+    Every section always renders, even empty — an explicit "no on-chain
+    records were looked up this pass" is itself useful negative evidence
+    right before a writer about to claim something about a transaction or
+    metadata field. Returns "" only when there is nothing usable at all
+    (empty trace) — same short-circuit the caller already relies on.
     """
     entries = _dedup_and_filter_trace(trace)
     if not entries:
         return ""
     chain: list[str] = []
+    interactive: list[str] = []
     web: list[str] = []
     other: list[str] = []
+    failed: list[str] = []
     for entry in entries:
         tool = str(entry.get("tool", ""))
-        if tool in _CHAIN_RECORD_TOOLS:
+        result = entry.get("result")
+        if isinstance(result, dict) and "error" in result:
+            failed.append(_format_failed_entry(entry))
+        elif tool in _CHAIN_RECORD_TOOLS:
             chain.append(_format_trace_entry(entry, result_max_chars=_RECORD_RESULT_MAX_CHARS))
+        elif tool in _INTERACTIVE_TOOLS:
+            interactive.append(
+                _format_trace_entry(entry, result_max_chars=_INTERACTIVE_RESULT_MAX_CHARS)
+            )
         elif tool in _WEB_SOURCE_TOOLS:
             web.append(_format_trace_entry(entry, result_max_chars=_WEB_RESULT_MAX_CHARS))
         else:
@@ -1674,6 +1729,12 @@ def _format_full_research_trace(trace: list[dict]) -> str:
                 "state contains",
             ),
             _trace_section(
+                "PRODUCT/INTERACTIVE EXPERIENCE EXPLORED",
+                interactive,
+                "no interactive exploration (play_interactive/capture_screenshot/"
+                "click_element/type_into_page) was done this research pass",
+            ),
+            _trace_section(
                 "WEB SOURCES EXPLORED", web, "no web pages were fetched this research pass"
             ),
             _trace_section(
@@ -1681,6 +1742,7 @@ def _format_full_research_trace(trace: list[dict]) -> str:
                 other,
                 "no other tool calls were made this research pass",
             ),
+            _trace_section("FAILED FETCHES", failed, "no tool call failed this research pass"),
         ]
     )
 
@@ -1987,10 +2049,22 @@ def _record_grade(
 
 
 def _draft_score(review: dict, *, needs_revision: bool) -> float:
-    """The best-of-N comparison score for one graded pass: the heuristic grade, penalized when the LLM quality rubric also flags a revision."""
+    """The best-of-N comparison score for one graded pass: the heuristic grade, penalized when the LLM quality rubric OR the factcheck audit flags a revision.
+
+    Root-caused via design review before shipping (2026-09-09): this used to
+    only read ``needs_revision`` (the style-rubric-only trigger) -- a pass
+    with a WRONG factcheck verdict but a marginally higher heuristic grade
+    than the very next (corrected) pass would win best-of-N and get
+    returned, silently discarding the forced revision that fixed it. A
+    factcheck-forced revision is exactly as real a defect as a style-forced
+    one and must be penalized the same way here, not just in the
+    ``fixable`` list that drives whether another pass runs.
+    """
+    from app.modules.newspaper.article_quality_llm import factcheck_needs_revision
+
     grade_val = review.get("grade")
     score = float(grade_val) if isinstance(grade_val, int | float) else 0.0
-    if needs_revision:
+    if needs_revision or factcheck_needs_revision(review.get("factcheck") or {}):
         score -= 2.0
     return score
 
@@ -2037,11 +2111,19 @@ def _grade_current_draft(
 
 
 def _grade_is_degraded(review: dict) -> bool:
-    """True when this pass's grade carries no real signal to judge by — the deterministic grader errored (no numeric grade) or the LLM quality rubric errored (``llm_rubric_error``, no rubric scores). ``quality_needs_revision`` reads a scoreless quality dict as "nothing below threshold" (CLAUDE.md invariant 8: empty is not none-found), so a degraded grade must never be trusted as a confirmed-clean re-evaluation of a draft that was JUST revised to fix a flagged issue — see the ``regrade_unconfirmed`` use in ``_run_grade_revise_loop``."""
+    """True when this pass's grade carries no real signal to judge by — the deterministic grader errored (no numeric grade), the LLM quality rubric errored (``llm_rubric_error``, no rubric scores), or the factcheck audit errored (``claims: None`` — see check_factual_claims' own docstring for why that's distinct from a confirmed-clean ``claims: []``). ``quality_needs_revision``/``factcheck_needs_revision`` both read an unavailable signal as "nothing flagged", so a degraded grade must never be trusted as a confirmed-clean re-evaluation of a draft that was JUST revised to fix a flagged issue — see the ``regrade_unconfirmed`` use in ``_run_grade_revise_loop``. Root-caused via design review before shipping (2026-09-09): a regrade whose factcheck call happened to fail right after a factual-only surgical revision would have read as "confirmed clean" instead of "unconfirmed" without this."""
     if review.get("grade") is None:
         return True
     quality = review.get("quality") or {}
-    return bool(quality.get("error")) or quality.get("model") == "llm_rubric_error"
+    if bool(quality.get("error")) or quality.get("model") == "llm_rubric_error":
+        return True
+    factcheck = review.get("factcheck") or {}
+    # "disabled"/"skipped" are intentional, stable no-signal states -- same
+    # non-degraded treatment the quality rubric already gives them above.
+    # Only a genuine failure (check_factual_claims' own retry-then-fail-closed
+    # path, or _grade_current_draft's except clause, both land on this exact
+    # model string) counts as degraded here.
+    return factcheck.get("model") == "llm_factcheck_error"
 
 
 def _regrade_is_unconfirmed(revise_count: int, review: dict) -> bool:

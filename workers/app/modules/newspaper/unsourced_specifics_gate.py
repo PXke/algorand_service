@@ -50,6 +50,8 @@ import logging
 import re
 from typing import Any
 
+from app.modules.gatekeeper.fact_align import RECORD_READ_TOOLS as _RECORD_TOOLS
+
 logger = logging.getLogger(__name__)
 
 # Nouns whose count is an adoption/traction claim a reader would take as fact.
@@ -202,32 +204,24 @@ _BACKWARD_NOUN_LINKERS = _NOUN_MODIFIERS | _DETERMINERS
 
 _FOLD_RE = re.compile(r"[^a-z0-9]+")
 
-# Tools whose result is a specific fetched RECORD (a transaction's note field,
-# an ARC-69 metadata blob, an application's global state, ...) as opposed to a
-# live/aggregate market figure or the writer's own prose. A "record-attributed
-# value" claim ("the note field carries...") is only checkable against what
-# one of THESE tools actually returned -- never against page copy or
-# admin-supplied text, which is exactly the kind of external claim that must
-# never "confirm" a record read (root-caused 2026-09-09, AlgoChess incident:
-# a fabricated on-chain settlement-note "rating" claim slipped past every
-# check; the real note format carried no such field at all).
-_RECORD_TOOLS = frozenset(
-    {
-        "lookup_transaction_note",
-        "lookup_arc69_metadata",
-        "lookup_application",
-        "lookup_account_transactions",
-        "lookup_asset_transactions",
-        "fetch_url",
-        "search_crawled_pages",
-    }
-)
+# A "record-attributed value" claim ("the note field carries...") is only
+# checkable against what a RECORD_READ_TOOLS call actually returned -- never
+# against page copy or admin-supplied text, which is exactly the kind of
+# external claim that must never "confirm" a record read (root-caused
+# 2026-09-09, AlgoChess incident: a fabricated on-chain settlement-note
+# "rating" claim slipped past every check; the real note format carried no
+# such field at all). Shared with gatekeeper/completeness.py's record_read
+# rule (imported above as _RECORD_TOOLS) -- see RECORD_READ_TOOLS' own
+# docstring for why this must not be a second, independently-drifting copy.
 
 # Phrases that mark a sentence as attributing a value to a specific fetched
 # record rather than making a general claim -- the exact words a writer uses
-# when citing what a record supposedly contains.
+# when citing what a record supposedly contains. \b-bounded on "memo" (and
+# "metadata", which already contains "meta" + "data" but not "memo") so a
+# word like "memory" or "commemorate" can't spuriously trigger this --
+# root-caused 2026-09-09 design review before shipping.
 _RECORD_ATTRIBUTION_RE = re.compile(
-    r"note field|transaction note|memo|settlement transaction|"
+    r"note field|transaction note|\bmemo\b|settlement transaction|"
     r"recorded on[- ]?chain|on-chain record|arc-?69|metadata|logged in|stored in",
     re.I,
 )

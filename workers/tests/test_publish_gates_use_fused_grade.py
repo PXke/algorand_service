@@ -197,3 +197,48 @@ def test_grade_and_gate_missing_heuristic_grade_fails_soft_to_no_grade(
     assert grade_value is None
     assert "grade" not in grade_meta
     assert gate_ok is True
+
+
+def test_fresh_auto_approve_grade_detail_carries_factual_concerns(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Root-cause regression (2026-09-09, design review before shipping): grade_detail's JSON dump only ever carried subscores/issues -- a factcheck-flagged concern (review["factual_concerns"], set by llm_compose._collect_fixable_issues) never reached the review queue's persisted metadata at all, contradicting factcheck_issues' own docstring claim that it's "for the persisted review record". It must now survive into meta["grade_detail"]."""
+    import json as _json
+
+    monkeypatch.setattr("app.core.config.FRESH_AUTO_APPROVE_ENABLED", True, raising=False)
+    monkeypatch.setattr("app.core.config.FRESH_AUTO_APPROVE_GRADE_FLOOR", 8.0, raising=False)
+    monkeypatch.setattr("app.modules.gatekeeper.live.gate_draft", lambda **_kw: _PASS_GATE)
+    graded = dict(_STRUCTURALLY_ROUGH_BUT_GREAT_QUALITY)
+    graded["factual_concerns"] = ['factual concern (overstated): "X" — too broad']
+    _passed, meta = _fresh_auto_approve_passes(
+        title=_GOOD_TITLE,
+        body="body",
+        page_text="source",
+        source_url="https://example.com",
+        heuristic_grade=graded,
+    )
+    detail = _json.loads(meta["grade_detail"])
+    assert detail["factual_concerns"] == graded["factual_concerns"]
+
+
+def test_grade_and_gate_grade_detail_carries_factual_concerns(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Same fix, the recompose_published call site (_grade_and_gate's own grade_meta dict, a separate literal from _fresh_auto_approve_passes')."""
+    import json as _json
+
+    monkeypatch.setattr("app.modules.gatekeeper.live.gate_draft", lambda **_kw: _PASS_GATE)
+    graded = dict(_STRUCTURALLY_ROUGH_BUT_GREAT_QUALITY)
+    graded["factual_concerns"] = ['factual concern (wrong): "Y" — false']
+    composed = ArticleComposeResult(
+        title=_GOOD_TITLE, summary="s", body="body", composer="mistral", heuristic_grade=graded
+    )
+    grade_meta, _grade_value, _gate_ok = _grade_and_gate(
+        composed,
+        title=_GOOD_TITLE,
+        source_url="https://example.com",
+        page_text="source",
+        service_id="https://example.com",
+    )
+    detail = _json.loads(grade_meta["grade_detail"])
+    assert detail["factual_concerns"] == graded["factual_concerns"]

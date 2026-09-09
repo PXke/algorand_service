@@ -34,6 +34,31 @@ from typing import Any
 # zero flagged reasons on the article that actually invented it.
 MODEL_AUTHORED_TOOLS = frozenset({"review_draft"})
 
+# Tools whose result reads a specific fetched RECORD (a transaction's note
+# field, an ARC-69 metadata blob, an application's global state, a raw
+# indexer fetch, ...) -- shared between unsourced_specifics_gate.py's
+# record-attributed-VALUE check (does the claimed figure actually appear in
+# one of these tools' results) and completeness.py's record_read rule (was
+# a record-reading tool called AT ALL). Root-caused via design review
+# 2026-09-09: these were two independently-maintained copies that had
+# already diverged -- the value check counted fetch_url/search_crawled_pages
+# as legitimate record reads (a raw indexer JSON fetch via fetch_url returns
+# the same note/metadata data lookup_transaction_note does, just undecoded),
+# the completeness presence check did not, so a claim genuinely grounded via
+# fetch_url could pass the value check and still fail the presence check on
+# the exact same sentence. One shared set, one definition.
+RECORD_READ_TOOLS = frozenset(
+    {
+        "lookup_transaction_note",
+        "lookup_arc69_metadata",
+        "lookup_application",
+        "lookup_account_transactions",
+        "lookup_asset_transactions",
+        "fetch_url",
+        "search_crawled_pages",
+    }
+)
+
 
 def grounding_entries(trace: list[dict] | None) -> list[tuple[str, Any]]:
     """(tool, result) for every trace entry that is real observed evidence -- excludes model-authored entries (see MODEL_AUTHORED_TOOLS) and drops each entry's `arguments` (what the model asked for, not what it was told), which the grounding corpus must never treat as an anchor either."""

@@ -552,6 +552,7 @@ def _fresh_auto_approve_passes(
                 {
                     "subscores": heuristic_grade.get("subscores"),
                     "issues": heuristic_grade.get("issues"),
+                    "factual_concerns": heuristic_grade.get("factual_concerns"),
                 },
                 separators=(",", ":"),
             )
@@ -1214,6 +1215,7 @@ def _grade_and_gate(
                     {
                         "subscores": heuristic_grade.get("subscores"),
                         "issues": heuristic_grade.get("issues"),
+                        "factual_concerns": heuristic_grade.get("factual_concerns"),
                     },
                     separators=(",", ":"),
                 ),

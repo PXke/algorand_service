@@ -330,6 +330,15 @@ def test_record_check_skips_bare_years() -> None:
     assert [f for f in gate.find_unsourced_specifics(body, trace) if f["kind"] == "record"] == []
 
 
+def test_memo_trigger_does_not_match_inside_an_unrelated_word() -> None:
+    """Root-cause regression (2026-09-09, design review before shipping): the bare "memo" alternative in _RECORD_ATTRIBUTION_RE used to have no word boundary, so it matched inside unrelated words ("commemorate", "memory") -- a sentence about browser memory with an ungrounded number must not be treated as a record-attribution claim."""
+    trace = _record_trace("lookup_transaction_note", {"note": "nothing numeric here"})
+    body = (
+        "The wallet warns against persisting a key in browser memory, unlike its 1200 competitors."
+    )
+    assert [f for f in gate.find_unsourced_specifics(body, trace) if f["kind"] == "record"] == []
+
+
 def test_flagged_specific_does_not_ground_itself_on_a_later_pass() -> None:
     r"""Root-cause regression (2026-09-09, AlgoChess incident).
 

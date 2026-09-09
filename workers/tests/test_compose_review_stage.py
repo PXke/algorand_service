@@ -408,6 +408,54 @@ def test_degraded_regrade_after_revision_holds_instead_of_silent_publish(
     assert fields.regrade_unconfirmed_hold_reason == reason
 
 
+def test_degraded_factcheck_regrade_after_revision_holds_instead_of_silent_publish(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Same shape as the style-rubric degraded-regrade test above, for factcheck (root-caused via design review before shipping, 2026-09-09): a revision attempted specifically because factcheck flagged a WRONG claim, followed by a regrade whose factcheck call itself fails, must not be silently treated as a clean confirm-and-publish -- _grade_is_degraded must read a factcheck error the same way it already reads a quality-rubric error."""
+    monkeypatch.setattr(
+        "app.modules.newspaper.article_grader.grade_article_draft",
+        lambda **_kw: {"grade": 7.0, "issues": []},
+    )
+    monkeypatch.setattr(
+        "app.modules.newspaper.article_quality_llm.grade_article_quality_llm",
+        lambda **_kw: {
+            "narrative_synthesis": 5,
+            "technical_depth": 5,
+            "critical_distance": 5,
+            "repetition": 5,
+            "issues": [],
+        },
+    )
+    factcheck_calls = {"n": 0}
+
+    def _factcheck(**_kw: object) -> dict:
+        factcheck_calls["n"] += 1
+        if factcheck_calls["n"] == 1:
+            return {"claims": [{"claim": "a wrong claim", "verdict": "wrong", "why": "false"}]}
+        raise TimeoutError("SoftTimeLimitExceeded")  # the regrade's factcheck call crashes
+
+    monkeypatch.setattr(
+        "app.modules.newspaper.article_quality_llm.check_factual_claims", _factcheck
+    )
+    trace: list[dict] = []
+    fake = _FakeMistral({"title": "T2", "summary": "S", "body": "revised body attempting the fix"})
+
+    out = _review_and_revise(
+        fake,
+        {"title": "T", "summary": "S", "body": "original body with a wrong claim"},
+        system="s",
+        gen_user="u",
+        trace=trace,
+    )
+
+    assert fake.calls == 1  # exactly one revision attempted, matching the scenario
+    reason = out.get("_regrade_unconfirmed_hold_reason", "")
+    assert reason, (
+        "a regrade degraded by a crashed factcheck call after a revision attempt "
+        "must not silently look like a confirmed-clean pass"
+    )
+
+
 def test_low_repetition_score_triggers_revision_with_cut_instruction(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -706,6 +754,57 @@ def test_best_of_n_returns_highest_scoring_pass_not_last(monkeypatch: pytest.Mon
     assert fake.calls == 2
     assert out["body"] == "pass two body — the best draft"
     assert out["_heuristic_grade"]["grade"] == 8.6
+
+
+def test_best_of_n_penalizes_a_wrong_factcheck_verdict_not_just_style(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Root-cause regression (2026-09-09, design review before shipping): _draft_score used to only penalize the style-rubric's needs_revision, never factcheck's. A pass with a WRONG factcheck verdict but a marginally HIGHER heuristic grade than the very next (corrected) pass would win best-of-N and get returned -- silently discarding the forced revision that fixed it. Reproduced exactly: pass 1 grades 8.0 with a wrong claim; pass 2 (corrected) grades only 7.9. Without the fix, pass 1 wins on raw grade alone."""
+    grades = iter(
+        [
+            {"grade": 8.0, "issues": []},
+            {"grade": 7.9, "issues": []},
+        ]
+    )
+    monkeypatch.setattr(
+        "app.modules.newspaper.article_grader.grade_article_draft",
+        lambda **_kw: next(grades),
+    )
+    monkeypatch.setattr(
+        "app.modules.newspaper.article_quality_llm.grade_article_quality_llm",
+        lambda **_kw: {
+            "narrative_synthesis": 5,
+            "technical_depth": 5,
+            "critical_distance": 5,
+            "repetition": 5,
+            "issues": [],
+        },
+    )
+    factcheck_results = iter(
+        [
+            {"claims": [{"claim": "wrong protocol claim", "verdict": "wrong", "why": "false"}]},
+            {"claims": [{"claim": "wrong protocol claim", "verdict": "correct"}]},
+        ]
+    )
+    monkeypatch.setattr(
+        "app.modules.newspaper.article_quality_llm.check_factual_claims",
+        lambda **_kw: next(factcheck_results),
+    )
+    trace: list[dict] = []
+    fake = _SequenceMistral(
+        [{"title": "T2", "body": "the corrected, hedged claim — grades slightly lower"}]
+    )
+
+    out = _review_and_revise(
+        fake,
+        {"title": "T1", "body": "the wrong claim, stated confidently — grades slightly higher"},
+        system="sys",
+        gen_user="u",
+        trace=trace,
+    )
+
+    assert fake.calls == 1
+    assert out["body"] == "the corrected, hedged claim — grades slightly lower"
 
 
 def test_carry_forward_tells_revision_not_to_undo_earlier_fix(

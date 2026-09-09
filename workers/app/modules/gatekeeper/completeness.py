@@ -13,6 +13,9 @@ from __future__ import annotations
 import re
 from collections.abc import Iterable
 from dataclasses import dataclass, field
+from functools import cache
+
+from app.modules.gatekeeper.fact_align import RECORD_READ_TOOLS
 
 
 @dataclass(frozen=True)
@@ -52,14 +55,16 @@ DEFAULT_RULES: tuple[CompletenessRule, ...] = (
     # Companion to unsourced_specifics_gate's record-attributed-value check
     # (which verifies the VALUE against the record once fetched); this rule
     # catches the case where no record was fetched in the first place.
+    # required_any is the SAME RECORD_READ_TOOLS set the value check uses
+    # (design review 2026-09-09: these were two independently-drifting
+    # copies -- fetch_url of a raw indexer endpoint returns the same note/
+    # metadata data lookup_transaction_note does, just undecoded, so a claim
+    # genuinely grounded via fetch_url could pass the value check and still
+    # fail here on the exact same sentence).
     CompletenessRule(
         name="record_read",
         triggers=("note field", "transaction note", "memo"),
-        required_any=(
-            "lookup_transaction_note",
-            "lookup_account_transactions",
-            "lookup_arc69_metadata",
-        ),
+        required_any=tuple(RECORD_READ_TOOLS),
     ),
 )
 
@@ -78,6 +83,20 @@ class CompletenessResult:
         return self.score >= 1.0
 
 
+@cache
+def _trigger_pattern(trigger: str) -> re.Pattern[str]:
+    r"""A word-boundary-safe matcher for one trigger string, cached per distinct trigger (the DEFAULT_RULES set is small and static).
+
+    Root-caused via design review 2026-09-09: the old plain ``trigger in src``
+    substring check let a short trigger like "memo" spuriously match inside
+    an unrelated word ("commemorate", "memory") -- lookarounds (not ``\b``,
+    which behaves inconsistently around a trigger's own punctuation, e.g.
+    "inc.") require a non-word character (or start/end of string) on each
+    side of the trigger, regardless of what's inside it.
+    """
+    return re.compile(rf"(?<!\w){re.escape(trigger)}(?!\w)")
+
+
 def check_completeness(
     source_text: str,
     tool_trace: str,
@@ -93,7 +112,7 @@ def check_completeness(
     failed: list[str] = []
     detail: dict[str, str] = {}
     for rule in rules:
-        if not any(t in src for t in rule.triggers):
+        if not any(_trigger_pattern(t).search(src) for t in rule.triggers):
             continue
         if not any(tool in trace for tool in rule.required_any):
             failed.append(rule.name)
