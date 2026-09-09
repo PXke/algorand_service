@@ -105,8 +105,18 @@ def compose_scrape_article(
     prior_coverage_block: str = "",
     is_special_edition: bool = False,
     admin_sources: list[AdminSource] | None = None,
+    check_completeness_gate: bool = False,
 ) -> ArticleComposeResult:
     """Compose by publish kind (discovery vs update) via the writer LLM.
+
+    ``check_completeness_gate`` (2026-09-09): set True ONLY by callers
+    composing genuinely fresh, zero-prior-vetting content (see
+    `_compose_or_error` in publish_tasks.py) -- forwarded to whichever
+    branch below actually runs, so the gatekeeper completeness rules
+    (human_identity/company_backing) get one in-loop revision chance before
+    the post-hoc hold. Never set True from a recompose call site --
+    completeness is deliberately excluded there (owner-confirmed
+    2026-07-12, see `_grade_and_gate`'s docstring in publish_tasks.py).
 
     ``admin_sources`` (2026-09-02, owner-supplied article sources -- see
     docs/newspaper-article-sources-design.md): forwarded to
@@ -141,6 +151,7 @@ def compose_scrape_article(
             keywords=keywords,
             brief_id=brief_id or source_url,
             is_special_edition=is_special_edition,
+            check_completeness_gate=check_completeness_gate,
         )
         extra_tags = tuple(getattr(fields, "tags", ()))
         if is_special_edition and "special-edition" not in extra_tags:
@@ -193,6 +204,7 @@ def compose_scrape_article(
         first_coverage=first_coverage,
         prior_coverage_block=prior_coverage_block,
         admin_sources=admin_sources,
+        check_completeness_gate=check_completeness_gate,
     )
     return ArticleComposeResult(
         title=fields.title,

@@ -905,6 +905,12 @@ def _compose_or_error(
             first_coverage=first_coverage,
             prior_coverage_block=prior_coverage_block,
             is_special_edition=bool(payload.get("is_special_edition", False)),
+            # This is the sole fresh, zero-prior-vetting compose path (see
+            # _fresh_auto_approve_passes' own docstring) -- the only call
+            # site of compose_scrape_article that sets this True. Every
+            # recompose call site (_recompose_via_writer,
+            # _recompose_published_compose) leaves it at its False default.
+            check_completeness_gate=True,
         )
         return composed, None
     except ComposeBusyError:

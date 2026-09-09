@@ -2266,11 +2266,67 @@ def _broken_link_claim_gate_issues(body: str, trace: list[dict]) -> list[str]:
         return []
 
 
+def _completeness_gate_issues(
+    title: str, body: str, trace: list[dict], *, enabled: bool = False
+) -> list[str]:
+    """Completeness feedback: a mandatory due-diligence tool call (sanctions/PEP screen, corporate registry) the source material calls for but the trace never made is fed back so the writer — which has tool access during revision — can call it here, before the post-hoc gate holds the whole draft for a human (root-caused 2026-09-09: `_fresh_auto_approve_passes` already correctly blocks auto-approve and diverts to review on a completeness failure, but nothing ever fed that finding back to the writer; a held draft just sat there unfixed).
+
+    ``enabled`` (the caller's own `check_completeness_gate`) must be True for
+    this to run at all — only FRESH content sets it True; recompose
+    deliberately excludes completeness entirely (owner-confirmed 2026-07-12:
+    it fires on ~every Tier-2 source, decoupled from actual quality).
+    ``check_completeness`` does substring matching on the trace, so a tool
+    call that itself errors (e.g. no API key configured) still satisfies the
+    rule once made — this is a "was due diligence attempted" check, not a
+    "did it succeed" check, same as every other completeness rule.
+    """
+    from app.core.config import COMPLETENESS_REVISION_ENABLED
+
+    if not enabled or not COMPLETENESS_REVISION_ENABLED:
+        return []
+    try:
+        from app.modules.gatekeeper.completeness import (
+            check_completeness,
+            named_persons_unscreened,
+        )
+
+        article_text = f"{title}\n{body}"
+        trace_str = json.dumps(trace or [])
+        comp = check_completeness(article_text, trace_str)
+        if comp.passed:
+            return []
+        issues: list[str] = []
+        for rule_name in comp.failed_rules:
+            if rule_name == "human_identity":
+                unscreened = named_persons_unscreened(article_text, trace_str)
+                who = f" for: {', '.join(unscreened)}" if unscreened else ""
+                issues.append(
+                    "missing due-diligence check: the piece names a founder/CEO/"
+                    "president/chairman but never called the sanctions/PEP "
+                    f"screening tool{who} — call screen_sanctions_and_pep now, "
+                    "before this can be published."
+                )
+            elif rule_name == "company_backing":
+                issues.append(
+                    "missing due-diligence check: the piece names an incorporated "
+                    "company (Inc./LLC/Ltd./GmbH/a registered company) but never "
+                    "called the corporate-registry lookup tool — call "
+                    "query_corporate_registry now, before this can be published."
+                )
+            else:
+                issues.append(f"missing mandatory check: {comp.detail.get(rule_name, rule_name)}")
+        return issues
+    except Exception:
+        logger.warning("completeness gate check failed during revision", exc_info=True)
+        return []
+
+
 def _collect_fixable_issues(
     review: dict,
     quality: dict,
     *,
     needs_revision: bool,
+    title: str,
     body: str,
     trace: list[dict],
     gen_user: str,
@@ -2279,8 +2335,14 @@ def _collect_fixable_issues(
     link_check_cache: dict,
     chain_check_cache: dict,
     factcheck: dict | None = None,
+    check_completeness_gate: bool = False,
 ) -> list[str]:
-    """Gather every revision-worthy issue across the schema check, quality rubric, the factcheck audit, and the four deterministic gates, stashing each gate's own findings onto `review` for the trace/telemetry record."""
+    """Gather every revision-worthy issue across the schema check, quality rubric, the factcheck audit, and the deterministic gates, stashing each gate's own findings onto `review` for the trace/telemetry record.
+
+    ``check_completeness_gate`` (2026-09-09): opt-in, set only for fresh
+    content (see `_run_grade_revise_loop`'s own docstring) — the completeness
+    gate deliberately does not run for recompose.
+    """
     from app.modules.newspaper.article_quality_llm import factcheck_forcing_issues, factcheck_issues
 
     issues = list(review.get("issues") or [])
@@ -2324,9 +2386,19 @@ def _collect_fixable_issues(
     stale_deadline_fixable = _stale_deadline_gate_issues(body)
     if stale_deadline_fixable:
         review["stale_deadlines"] = stale_deadline_fixable
+    completeness_fixable = _completeness_gate_issues(
+        title, body, trace, enabled=check_completeness_gate
+    )
+    if completeness_fixable:
+        review["completeness_gap"] = completeness_fixable
 
     return (
         factual_fixable
+        # completeness_fixable placed right after factual_fixable, same
+        # reasoning as that list's own comment above: a mandatory
+        # due-diligence gap must survive _build_revision_prompt's
+        # fixable[:10] truncation, not get crowded out by lower-stakes issues.
+        + completeness_fixable
         + schema_fixable
         + quality_fixable
         + link_fixable
@@ -2697,8 +2769,13 @@ def _run_grade_revise_loop(
     revision_tool_schemas: list[dict] | None,
     revision_tool_handlers: dict | None,
     checkpoint: Callable[..., None] | None = None,
+    check_completeness_gate: bool = False,
 ) -> dict:
     """The grade -> (maybe revise) -> re-grade loop itself, factored out of _review_and_revise (which just builds quality_llm, runs this, and merges quality_llm's usage) so that caller stays under the 150-line budget -- see _review_and_revise's own docstring for the algorithm this implements unchanged.
+
+    ``check_completeness_gate`` (2026-09-09): opt-in, forwarded to
+    `_collect_fixable_issues` -- see that function's own docstring. Only set
+    True for fresh content; recompose deliberately excludes completeness.
 
     ``checkpoint``, when given, is called with status="writing" once per
     grade/revise pass (plus once per round of the revision tool loop itself,
@@ -2786,6 +2863,7 @@ def _run_grade_revise_loop(
             review,
             quality,
             needs_revision=needs_revision,
+            title=title,
             body=body,
             trace=trace,
             gen_user=gen_user,
@@ -2794,6 +2872,7 @@ def _run_grade_revise_loop(
             link_check_cache=link_check_cache,
             chain_check_cache=chain_check_cache,
             factcheck=factcheck,
+            check_completeness_gate=check_completeness_gate,
         )
 
         score = _draft_score(review, needs_revision=needs_revision)
@@ -2899,8 +2978,12 @@ def _review_and_revise(
     revision_tool_handlers: dict | None = None,
     extra_usage: dict[str, int] | None = None,
     checkpoint: Callable[..., None] | None = None,
+    check_completeness_gate: bool = False,
 ) -> dict:
     """Stage 3+4 of two-stage compose: grade the draft, then revise if weak.
+
+    ``check_completeness_gate`` (2026-09-09): forwarded to
+    `_run_grade_revise_loop` -- opt-in, only set True for fresh content.
 
     The warm generation pass runs with NO tools, so the model cannot call
     review_draft itself — we run the heuristic grader deterministically here and,
@@ -2958,6 +3041,7 @@ def _review_and_revise(
             revision_tool_schemas=revision_tool_schemas,
             revision_tool_handlers=revision_tool_handlers,
             checkpoint=checkpoint,
+            check_completeness_gate=check_completeness_gate,
         )
     finally:
         # Cumulative across every pass the loop ran (including the final
@@ -3395,8 +3479,18 @@ def compose_scrape_article(
     client: LLMProvider | None = None,
     research_client: LLMProvider | None = None,
     session_register: SessionRegister | None = None,
+    check_completeness_gate: bool = False,
 ) -> LLMArticleFields:
     """Generate newspaper article fields from scrape context via the writer's research -> compose -> grade/revise loop.
+
+    ``check_completeness_gate`` (2026-09-09): set True only by callers
+    composing genuinely fresh, zero-prior-vetting content -- feeds the
+    gatekeeper completeness rules (human_identity/company_backing) into the
+    in-loop revision pass so a missing due-diligence tool call gets one
+    chance at self-correction before the post-hoc hold. Never set True for a
+    recompose call site -- completeness is deliberately excluded there (see
+    `_grade_and_gate`'s docstring in publish_tasks.py, owner-confirmed
+    2026-07-12).
 
     ``admin_sources`` (2026-09-02, owner-supplied article sources -- see
     docs/newspaper-article-sources-design.md): owner-attached evidence for
@@ -3534,6 +3628,7 @@ Source material (may be days or years old — judge figures against today's date
         research_client=research_client,
         session_register=session_register,
         admin_sources=admin_sources,
+        check_completeness_gate=check_completeness_gate,
     )
 
 
@@ -3562,6 +3657,7 @@ def _compose_via_writer_tools(
     research_client: LLMProvider | None = None,
     session_register: SessionRegister | None = None,
     admin_sources: list[AdminSource] | None = None,
+    check_completeness_gate: bool = False,
 ) -> LLMArticleFields:
     """Shared research -> write -> grade/revise loop behind every writer-tools compose path. Only depends on the system/user prompt pair and a label (``source_url``) used for tool scoping and session/investigation bookkeeping — it doesn't assume the source material was a real scraped page, so callers can feed it a from-scratch topic assignment just as well as a scrape diff.
 
@@ -3575,6 +3671,10 @@ def _compose_via_writer_tools(
     of the prompt's own depth instructions.
 
     ``research_client``/``session_register``/``admin_sources``: see compose_scrape_article's docstring.
+
+    ``check_completeness_gate`` (2026-09-09): forwarded to the grade/revise
+    loop -- opt-in, only set True by callers composing genuinely fresh
+    content (see compose_scrape_article/compose_assignment_article).
     """
     from app.modules.newspaper.compose_lock import compose_lock
 
@@ -3589,6 +3689,7 @@ def _compose_via_writer_tools(
             research_client=research_client,
             session_register=session_register,
             admin_sources=admin_sources,
+            check_completeness_gate=check_completeness_gate,
         )
 
 
@@ -4054,6 +4155,7 @@ def _run_two_stage_compose(
     max_rounds: int | None = None,
     is_special_edition: bool = False,
     extra_usage: dict[str, int] | None = None,
+    check_completeness_gate: bool = False,
 ) -> dict:
     """Two-stage compose: cold research (tools, low temp) on the Small research tier, a floor + gap-fill pass if it under-researched, a structured digest handoff, then a warm no-tools generation on the writer tier, and finally deterministic grade/revise.
 
@@ -4062,6 +4164,9 @@ def _run_two_stage_compose(
     re-synthesis, special-edition enumeration/outline, and the grade/revise
     loop's rubric grading) -- none of that reuses research_llm/llm, so
     nothing else accounts for it (2026-08-28 audit; see _merge_usage).
+
+    ``check_completeness_gate`` (2026-09-09): forwarded to
+    `_review_and_revise` -- opt-in, only set True for fresh content.
     """
     from app.core.config import LLM_TEMP_WRITE
 
@@ -4187,6 +4292,7 @@ def _run_two_stage_compose(
         revision_tool_handlers=research_handlers,
         extra_usage=extra_usage,
         checkpoint=checkpoint,
+        check_completeness_gate=check_completeness_gate,
     )
 
 
@@ -4370,6 +4476,7 @@ def _compose_via_writer_tools_locked(
     research_client: LLMProvider | None = None,
     session_register: SessionRegister | None = None,
     admin_sources: list[AdminSource] | None = None,
+    check_completeness_gate: bool = False,
 ) -> LLMArticleFields:
     from app.core.config import WRITER_TOOLS_ENABLED
 
@@ -4519,6 +4626,7 @@ def _compose_via_writer_tools_locked(
                     max_rounds=research_max_rounds,
                     is_special_edition=is_special_edition,
                     extra_usage=_extra_usage,
+                    check_completeness_gate=check_completeness_gate,
                 )
             else:
                 # Legacy single agentic loop: tools + final article in one pass.
@@ -4703,8 +4811,13 @@ def compose_assignment_article(
     brief_id: str,
     is_special_edition: bool = False,
     client: MistralProvider | None = None,
+    check_completeness_gate: bool = False,
 ) -> LLMArticleFields:
-    """Generate a from-scratch article for an editor-assigned topic (no scraped source page). Unlike ``compose_scrape_article``, the brief text is NOT verified fact — the model must substantiate the topic itself via tools before writing, using the same research -> write -> grade/revise loop. ``is_special_edition`` requests a longer, multi-angle in-depth treatment instead of the standard length-scaled-to-substance pass."""
+    """Generate a from-scratch article for an editor-assigned topic (no scraped source page). Unlike ``compose_scrape_article``, the brief text is NOT verified fact — the model must substantiate the topic itself via tools before writing, using the same research -> write -> grade/revise loop. ``is_special_edition`` requests a longer, multi-angle in-depth treatment instead of the standard length-scaled-to-substance pass.
+
+    ``check_completeness_gate`` (2026-09-09): see compose_scrape_article's
+    own docstring -- same opt-in, forwarded unchanged.
+    """
     llm = client or get_llm_writer_client()
     today = _today_utc()
 
@@ -4734,6 +4847,7 @@ verifiable facts before writing.{_SPECIAL_EDITION_DEPTH_INSTRUCTIONS if is_speci
         llm=llm,
         topic="editorial_assignment",
         is_special_edition=is_special_edition,
+        check_completeness_gate=check_completeness_gate,
     )
 
 

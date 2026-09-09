@@ -1078,6 +1078,19 @@ STALE_DEADLINE_GATE_ENABLED = env_bool("STALE_DEADLINE_GATE_ENABLED", True)
 # link clicked" — so it needs a real precision read on live traffic first.
 BROKEN_LINK_CLAIM_GATE_ENABLED = env_bool("BROKEN_LINK_CLAIM_GATE_ENABLED", True)
 BROKEN_LINK_CLAIM_GATE_ENFORCE = env_bool("BROKEN_LINK_CLAIM_GATE_ENFORCE", False)
+# Root-caused 2026-09-09: the gatekeeper completeness rules (human_identity,
+# company_backing -- see gatekeeper/completeness.py) already correctly block
+# _fresh_auto_approve_passes and divert fresh content to human review when a
+# mandatory due-diligence tool call is missing, but nothing ever fed that
+# finding back to the writer -- a held draft just sat there, unfixed, forever
+# (completeness.py's own module docstring describes a loop-back to research
+# that was never actually implemented). This lets ONE revision pass see the
+# specific missing tool call before the post-hoc hold, the same in-loop
+# self-correction pattern unsourced_specifics/broken_link_claim already use.
+# Fresh content only (see _completeness_gate_issues' callers) -- recompose
+# deliberately excludes completeness entirely (owner-confirmed 2026-07-12),
+# and this must not reintroduce that noise.
+COMPLETENESS_REVISION_ENABLED = env_bool("COMPLETENESS_REVISION_ENABLED", True)
 # Root-caused 2026-08-04 (vestige.fi): build_text_diff's 200-line cap silently
 # dropped 1,573 of 1,773 real diff lines (89%) before the writer ever saw
 # them -- two new asset-manager pages, mostly repetitive label/value
