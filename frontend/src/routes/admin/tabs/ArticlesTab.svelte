@@ -2,6 +2,7 @@
   import type { AdminApi } from '../../../lib/api/admin'
   import { newsApi } from '../../../lib/api/news'
   import AnnotatedMarkdown from '../../../components/AnnotatedMarkdown.svelte'
+  import ArticleSourcesPanel from '../../../components/ArticleSourcesPanel.svelte'
   import { diffLines, toLines, type DiffOp } from '../../../lib/diff'
   import type { CommentItem } from '../../../lib/api/sharing'
 
@@ -618,6 +619,10 @@
               {saving ? 'Saving…' : 'Save'}
             </button>
           </div>
+
+          {#if selectedId}
+            <ArticleSourcesPanel {admin} articleId={selectedId} />
+          {/if}
         {:else}
           <div class="empty-editor">
             <p class="muted">Pick an article on the left to edit it.</p>

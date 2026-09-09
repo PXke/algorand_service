@@ -807,6 +807,32 @@ class AdminCassandraStore:
         # candidate now instead of waiting for the next scheduled drain.
         self._trigger_compose_next()
 
+    def move_review_to_draft(self, review_id: str) -> dict[str, str] | None:
+        """Resolve an on_hold review by parking its article in draft instead of approving or rejecting it -- e.g. the admin wants to reach out to the subject with questions before this goes live, rather than publish it or discard the research. Reuses set_article_draft (no status check there -- see its own docstring, an on_hold article's status flips straight to 'draft', never through 'published') and _complete_classifier_review the same way approve/reject resolves the review slot, so the queue and _trigger_compose_next() behave identically to those two paths; the only difference is which status the article lands in. Returns {"article_id": ...} on success, None if the review or its linked article can't be resolved."""
+        from uuid import UUID
+
+        from app.core.cassandra import get_cassandra_session
+        from app.core.statements import ClassifierReviewStmts
+
+        try:
+            rid = UUID(review_id)
+        except ValueError:
+            return None
+        session = get_cassandra_session()
+        row = session.execute(ClassifierReviewStmts.GET_METADATA, (rid,)).one()
+        if row is None:
+            return None
+        meta = dict(row.metadata or {})
+        _parsed, article_id, _confidence, _grade, _grade_detail = self._parse_review_raw_json(meta)
+        if not article_id:
+            return None
+        updated = self.set_article_draft(article_id, True)
+        if updated is None:
+            return None
+        self._complete_classifier_review(review_id, resolution="drafted")
+        self._trigger_compose_next()
+        return {"article_id": article_id}
+
     # Multi-label public suffixes where eTLD+1 needs three labels (foo.co.uk).
     # Mirrors workers' domain_tracker._MULTI_LABEL_SUFFIXES — keep in sync.
     _MULTI_LABEL_SUFFIXES = frozenset(

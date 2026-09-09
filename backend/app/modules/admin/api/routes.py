@@ -1760,6 +1760,26 @@ def admin_recompose_review(request: Request) -> Response:
     return {"triggered": True, "review_id": review_id}
 
 
+def admin_move_review_to_draft(request: Request) -> Response:
+    """Park an on-hold review's article in draft instead of approving or rejecting it -- e.g. the admin wants to reach out to the subject with questions before this goes live. Resolves the review slot the same way approve/reject does (queued next candidate included); the article lands in draft, never published."""
+    denied = require_admin_wallet(request)
+    if denied is not None:
+        return denied
+    try:
+        body = serialization.loads(request.body or "{}")
+    except Exception:
+        body = {}
+    review_id = str(body.get("review_id", "")).strip()
+    if not review_id:
+        return json_error_response(400, "invalid_request", "review_id is required")
+    result = store.move_review_to_draft(review_id)
+    if result is None:
+        return json_error_response(
+            404, "not_found", "Review or its linked article could not be resolved"
+        )
+    return result
+
+
 def admin_backfill_translations(request: Request) -> Response:
     """Queue missing article translations (fa/ps/ru/…) for feed-visible stories."""
     denied = require_admin_wallet(request)
@@ -2208,6 +2228,7 @@ def register_admin_routes(app: Router) -> None:
     app.get("/api/v1/admin/health-checks/:name")(admin_health_check)
     app.post("/api/v1/admin/articles/reset")(admin_reset_articles)
     app.post("/api/v1/admin/classifier-reviews/clear")(admin_clear_classifier_reviews)
+    app.post("/api/v1/admin/classifier-reviews/move-to-draft")(admin_move_review_to_draft)
     app.get("/api/v1/admin/domains")(admin_list_domains)
     app.get("/api/v1/admin/tool-suggestions")(admin_list_tool_suggestions)
     app.get("/api/v1/admin/compose-feedback")(admin_list_compose_feedback)

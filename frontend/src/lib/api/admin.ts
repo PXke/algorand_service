@@ -107,6 +107,10 @@ export function createAdminApi(wallet: string, token: string | null) {
       api.getJson(`/api/v1/admin/articles/${id}/versions/${version}`, h()),
     recomposeReview: (body: { review_id: string }) =>
       api.postJson('/api/v1/admin/classifier-reviews/recompose', body, h()),
+    // Park an on-hold review's article in draft instead of approving or
+    // rejecting it (e.g. reach out to the subject with questions first).
+    moveReviewToDraft: (body: { review_id: string }) =>
+      api.postJson('/api/v1/admin/classifier-reviews/move-to-draft', body, h()),
     investigationFindings: (url: string) =>
       api.getJson(
         `/api/v1/admin/investigations?url=${encodeURIComponent(url)}`,
