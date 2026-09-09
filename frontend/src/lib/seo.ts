@@ -55,6 +55,20 @@ export function articleCanonicalPath(
   return base
 }
 
+/**
+ * A token-gated /shared/:token preview has no further reason to exist once
+ * the article it was minted for is public -- returns the canonical URL a
+ * reader following a stale share link should be redirected to, or `null`
+ * when the article is still a draft (stay on the preview view).
+ */
+export function sharedArticleRedirectPath(
+  isDraft: boolean,
+  article: { article_id: string; slug?: string | null },
+): string | null {
+  if (isDraft) return null
+  return articleCanonicalPath(article.article_id, null, article.slug)
+}
+
 /** Open Graph locale tags (underscore form). */
 export function ogLocaleFor(lang: string): string {
   const map: Record<string, string> = {

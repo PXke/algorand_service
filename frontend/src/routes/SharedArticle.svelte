@@ -3,6 +3,8 @@
   import { ApiException } from '../lib/api/client'
   import AnnotatedMarkdown from '../components/AnnotatedMarkdown.svelte'
   import type { TextQuoteAnchor } from '../lib/textHighlight'
+  import { navigate } from '../lib/router'
+  import { sharedArticleRedirectPath } from '../lib/seo'
 
   let { token }: { token: string } = $props()
 
@@ -34,6 +36,15 @@
           sharingApi.listSharedComments(t),
         ])
         if (cancelled) return
+        const redirectTo = sharedArticleRedirectPath(
+          articleResp.is_draft,
+          articleResp.article as { article_id: string; slug?: string | null },
+        )
+        if (redirectTo) {
+          // replace (not push) so the /shared link never lands in browser history.
+          navigate(redirectTo, true)
+          return
+        }
         article = articleResp.article
         isDraft = articleResp.is_draft
         linkLabel = articleResp.link_label
