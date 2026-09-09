@@ -182,6 +182,30 @@ def test_partial_rubric_recovered_by_retry_is_not_flagged(monkeypatch: pytest.Mo
     assert not quality_needs_revision(result, min_score=3)
 
 
+def test_grade_article_quality_llm_covers_a_long_body_past_the_old_12k_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Root-caused 2026-09-09 (Fable review, grounded in a real 17,255-char AlgoChess draft): the rubric used to truncate at 12,000 chars, cutting off before a long article's last few sections entirely -- it was grading roughly the first 70% of a long piece and never seeing the rest. A body past the old cap must still reach the LLM call in full (up to the new, much larger cap)."""
+    seen: dict[str, str] = {}
+
+    class _CapturingClient:
+        def chat_json_object(self, messages: list[dict], *_a: object, **_kw: object) -> dict:
+            seen["user_content"] = messages[-1]["content"]
+            return {
+                "narrative_synthesis": 4,
+                "technical_depth": 4,
+                "critical_distance": 4,
+                "repetition": 4,
+                "issues": [],
+            }
+
+    long_body = ("Real prose about the story. " * 500) + "THE TAIL MARKER AT THE VERY END"
+    assert len(long_body) > 12000  # exceeds the old cap
+    monkeypatch.setattr("app.core.config.WRITER_QUALITY_LLM_ENABLED", True, raising=False)
+    grade_article_quality_llm(title="T", body=long_body, client=_CapturingClient())
+    assert "THE TAIL MARKER AT THE VERY END" in seen["user_content"]
+
+
 def test_grade_failure_falls_back_to_revision_trigger(monkeypatch: pytest.MonkeyPatch) -> None:
     """Fails closed to a low-scoring "llm_rubric_error" result that still forces revision when the LLM call itself raises."""
 

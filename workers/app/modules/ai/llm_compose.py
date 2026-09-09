@@ -1157,7 +1157,20 @@ _NARRATIVE_GUIDANCE = (
     "plausible-sounding value for a field the section doesn't mention "
     "(root-caused 2026-09-09: a settlement transaction's note field was written "
     "up as carrying two players' before/after ratings that no lookup in that "
-    "pass ever actually found)."
+    "pass ever actually found).\n"
+    "THE SCENE INCLUDES THE PRODUCT ITSELF: per Open Like A Story above, for a "
+    "story about a product, app, or game a reader could actually use, 'setting "
+    "the scene' means establishing what it actually IS and what using it looks "
+    "like — not just its on-chain/contract mechanics. If your research surfaced "
+    "real material describing the actual experience (a gameplay or interface "
+    "page, a described flow, what a screen shows), that belongs early, woven "
+    "into the scene-setting — not held back for a late 'how to get started' "
+    "section after the verification work is already done. On-chain/contract "
+    "forensics establish whether the product's promises are real; they are not "
+    "a substitute for saying what the product is (flagged 2026-09-09: a "
+    "chess-for-ALGO piece covered escrow-contract internals in exhaustive "
+    "detail and only described what playing the game actually looks like in a "
+    "single late section, framed purely as onboarding, seven sections in)."
 )
 
 

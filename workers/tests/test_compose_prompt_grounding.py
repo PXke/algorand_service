@@ -720,3 +720,20 @@ def test_narrative_guidance_pins_on_chain_records_are_exhaustive() -> None:
     assert "ON-CHAIN RECORDS ARE EXHAUSTIVE" in mc._NARRATIVE_GUIDANCE
     assert "### ON-CHAIN RECORDS VERIFIED" in mc._NARRATIVE_GUIDANCE
     assert "never fetched and does not exist" in mc._NARRATIVE_GUIDANCE
+
+
+def test_narrative_guidance_pins_the_scene_includes_the_product_itself() -> None:
+    """Root-cause regression (2026-09-09): a recomposed AlgoChess piece ran ~2,500 words of escrow-contract/on-chain forensics and only described what playing the game actually looks like in one late section framed as onboarding -- operator's own words, "it doesn't even talk about chess... We're focusing too much on the technical aspect". This rule must be the genuinely LAST paragraph in _NARRATIVE_GUIDANCE (appended after ON-CHAIN RECORDS ARE EXHAUSTIVE, not inserted mid-list), since that's the text closest to 'Write it now.' -- design-reviewed before shipping (two rounds) for exactly this placement claim, and for not fighting the existing 'Open Like A Story' lede rule."""
+    assert "THE SCENE INCLUDES THE PRODUCT ITSELF" in mc._NARRATIVE_GUIDANCE
+    assert "Open Like A Story" in mc._NARRATIVE_GUIDANCE
+    assert "not a substitute for saying what the product is" in mc._NARRATIVE_GUIDANCE
+    # Must be the LAST paragraph -- appended after, not before, ON-CHAIN
+    # RECORDS ARE EXHAUSTIVE (which was itself the last paragraph before this).
+    assert mc._NARRATIVE_GUIDANCE.index(
+        "THE SCENE INCLUDES THE PRODUCT ITSELF"
+    ) > mc._NARRATIVE_GUIDANCE.index("ON-CHAIN RECORDS ARE EXHAUSTIVE")
+    # Must not tell the writer to place it "before" the on-chain forensics --
+    # that fights Open Like A Story's own scene-setting framing (2026-09-09
+    # design review: an earlier draft of this rule said exactly that and was
+    # corrected before shipping).
+    assert "before any on-chain" not in mc._NARRATIVE_GUIDANCE

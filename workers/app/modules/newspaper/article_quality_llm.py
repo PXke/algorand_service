@@ -172,7 +172,14 @@ def grade_article_quality_llm(
             "issues": ["empty body"],
         }
     llm: MistralProvider = client or get_llm_digest_client()
-    snippet = text_body[:12000]
+    # Root-caused 2026-09-09 (Fable review, grounded in a real 17,255-char
+    # AlgoChess draft): the old 12,000-char cap cut off before the piece's
+    # last three sections -- the rubric was grading roughly the first 70% of
+    # a long article and never seeing the rest at all. 40,000 chars covers
+    # any realistic article body (LLM_MAX_SOURCE_CHARS, the writer's own
+    # source-material cap, is 48,000) with a comfortable margin, while still
+    # bounding token cost far below sending the full raw digest.
+    snippet = text_body[:40000]
     try:
         from app.core.config import LLM_TEMP_RESEARCH
 
