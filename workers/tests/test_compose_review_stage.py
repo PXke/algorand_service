@@ -129,11 +129,11 @@ def test_checkpoint_fires_once_per_grade_revise_pass(monkeypatch: pytest.MonkeyP
     )
 
     # One checkpoint for the initial grade, one for the single revision pass
-    # that follows (WRITER_REVISION_MAX_PASSES defaults to 2) -- each labeled
+    # that follows (WRITER_REVISION_MAX_PASSES defaults to 3) -- each labeled
     # so an admin reading final_output mid-compose can tell them apart.
     assert checkpoints == [
         ("writing", "grading initial draft"),
-        ("writing", "grade/revise pass 1 of 2"),
+        ("writing", "grade/revise pass 1 of 3"),
     ]
 
 
@@ -506,10 +506,10 @@ def test_low_repetition_score_triggers_revision_with_cut_instruction(
 
 
 def test_low_quality_llm_triggers_revision(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Spends both available revision passes and returns the last draft when quality-LLM score never clears the bar."""
-    # Quality mock never improves — with WRITER_REVISION_MAX_PASSES=2 (default)
-    # this should genuinely attempt a SECOND revision instead of giving up
-    # after one, then stop once the revision budget is spent.
+    """Spends all available revision passes and returns the last draft when quality-LLM score never clears the bar."""
+    # Quality mock never improves — with WRITER_REVISION_MAX_PASSES=3 (default)
+    # this should genuinely attempt a SECOND and THIRD revision instead of
+    # giving up after one, then stop once the revision budget is spent.
     monkeypatch.setattr(
         "app.modules.newspaper.article_grader.grade_article_draft",
         lambda **_kw: {"grade": 10.0, "issues": []},
@@ -533,10 +533,10 @@ def test_low_quality_llm_triggers_revision(monkeypatch: pytest.MonkeyPatch) -> N
         trace=trace,
     )
 
-    assert fake.calls == 2  # spent both revision passes since quality never clears
+    assert fake.calls == 3  # spent all revision passes since quality never clears
     assert out["body"] == "deeper revised body with more detail"
     reviews = [e for e in trace if e["tool"] == "review_draft"]
-    assert len(reviews) == 3  # initial grade + 2 rechecks
+    assert len(reviews) == 4  # initial grade + 3 rechecks
 
 
 def test_factual_wrong_claim_forces_narrow_revision_when_style_passes(

@@ -790,9 +790,18 @@ LLM_TEMP_WRITE = env_float("MISTRAL_TEMP_WRITE", 0.6)
 # a pass that comes back clean stops early (2026-07-13: raised 1 -> 2 after a real
 # critical_distance regression on the one allowed pass went unfixed; each extra
 # pass costs one more Mistral revision call + one more grading call, only spent
-# when a draft is still flagged).
+# when a draft is still flagged; 2026-09-10: raised 2 -> 3 after the Derova
+# mempool piece's own revision history showed why -- round 1 flagged a real
+# wrong fee-mechanics claim, round 2's fix attempt introduced two NEW wrong
+# claims about the same topic (grade dropped 7.3 -> 6.5), and round 3 finally
+# landed an accurate explanation (verified independently against Algorand's
+# own docs) but had no budget left to survive a grader false-positive on that
+# same claim. Full-document regeneration each pass means a fix attempt can
+# genuinely make things worse before it gets better -- a third pass is cheap
+# insurance for exactly that non-monotonic pattern, not a guaranteed fix (see
+# the paragraph-level/targeted-revision follow-up for the actual root cause).
 WRITER_REVIEW_ENABLED = env_bool("WRITER_REVIEW_ENABLED", True)
-WRITER_REVISION_MAX_PASSES = env_int("WRITER_REVISION_MAX_PASSES", 2)
+WRITER_REVISION_MAX_PASSES = env_int("WRITER_REVISION_MAX_PASSES", 3)
 # 2026-08-11 (owner request): the revision call used to be a plain no-tools
 # chat_json_object -- it could only reorganize/reword facts already sitting
 # in the research digest, even when a rubric/gate issue is exactly the kind
