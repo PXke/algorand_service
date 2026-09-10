@@ -26,9 +26,7 @@ def _epoch(value: datetime | None) -> int:
 
     The Cassandra driver returns timezone-naive datetimes that are already
     UTC wall-clock values -- calling .timestamp() directly would make Python
-    assume the server's LOCAL zone and silently shift the result (the exact
-    bug class root-caused 2026-09-03 in x402_social/stores/cassandra.py and
-    news/stores/cassandra.py before it).
+    assume the server's LOCAL zone and silently shift the result.
     """
     if value is None:
         return 0

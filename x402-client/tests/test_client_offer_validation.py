@@ -13,7 +13,6 @@ client ever builds or signs anything.
 from __future__ import annotations
 
 import pytest
-
 from pxke_x402 import PxkeClient
 from pxke_x402.exceptions import PxkeOfferValidationError
 
@@ -29,15 +28,15 @@ def test_a_valid_in_policy_offer_is_paid_normally() -> None:
     session = FakeSession(
         [
             FakeResponse(402, headers=_offer_headers()),
-            FakeResponse(200, {"pong": True, "settlement_tx_id": "TX1"}),
+            FakeResponse(200, {"items": [], "settlement_tx_id": "TX1"}),
         ]
     )
     fake_payment = FakePaymentHTTPClient()
     client = PxkeClient(session=session, http_client=fake_payment)
 
-    result = client.ping()
+    result = client.search_news("tinyman")
 
-    assert result == {"pong": True, "settlement_tx_id": "TX1"}
+    assert result == {"items": [], "settlement_tx_id": "TX1"}
     assert len(fake_payment.calls) == 1
 
 
@@ -48,7 +47,7 @@ def test_an_offer_paying_a_different_address_is_refused_before_signing() -> None
     client = PxkeClient(session=session, http_client=fake_payment)
 
     with pytest.raises(PxkeOfferValidationError) as excinfo:
-        client.ping()
+        client.search_news("tinyman")
 
     assert _ATTACKER_PAY_TO in str(excinfo.value)
     assert fake_payment.calls == []  # never even reached the payment client
@@ -62,7 +61,7 @@ def test_an_offer_over_the_amount_cap_is_refused_before_signing() -> None:
     client = PxkeClient(session=session, http_client=fake_payment)
 
     with pytest.raises(PxkeOfferValidationError) as excinfo:
-        client.ping()
+        client.search_news("tinyman")
 
     assert "50000000" in str(excinfo.value)
     assert fake_payment.calls == []
@@ -74,13 +73,13 @@ def test_an_offer_at_exactly_the_cap_is_accepted() -> None:
     session = FakeSession(
         [
             FakeResponse(402, headers=_offer_headers(amount="1000000")),
-            FakeResponse(200, {"pong": True, "settlement_tx_id": "TX1"}),
+            FakeResponse(200, {"items": [], "settlement_tx_id": "TX1"}),
         ]
     )
     fake_payment = FakePaymentHTTPClient()
     client = PxkeClient(session=session, http_client=fake_payment)
 
-    client.ping()
+    client.search_news("tinyman")
 
     assert len(fake_payment.calls) == 1
 
@@ -90,13 +89,13 @@ def test_expected_pay_to_none_disables_the_recipient_check() -> None:
     session = FakeSession(
         [
             FakeResponse(402, headers=_offer_headers(pay_to=_ATTACKER_PAY_TO)),
-            FakeResponse(200, {"pong": True, "settlement_tx_id": "TX1"}),
+            FakeResponse(200, {"items": [], "settlement_tx_id": "TX1"}),
         ]
     )
     fake_payment = FakePaymentHTTPClient()
     client = PxkeClient(session=session, http_client=fake_payment, expected_pay_to=None)
 
-    client.ping()
+    client.search_news("tinyman")
 
     assert len(fake_payment.calls) == 1
 
@@ -106,13 +105,13 @@ def test_max_payment_atomic_none_disables_the_amount_check() -> None:
     session = FakeSession(
         [
             FakeResponse(402, headers=_offer_headers(amount="999999999")),
-            FakeResponse(200, {"pong": True, "settlement_tx_id": "TX1"}),
+            FakeResponse(200, {"items": [], "settlement_tx_id": "TX1"}),
         ]
     )
     fake_payment = FakePaymentHTTPClient()
     client = PxkeClient(session=session, http_client=fake_payment, max_payment_atomic=None)
 
-    client.ping()
+    client.search_news("tinyman")
 
     assert len(fake_payment.calls) == 1
 
@@ -122,7 +121,7 @@ def test_a_custom_expected_pay_to_set_is_honored() -> None:
     session = FakeSession(
         [
             FakeResponse(402, headers=_offer_headers(pay_to=_ATTACKER_PAY_TO)),
-            FakeResponse(200, {"pong": True, "settlement_tx_id": "TX1"}),
+            FakeResponse(200, {"items": [], "settlement_tx_id": "TX1"}),
         ]
     )
     fake_payment = FakePaymentHTTPClient()
@@ -132,6 +131,6 @@ def test_a_custom_expected_pay_to_set_is_honored() -> None:
         expected_pay_to=[_REAL_PAY_TO, _ATTACKER_PAY_TO],
     )
 
-    client.ping()
+    client.search_news("tinyman")
 
     assert len(fake_payment.calls) == 1

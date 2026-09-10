@@ -33,54 +33,49 @@ _PARAM_RE = re.compile(r":([A-Za-z_][A-Za-z0-9_]*)")
 # Every store setting falcon_main.py gates a product on, plus the product key
 # the catalog files that product under.
 #
-# "storage" is a SECOND special case (see the "storage" Product's own
-# nonempty_string_setting="x402_storage_local_root" in services/catalog.py):
-# its registration needs BOTH this store durable AND a connector root
-# configured, so toggling x402_storage_meta_store alone (as
+# "storage" needs BOTH this store durable AND a connector root configured
+# (see the "storage" Product's own nonempty_string_setting in
+# services/catalog.py), so toggling x402_storage_meta_store alone (as
 # test_each_product_gate_matches_create_app below does for every entry in
-# this dict) is only correct here because _configure() below ALWAYS sets
-# x402_storage_local_root to a valid placeholder in its baseline (the same
-# "just make it valid, not a per-test toggle" treatment as
-# x402_pay_to_address/x402_network) -- test_storage_requires_both_meta_store_
-# and_local_root separately proves the second half of the AND actually
-# matters.
+# this dict) is only correct because _configure() below ALWAYS sets
+# x402_storage_local_root to a valid placeholder in its baseline --
+# test_storage_requires_both_meta_store_and_local_root separately proves the
+# second half of the AND actually matters.
 _STORE_GATES = {
-    "directory": "x402_directory_store",
-    "board": "x402_board_store",
-    "features": "x402_features_store",
-    "grading": "x402_grading_store",
     "news": "news_store",
-    "kya": "kyc_store",
-    "social": "x402_social_store",
     "storage": "x402_storage_meta_store",
 }
 
 _STORAGE_LOCAL_ROOT_PLACEHOLDER = "/tmp/x402-storage-catalog-test-root"
 
 # Same idea for a product gated on a plain boolean instead of a store setting
-# (Product.bool_setting) -- added 2026-09-01 after x402_scan shipped with a
-# falcon_main.py registration but no PRODUCTS entry, and this file's "enable
-# everything" helpers didn't know a bool-gated product existed either, so the
-# cross-check tests passed vacuously without ever exercising it.
+# (Product.bool_setting). This file's "enable everything" helpers must know
+# about every gate shape a product can use, or the cross-check tests pass
+# vacuously without ever exercising the gated routes.
 _BOOL_GATES = {
     "scan": "x402_scan_enabled",
-    "uptime": "x402_uptime_enabled",
 }
 
-# A THIRD gating shape, distinct from both dicts above: a bool setting that
-# gates individual ROUTES within an already-gated product (CatalogRoute.
-# extra_bool_setting), not a whole product (Product.bool_setting). Added
-# 2026-09-03 for x402_social's Phase S2 (community moderation) routes, which
-# sit inside the "social" product (x402_social_store, already in
-# _STORE_GATES above) but additionally require x402_social_moderation_enabled.
-# Not keyed by product -- flipping it doesn't add a new product key to the
-# catalog's product list, only more routes under the existing "social" key --
-# so it is reset/enabled by _configure/_all_gates_on like the dicts above but
-# deliberately left out of the product-set assertions that iterate
-# _STORE_GATES/_BOOL_GATES. Exact repeat of the same lesson: this file's
-# gate-enabling helpers must know about every gate shape a product can use,
-# or the cross-check tests pass vacuously without exercising the gated routes.
-_EXTRA_ROUTE_BOOL_GATES = {"x402_social_moderation_enabled"}
+# Routes the marketplace no longer has (owner decision 2026-09-10): every one
+# must 404 no matter which kept gates are on. One representative path per
+# removed product.
+_REMOVED_PATHS = (
+    "/api/v1/x402/list",
+    "/api/v1/x402/search",
+    "/api/v1/x402/directory/listings",
+    "/api/v1/x402/board",
+    "/api/v1/x402/features",
+    "/api/v1/x402/requests",
+    "/api/v1/x402/grades",
+    "/api/v1/x402/social/agents",
+    "/api/v1/x402/social/posts",
+    "/api/v1/x402/uptime/check",
+    "/api/v1/x402/uptime/checks",
+    "/api/v1/kyc/verify",
+    "/api/v1/kyc/enroll",
+    "/api/v1/x402/receipts/x",
+    "/api/v1/x402/ping",
+)
 
 
 class _FakeRedis:
@@ -136,8 +131,6 @@ def _configure(monkeypatch: pytest.MonkeyPatch, *, enabled: bool = True, **store
         monkeypatch.setattr(settings, setting, "memory")
     for setting in _BOOL_GATES.values():
         monkeypatch.setattr(settings, setting, False)
-    for setting in _EXTRA_ROUTE_BOOL_GATES:
-        monkeypatch.setattr(settings, setting, False)
     for setting, value in stores.items():
         monkeypatch.setattr(settings, setting, value)
 
@@ -148,7 +141,6 @@ def _all_gates_on(monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch,
         **dict.fromkeys(_STORE_GATES.values(), "cassandra"),
         **dict.fromkeys(_BOOL_GATES.values(), True),
-        **dict.fromkeys(_EXTRA_ROUTE_BOOL_GATES, True),
     )
 
 
@@ -193,14 +185,14 @@ def test_catalog_lists_only_products_whose_store_is_durable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A product backed by "memory" is not registered by create_app(), so it must not be advertised."""
-    _configure(monkeypatch, x402_board_store="cassandra", news_store="cassandra")
+    _configure(monkeypatch, news_store="cassandra")
     products = {route["product"] for route in _catalog_routes(monkeypatch)}
-    assert products == {"catalog", "board", "news"}
+    assert products == {"catalog", "news"}
 
 
 def test_catalog_is_empty_of_products_when_x402_is_off(monkeypatch: pytest.MonkeyPatch) -> None:
     """With x402 off, nothing is registered, so nothing is listed -- a durable store alone does not enable a product."""
-    _configure(monkeypatch, enabled=False, x402_board_store="cassandra")
+    _configure(monkeypatch, enabled=False, news_store="cassandra")
     assert catalog_service.enabled_products() == []
 
 
@@ -275,39 +267,6 @@ def test_storage_requires_both_meta_store_and_local_root(monkeypatch: pytest.Mon
     assert any(route["product"] == "storage" for route in _catalog_routes(monkeypatch))
 
 
-def test_social_moderation_routes_need_their_own_extra_gate_on_top_of_the_store_gate(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """S2 (extra_bool_setting=x402_social_moderation_enabled) is a second, route-level gate.
-
-    Layered on top of "social"'s own x402_social_store gate -- neither gate alone is enough.
-    """
-    social_routes = next(p for p in catalog_service.PRODUCTS if p.key == "social").routes
-    s2_paths = {r.path for r in social_routes if r.extra_bool_setting is not None}
-    assert s2_paths, "expected at least one S2 route with extra_bool_setting set"
-    s0_s1_paths = {r.path for r in social_routes if r.extra_bool_setting is None}
-    assert s0_s1_paths, "expected at least one S0/S1 route with no extra gate"
-
-    # Store gate on, moderation off: S0/S1 routes present, S2 routes absent from both
-    # the catalog and the real router.
-    _configure(monkeypatch, x402_social_store="cassandra")
-    app = create_app()
-    listed_paths = {route["path"] for route in _catalog_routes(monkeypatch)}
-    assert s0_s1_paths <= listed_paths
-    assert listed_paths.isdisjoint(s2_paths)
-    for route in social_routes:
-        registered = bool(_registered_methods(app, route.path))
-        assert registered == (route.path not in s2_paths), route.path
-
-    # Both gates on: S2 routes now present too.
-    _configure(monkeypatch, x402_social_store="cassandra", x402_social_moderation_enabled=True)
-    app = create_app()
-    listed_paths = {route["path"] for route in _catalog_routes(monkeypatch)}
-    assert s2_paths <= listed_paths
-    for route in social_routes:
-        assert _registered_methods(app, route.path), route.path
-
-
 # --------------------------------------------------------------------------- #
 # Roster vs route table
 # --------------------------------------------------------------------------- #
@@ -326,22 +285,56 @@ def test_every_listed_route_is_registered_when_everything_is_on(
 def test_every_registered_x402_route_is_listed(monkeypatch: pytest.MonkeyPatch) -> None:
     """The reverse direction: a paid/free product route added to a module without a roster entry fails here.
 
-    Walks the compiled router for every /api/v1/x402/* and /api/v1/kyc/*
-    template create_app() registered and demands a catalog entry per
-    (method, path). Admin routes are exempt by design.
+    Walks the compiled router for every /api/v1/x402/* template create_app()
+    registered and demands a catalog entry per (method, path). Admin routes
+    are exempt by design.
     """
     _all_gates_on(monkeypatch)
     app = create_app()
     listed = {(route["method"], route["path"]) for route in _catalog_routes(monkeypatch)}
     registered: set[tuple[str, str]] = set()
     for template, resource in _walk_router(app):
-        if not (template.startswith("/api/v1/x402") or template.startswith("/api/v1/kyc")):
+        if not template.startswith("/api/v1/x402"):
             continue
         if template.startswith("/api/v1/admin/"):
             continue
         for method in resource._methods:
             registered.add((method, re.sub(r"\{(\w+)\}", r":\1", template)))
     assert registered == listed
+
+
+def test_the_registered_route_set_is_exactly_the_kept_products_and_nothing_removed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With every kept gate on, create_app() registers exactly catalog + news + scan + storage (plus the two well-known bootstrap paths) -- and not one path of a removed product.
+
+    Owner decision 2026-09-10: the marketplace is catalog, news, scan and
+    storage. This pins the route table itself, so a removed product's
+    registration cannot quietly come back through a stray import.
+    """
+    _all_gates_on(monkeypatch)
+    app = create_app()
+    registered = {
+        template
+        for template, _resource in _walk_router(app)
+        if template.startswith("/api/v1/x402") or template.startswith("/api/v1/kyc")
+    }
+    non_admin = {t for t in registered if not t.startswith("/api/v1/admin/")}
+    expected = {
+        re.sub(r":(\w+)", r"{\1}", route.path)
+        for product in catalog_service.PRODUCTS
+        for route in product.routes
+    }
+    assert non_admin == expected
+    assert {p.key for p in catalog_service.PRODUCTS} == {"catalog", "news", "scan", "storage"}
+    assert [s.key for s in catalog_service.SECTIONS] == ["meta", "services"]
+
+    client = testing.TestClient(app)
+    for path in _REMOVED_PATHS:
+        assert client.simulate_get(path).status_code == 404, path
+        assert client.simulate_post(path).status_code == 404, path
+    assert client.simulate_get("/.well-known/x402").status_code == 200
+    assert client.simulate_get("/openapi.json").status_code == 200
 
 
 def _walk_router(app: falcon.App) -> list[tuple[str, Any]]:
@@ -363,17 +356,17 @@ def _walk_router(app: falcon.App) -> list[tuple[str, Any]]:
 # --------------------------------------------------------------------------- #
 def test_prices_come_from_settings(monkeypatch: pytest.MonkeyPatch) -> None:
     """Prices are read from settings at build time, never copied into the roster."""
-    _configure(monkeypatch, **dict.fromkeys(_STORE_GATES.values(), "cassandra"))
-    monkeypatch.setattr(settings, "x402_listing_price", "$1.23")
+    _all_gates_on(monkeypatch)
+    monkeypatch.setattr(settings, "x402_scan_price", "$1.23")
     monkeypatch.setattr(settings, "x402_news_search_price", "$0.07")
     by_key = {(r["method"], r["path"]): r for r in _catalog_routes(monkeypatch)}
-    assert by_key[("POST", "/api/v1/x402/list")]["price_usd"] == "$1.23"
+    assert by_key[("POST", "/api/v1/x402/scan/url")]["price_usd"] == "$1.23"
     assert by_key[("GET", "/api/v1/x402/news/search")]["price_usd"] == "$0.07"
     assert by_key[("GET", "/api/v1/x402/news/articles/:article_id")]["price_usd"] is None
     assert by_key[("GET", "/api/v1/x402/news/articles/:article_id")]["paid"] is False
-    assert by_key[("GET", "/api/v1/x402/search")]["price_usd"] is None
-    assert by_key[("GET", "/api/v1/x402/search")]["paid"] is False
-    assert by_key[("POST", "/api/v1/x402/list")]["paid"] is True
+    assert by_key[("GET", "/api/v1/x402/news")]["price_usd"] is None
+    assert by_key[("GET", "/api/v1/x402/news")]["paid"] is False
+    assert by_key[("POST", "/api/v1/x402/scan/url")]["paid"] is True
 
 
 def test_storage_paid_routes_advertise_price_per_kb(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -385,8 +378,8 @@ def test_storage_paid_routes_advertise_price_per_kb(monkeypatch: pytest.MonkeyPa
     assert create["price_usd"] == settings.x402_storage_price_per_kb_per_90d
     assert create["price_unit"] == "KB"
     assert renew["price_unit"] == "KB"
-    listing = by_key[("POST", "/api/v1/x402/list")]
-    assert listing["price_unit"] is None
+    scan = by_key[("POST", "/api/v1/x402/scan/url")]
+    assert scan["price_unit"] is None
 
 
 def test_storage_price_display_is_a_readable_per_mb_rate_not_the_raw_per_kb_float(
@@ -407,11 +400,11 @@ def test_storage_price_display_is_a_readable_per_mb_rate_not_the_raw_per_kb_floa
     assert create["price_usd"] == "$0.000001953125"
     assert create["price_display"] == "$0.002 / MB / 90 days"
     # A flat-priced route's price_display is just its already-human price_usd, echoed as-is.
-    listing = by_key[("POST", "/api/v1/x402/list")]
-    assert listing["price_display"] == listing["price_usd"]
+    scan = by_key[("POST", "/api/v1/x402/scan/url")]
+    assert scan["price_display"] == scan["price_usd"]
     # A free route has no price_display at all.
-    search = by_key[("GET", "/api/v1/x402/search")]
-    assert search["price_display"] is None
+    headlines = by_key[("GET", "/api/v1/x402/news")]
+    assert headlines["price_display"] is None
 
 
 def test_products_v2_fields_present_and_status_reflects_actual_gating(
@@ -419,28 +412,15 @@ def test_products_v2_fields_present_and_status_reflects_actual_gating(
 ) -> None:
     """Every products[] entry carries section/summary/status/entry/auth, status live-computed.
 
-    2026-09-07 v2 discovery document (docs/x402-marketplace-product-redesign.md section 3.4):
     status is computed from the SAME gate create_app() uses -- never a hand-set flag that
-    could drift.
-
-    With every store gate OFF except x402_scan/x402_uptime's bool gates and the catalog
-    itself (the closest config to today's live prod, where kya and receipts are genuinely
-    not registered -- see the 2026-09-07 UX audit's live-fetched fact table), kya and
-    receipts must be the only two products marked "gated"; every other product in the
-    roster is "live".
+    could drift. With every store gate on and scan's bool gate left OFF, scan must be the
+    only product marked "gated"; every other product in the roster is "live".
     """
     _configure(
         monkeypatch,
-        x402_directory_store="cassandra",
-        x402_board_store="cassandra",
-        x402_features_store="cassandra",
-        x402_grading_store="cassandra",
         news_store="cassandra",
-        x402_social_store="cassandra",
         x402_storage_meta_store="cassandra",
-        x402_scan_enabled=True,
-        x402_uptime_enabled=True,
-        # kyc_store and x402_receipts_store are left at _configure's "memory" baseline.
+        # x402_scan_enabled is left at _configure's False baseline.
     )
     doc = catalog_service.build_catalog()
     products_by_key = {p["key"]: p for p in doc["products"]}
@@ -458,13 +438,9 @@ def test_products_v2_fields_present_and_status_reflects_actual_gating(
         # entry must be one of this product's OWN routes, not a typo pointing elsewhere.
         own_paths = {(r.method, r.path) for r in roster_by_key[key].routes}
         assert (method, path) in own_paths, key
-    assert products_by_key["kya"]["status"] == "gated"
-    assert products_by_key["receipts"]["status"] == "gated"
+    assert products_by_key["scan"]["status"] == "gated"
     live_keys = {key for key, p in products_by_key.items() if p["status"] == "live"}
-    assert live_keys == {product.key for product in catalog_service.PRODUCTS} - {
-        "kya",
-        "receipts",
-    }
+    assert live_keys == {product.key for product in catalog_service.PRODUCTS} - {"scan"}
 
 
 def test_products_v2_gated_products_are_absent_from_routes_but_present_in_products(
@@ -486,14 +462,11 @@ def test_products_v2_gated_products_are_absent_from_routes_but_present_in_produc
 def test_sections_cover_every_product_and_categories_are_generated_not_hand_written(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`categories`/`description` are generated from which sections have a live product now.
-
-    2026-09-07 UX audit N14: the old hard-coded description/categories claimed KYA/
-    "identity" as live regardless of whether it was actually registered.
-    """
+    """`categories`/`description` are generated from which sections have a live product now, never hand-written."""
     _all_gates_on(monkeypatch)
     doc = catalog_service.build_catalog()
     section_keys = {s["key"] for s in doc["sections"]}
+    assert section_keys == {"meta", "services"}
     product_sections = {p["section"] for p in doc["products"]}
     assert product_sections <= section_keys
     assert doc["categories"], "categories must not be empty when every product is live"
@@ -505,7 +478,7 @@ def test_sections_cover_every_product_and_categories_are_generated_not_hand_writ
 def test_descriptions_resolve_setting_placeholders(monkeypatch: pytest.MonkeyPatch) -> None:
     """Published descriptions carry live values ("30 days"), never a raw setting name.
 
-    The roster writes `{x402_listing_term_days}`-style placeholders;
+    The roster writes `{x402_storage_term_days}`-style placeholders;
     _route_json must resolve every one from settings, so no document surface
     (catalog, /.well-known/x402, /openapi.json) ever shows an agent a config
     attribute name instead of the number it stands for. Rendering every
@@ -513,7 +486,7 @@ def test_descriptions_resolve_setting_placeholders(monkeypatch: pytest.MonkeyPat
     of raising in production.
     """
     _all_gates_on(monkeypatch)
-    monkeypatch.setattr(settings, "x402_listing_term_days", 30)
+    monkeypatch.setattr(settings, "x402_storage_term_days", 90)
     routes = _catalog_routes(monkeypatch)
     assert routes
     for route in routes:
@@ -522,8 +495,8 @@ def test_descriptions_resolve_setting_placeholders(monkeypatch: pytest.MonkeyPat
         assert "}" not in description, route["path"]
         assert not re.search(r"\bx402_[a-z0-9_]+\b", description), route["path"]
     by_key = {(r["method"], r["path"]): r for r in routes}
-    listing = by_key[("POST", "/api/v1/x402/list")]
-    assert "30 days" in listing["description"]
+    renew = by_key[("POST", "/api/v1/x402/storage/backups/:backup_id/renew")]
+    assert "90-day term" in renew["description"]
 
 
 def test_every_paid_route_has_a_real_price_setting_and_resource() -> None:
@@ -543,7 +516,7 @@ def test_owner_only_renew_routes_say_a_non_owner_payment_is_still_taken() -> Non
         for route in product.routes
         if route.path.endswith("/renew")
     ]
-    assert len(renew_routes) >= 2
+    assert len(renew_routes) >= 1
     for route in renew_routes:
         text = route.description.lower()
         assert "settles" in text, route.path
@@ -551,75 +524,17 @@ def test_owner_only_renew_routes_say_a_non_owner_payment_is_still_taken() -> Non
 
 
 _PROMO_UNWIRED_RESOURCES = {
-    # kyc-verify triggers a real payout to the looked-up wallet on a hit
-    # (services/payout_service.py) -- a promo bypass there would need its
-    # own review of what a $0-amount lookup does to that payout path, so it
-    # is deliberately left unwired rather than assumed safe by copying the
-    # same pattern as every other paid route.
-    "kyc-verify",
-    # Every x402_social paid write, REVERSED 2026-09-03: promo was wired,
-    # then deliberately removed the same day when a security review found
-    # PaymentResult.payer -- unproven under a promo bypass, per
-    # modules/x402/promo.py's own docstring -- is fed straight in as the
-    # ACTING IDENTITY on every one of these routes (register/post/comment/
-    # react/follow/group-create/group-join/report/case-vote). See
-    # x402_social/api/routes.py's own module docstring for the incident.
-    "x402-social-register",
-    "x402-social-post",
-    "x402-social-comment",
-    "x402-social-react",
-    "x402-social-follow",
-    "x402-social-group-create",
-    "x402-social-group-join",
-    "x402-social-report",
-    "x402-social-case-vote",
-    # Agent Discovery Search (added 2026-09-03): payer here is only payment
-    # attribution for a read, not an identity claim like the writes above --
-    # promo WOULD be fine in principle -- but this stays consistent with the
-    # rest of x402_social's current promo-off stance rather than an
-    # independent judgment call. Flagged in the shipping report as a
-    # candidate for `supports_promo=True` if this module's promo stance is
-    # ever revisited.
-    "x402-social-agent-search",
-    # Spend-weighted agent leaderboard (added 2026-09-06): same reasoning as
-    # Agent Discovery Search immediately above -- payer here is only payment
-    # attribution for a read, not an identity claim -- staying consistent
-    # with the rest of x402_social's current promo-off stance.
-    "x402-social-agent-leaderboard",
-    # x402_storage's two paid routes (backup create, renew): same reasoning
-    # as x402_social's reversal above -- PaymentResult.payer is fed straight
-    # in as the ROW'S OWNING WALLET (x402_storage_backups is partitioned by
-    # it), not just payment attribution. A promo bypass has no proven payer
-    # at all (modules/x402/promo.py's own docstring), which would make the
-    # backup's owner an unauthenticated caller-supplied identity with no
-    # wallet-control proof behind it -- exactly the gap the social reversal
-    # closed for the same reason.
+    # x402_storage's paid routes (backup create, renew, add-version):
+    # PaymentResult.payer is fed straight in as the ROW'S OWNING WALLET
+    # (x402_storage_backups is partitioned by it), not just payment
+    # attribution. A promo bypass has no proven payer at all
+    # (modules/x402/promo.py's own docstring), which would make the backup's
+    # owner an unauthenticated caller-supplied identity with no wallet-control
+    # proof behind it; add_version's and renew's ownership checks compare
+    # result.payer straight against that owning wallet.
     "x402-storage-backup-create",
     "x402-storage-backup-renew",
-    # Same reasoning again: add_version's ownership check compares
-    # result.payer straight against the backup's owning wallet, identical
-    # shape to renew's own no-proven-payer gap above.
     "x402-storage-backup-add-version",
-    # x402_directory's paid list/renew routes (2026-09-04): the identical
-    # result.payer-as-ownership pattern flagged, not fixed, alongside the
-    # x402_social reversal above (commit f8d84a6) -- `payer` becomes the
-    # listing's owner (create()'s first-claim-wins check, renew()'s
-    # `existing.payer != payer` check), so a promo bypass would let anyone
-    # claim/grief a url or free-renew a listing by its already-public payer
-    # address. See x402_directory/api/routes.py's own module docstring.
-    "x402-directory-list",
-    "x402-directory-boost",
-    # x402_board's paid place/renew routes (2026-09-04): same pattern --
-    # `payer` becomes the placement's owner attribution (create()'s
-    # attribution, renew()'s `attributed != placement.payer` check). See
-    # x402_board/api/routes.py's own module docstring.
-    "x402-board-place",
-    "x402-board-boost",
-    # x402_board's new paid click-analytics read (2026-09-07): same pattern
-    # again -- the ownership check compares `payer` against the placement's
-    # existing owner (api/routes.py's _click_history_product). See that
-    # module's own module docstring.
-    "x402-board-click-history",
 }
 
 

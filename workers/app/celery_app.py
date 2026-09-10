@@ -79,28 +79,19 @@ celery_app.conf.imports = (
     "app.tasks.newspaper",
     "app.tasks.search",
     "app.tasks.metrics",
-    "app.tasks.x402_probe",
     "app.tasks.x402_storage_reaper",
     "app.tasks.ecosystem_probe",
 )
 
 
 def _add_x402_beats(schedule: dict) -> None:
-    """Register the x402 probe and storage-reaper beats when their gates are on.
+    """Register the x402 storage-reaper beat when its gate is on.
 
-    Probe is off by default (real requests to third-party endpoints). The
-    storage reaper is off when X402_STORAGE_REAPER_TOKEN is empty -- the
-    same empty=disabled gate the API route uses. Both entries set
-    `expires=` to their interval so a stale tick is dropped, not run late
-    (same pairing as drain-url-queue).
+    The reaper is off when X402_STORAGE_REAPER_TOKEN is empty -- the same
+    empty=disabled gate the API route uses. The entry sets `expires=` to its
+    interval so a stale tick is dropped, not run late (same pairing as
+    drain-url-queue).
     """
-    if config.X402_PROBE_ENABLED:
-        probe_seconds = float(config.X402_PROBE_INTERVAL_SECONDS)
-        schedule["x402-probe-listed-endpoints"] = {
-            "task": "app.tasks.x402_probe.probe_listed_endpoints",
-            "schedule": probe_seconds,
-            "options": {"expires": probe_seconds},
-        }
     if config.X402_STORAGE_REAPER_TOKEN.strip():
         reaper_seconds = float(config.X402_STORAGE_REAPER_INTERVAL_SECONDS)
         schedule["x402-storage-reap-expired"] = {
@@ -111,7 +102,7 @@ def _add_x402_beats(schedule: dict) -> None:
 
 
 def _add_ecosystem_probe_beat(schedule: dict) -> None:
-    """Register the Algorand Open Registry liveness re-check beat when its gate is on (roadmap item 26, off by default -- same "real requests, enabled deliberately per deployment" convention as _add_x402_beats)."""
+    """Register the Algorand Open Registry liveness re-check beat when its gate is on (roadmap item 26, off by default: it sends real requests to third-party sites, so it is enabled deliberately per deployment)."""
     if config.ECOSYSTEM_PROBE_ENABLED:
         probe_seconds = float(config.ECOSYSTEM_PROBE_INTERVAL_SECONDS)
         schedule["ecosystem-probe-registry-entries"] = {
@@ -235,10 +226,9 @@ def _build_beat_schedule() -> dict:
     # in place, just unreachable via beat; a manual/admin trigger of the
     # task still works (it re-checks X_SEARCH_ENABLED itself) if this ever
     # needs to be re-enabled.
-    # x402 probe / monitoring (roadmap item 7) and the storage reaper
-    # (roadmap item 12): pulled into _add_x402_beats so this function stays
-    # under ruff's C901 branch budget -- same extraction as falcon_main.py's
-    # _register_x402_storage_if_enabled.
+    # x402 storage reaper (roadmap item 12): pulled into _add_x402_beats so
+    # this function stays under ruff's C901 branch budget -- same extraction
+    # as falcon_main.py's _register_x402_storage_if_enabled.
     _add_x402_beats(schedule)
     _add_ecosystem_probe_beat(schedule)
     if is_crawler_enabled(CrawlerType.METRICS):

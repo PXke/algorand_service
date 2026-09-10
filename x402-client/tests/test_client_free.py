@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import pytest
 from pxke_x402 import PxkeClient
 from pxke_x402.client import BASE_URL
 from pxke_x402.exceptions import PxkeHTTPError
@@ -21,77 +22,38 @@ def test_catalog_hits_the_root_route() -> None:
     assert session.calls[0].params is None
 
 
-def test_search_passes_tag_category_limit_and_drops_unset_ones() -> None:
+def test_news_passes_tag_and_limit_and_drops_unset_ones() -> None:
     session = FakeSession([FakeResponse(200, {"items": []})])
     client = PxkeClient(session=session)
 
-    client.search(tag="fx", limit=10)
+    client.news(tag="algorand")
 
     call = session.calls[0]
-    assert call.url == f"{BASE_URL}/api/v1/x402/search"
-    assert call.params == {"tag": "fx", "limit": 10}  # category omitted, not "category": None
-
-
-def test_probe_sends_url_as_a_query_param() -> None:
-    session = FakeSession([FakeResponse(200, {"url": "https://example.com"})])
-    client = PxkeClient(session=session)
-
-    client.probe("https://example.com")
-
-    assert session.calls[0].url == f"{BASE_URL}/api/v1/x402/directory/probe"
-    assert session.calls[0].params == {"url": "https://example.com"}
-
-
-def test_probe_history_sends_url_and_limit_and_needs_no_mnemonic() -> None:
-    session = FakeSession([FakeResponse(200, {"url": "https://example.com", "history": []})])
-    client = PxkeClient(session=session)
-
-    client.probe_history("https://example.com", limit=10)
-
-    assert session.calls[0].url == f"{BASE_URL}/api/v1/x402/directory/probe/history"
-    assert session.calls[0].params == {"url": "https://example.com", "limit": 10}
-
-
-def test_file_feature_request_is_free_and_needs_no_mnemonic() -> None:
-    session = FakeSession([FakeResponse(201, {"request": {"request_id": "abc"}})])
-    client = PxkeClient(session=session)  # no mnemonic
-
-    result = client.file_feature_request("Add EURQ pricing", "Please add EURQ to /list")
-
-    assert result == {"request": {"request_id": "abc"}}
-    call = session.calls[0]
-    assert call.method == "POST"
-    assert call.url == f"{BASE_URL}/api/v1/x402/features"
-    assert call.json_body == {
-        "title": "Add EURQ pricing",
-        "description": "Please add EURQ to /list",
-    }
+    assert call.url == f"{BASE_URL}/api/v1/x402/news"
+    assert call.params == {"tag": "algorand"}  # limit omitted, not "limit": None
 
 
 def test_a_4xx_on_a_free_route_raises_pxke_http_error_with_the_server_message() -> None:
     session = FakeSession(
-        [FakeResponse(400, {"error": {"code": "bad_request", "message": "tag and category together"}})]
+        [FakeResponse(400, {"error": {"code": "bad_request", "message": "limit must be 1-100"}})]
     )
     client = PxkeClient(session=session)
 
-    try:
-        client.search(tag="fx", category="data")
-    except PxkeHTTPError as exc:
-        assert exc.status_code == 400
-        assert "tag and category together" in str(exc)
-        assert exc.body == {"error": {"code": "bad_request", "message": "tag and category together"}}
-    else:
-        raise AssertionError("expected PxkeHTTPError")
+    with pytest.raises(PxkeHTTPError) as excinfo:
+        client.news(limit=0)
+
+    assert excinfo.value.status_code == 400
+    assert "limit must be 1-100" in str(excinfo.value)
+    assert excinfo.value.body == {
+        "error": {"code": "bad_request", "message": "limit must be 1-100"}
+    }
 
 
 def test_all_read_only_free_methods_hit_their_documented_routes() -> None:
-    # One call each: board / features / grades / news / settlements_recent.
+    # One call each: news / settlements_recent (catalog and read_article have their own tests).
     routes_and_calls = [
-        (lambda c: c.board(limit=5), "GET", "/api/v1/x402/board"),
-        (lambda c: c.features(), "GET", "/api/v1/x402/features"),
-        (lambda c: c.grades(), "GET", "/api/v1/x402/grades"),
         (lambda c: c.news(tag="algorand"), "GET", "/api/v1/x402/news"),
-        (lambda c: c.settlements_recent(), "GET", "/api/v1/x402/settlements/recent"),
+        (lambda c: c.settlements_recent(limit=5), "GET", "/api/v1/x402/settlements/recent"),
     ]
     for make_call, method, path in routes_and_calls:
         session = FakeSession([FakeResponse(200, {"items": []})])
@@ -101,6 +63,15 @@ def test_all_read_only_free_methods_hit_their_documented_routes() -> None:
 
         assert session.calls[0].method == method
         assert session.calls[0].url == f"{BASE_URL}{path}"
+
+
+def test_settlements_recent_sends_limit_as_a_query_param() -> None:
+    session = FakeSession([FakeResponse(200, {"items": []})])
+    client = PxkeClient(session=session)
+
+    client.settlements_recent(limit=5)
+
+    assert session.calls[0].params == {"limit": 5}
 
 
 def test_read_article_is_free_and_url_encodes_the_article_id() -> None:
@@ -113,37 +84,3 @@ def test_read_article_is_free_and_url_encodes_the_article_id() -> None:
     assert result == {"article_id": "a/b"}
     assert len(session.calls) == 1
     assert session.calls[0].url == f"{BASE_URL}/api/v1/x402/news/articles/a%2Fb%20slug"
-
-
-def test_social_agent_feed_and_agent_are_free() -> None:
-    session = FakeSession([FakeResponse(200, {"posts": []})])
-    client = PxkeClient(session=session)
-
-    client.social_agent_feed("AGENT1", limit=5)
-
-    assert session.calls[0].url == f"{BASE_URL}/api/v1/x402/social/agents/AGENT1/feed"
-    assert session.calls[0].params == {"limit": 5}
-
-    session2 = FakeSession([FakeResponse(200, {"wallet": "AGENT1"})])
-    client2 = PxkeClient(session=session2)
-
-    client2.social_agent("AGENT1")
-
-    assert session2.calls[0].url == f"{BASE_URL}/api/v1/x402/social/agents/AGENT1"
-
-
-def test_social_cases_and_case_are_free() -> None:
-    session = FakeSession([FakeResponse(200, {"cases": []})])
-    client = PxkeClient(session=session)
-
-    client.social_cases(limit=5)
-
-    assert session.calls[0].url == f"{BASE_URL}/api/v1/x402/social/cases"
-    assert session.calls[0].params == {"limit": 5}
-
-    session2 = FakeSession([FakeResponse(200, {"case": {"case_id": "c1"}})])
-    client2 = PxkeClient(session=session2)
-
-    client2.social_case("c1")
-
-    assert session2.calls[0].url == f"{BASE_URL}/api/v1/x402/social/cases/c1"

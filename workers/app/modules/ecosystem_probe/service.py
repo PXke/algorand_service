@@ -39,8 +39,7 @@ logger = logging.getLogger(__name__)
 
 # Mirrors backend's app.modules.ecosystem.models.domain status/liveness
 # constants, which workers cannot import (separate service/venv, CLAUDE.md
-# section 0) -- same precedented split as x402_probe's own DEFAULT_CATEGORY
-# mirror of backend's x402_directory enum.
+# section 0).
 _PENDING = "pending"
 _APPROVED = "approved"
 _RECHECK_STATUSES = (_PENDING, _APPROVED)

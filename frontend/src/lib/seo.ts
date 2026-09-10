@@ -1,6 +1,14 @@
 /** Client-side SEO helpers (titles, absolute URLs, JSON-LD). */
+import { config } from './config'
 
-export const SITE_NAME = 'PXke Algorand'
+// One codebase, three sites: the brand suffix and og:site_name follow the
+// build (vite.config.ts VITE_PRODUCT), not the newspaper's name.
+export const SITE_NAME =
+  config.product === 'marketplace'
+    ? 'PXke x402'
+    : config.product === 'registry'
+      ? 'PXke Registry'
+      : 'PXke Algorand'
 export const SITE_TAGLINE = 'Independent coverage of the Algorand ecosystem'
 
 /** Bing warns past ~65; Google truncates around the same point. */

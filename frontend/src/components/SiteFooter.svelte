@@ -34,7 +34,7 @@
         </div>
         <p class="tagline muted">
           {isMarketplace
-            ? 'x402 endpoints on Algorand: list yours, find others, pay per call.'
+            ? t($messages, 'x402ProductTagline')
             : isRegistry
             ? 'A free, human-reviewed directory of Algorand ecosystem projects.'
             : t($messages, 'footerTagline')}
@@ -43,32 +43,19 @@
 
       <div class="cols">
         {#if isMarketplace}
-          <!-- Marketplace build: no newspaper chrome -- these are the
-               marketplace's own top-level pages (2026-09-07 redesign, see
-               docs/x402-marketplace-product-redesign.md §4.1), not newspaper
-               sections. App.svelte's route table for this build has no /x402
-               prefix and no other page -- linking off it would be a
-               self-inflicted dead end. -->
+          <!-- Marketplace build: the storefront's own pages, nothing else --
+               App.svelte's route table for this build has no other page. -->
           <div class="col news">
-            <p class="heading">Marketplace</p>
+            <p class="heading">{t($messages, 'navX402')}</p>
             <div class="links split">
               <div>
-                <a href="/directory" onclick={(e) => go('/directory', e)}>Directory</a>
-                <a href="/board" onclick={(e) => go('/board', e)}>Board</a>
+                <a href="/scan" onclick={(e) => go('/scan', e)}>{t($messages, 'x402ProductScanName')}</a>
+                <a href="/storage" onclick={(e) => go('/storage', e)}>{t($messages, 'x402ProductStorageName')}</a>
               </div>
               <div>
-                <a href="/requests" onclick={(e) => go('/requests', e)}>Requests</a>
-                <a href="/trust" onclick={(e) => go('/trust', e)}>Trust</a>
+                <a href="/news" onclick={(e) => go('/news', e)}>{t($messages, 'x402ProductNewsName')}</a>
+                <a href="/developers" onclick={(e) => go('/developers', e)}>{t($messages, 'x402DevTitle')}</a>
               </div>
-            </div>
-          </div>
-
-          <div class="col">
-            <p class="heading">{t($messages, 'footerAboutHeading')}</p>
-            <div class="links">
-              <a href="/list" onclick={(e) => go('/list', e)}>{t($messages, 'x402CtaListLabel')}</a>
-              <a href="/services" onclick={(e) => go('/services', e)}>Services</a>
-              <a href="/developers" onclick={(e) => go('/developers', e)}>Developers</a>
             </div>
           </div>
         {:else if isRegistry}
@@ -106,7 +93,8 @@
               <a href="/contact" onclick={(e) => go('/contact', e)}>{t($messages, 'navContact')}</a>
               <a href="/glossary" onclick={(e) => go('/glossary', e)}>{t($messages, 'navGlossary')}</a>
               <a href="/registry" onclick={(e) => go('/registry', e)}>{t($messages, 'navRegistry')}</a>
-              <a href="/x402" onclick={(e) => go('/x402', e)}>{t($messages, 'navX402')}</a>
+              <!-- Cross-origin: the x402 storefront is its own site. -->
+              <a href={config.marketplaceSiteUrl}>{t($messages, 'navX402')}</a>
             </div>
           </div>
         {/if}
@@ -135,7 +123,7 @@
     <div class="colophon">
       <p class="rights">
         {isMarketplace
-          ? `© ${year} PXke x402. x402 endpoints on Algorand.`
+          ? `© ${year} PXke x402. ${t($messages, 'x402ProductTagline')}`
           : isRegistry
           ? `© ${year} PXke Registry. A free, human-reviewed directory of Algorand projects.`
           : t($messages, 'footerRights', { year })}

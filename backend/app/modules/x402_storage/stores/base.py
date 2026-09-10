@@ -33,9 +33,9 @@ class BackupStore(Protocol):
         """Return up to `limit` of this wallet's backup rows, newest first, whatever their status.
 
         The caller filters to active/unexpired -- this is a raw, LIMITed read
-        over the (wallet) partition's clustering order, same "filter after
-        the LIMITed read" shape as x402_directory.search() and
-        x402_board.list_active().
+        over the (wallet) partition's clustering order: a "filter after the
+        LIMITed read" shape, so the read is always bounded even though the
+        page can come back short.
         """
         ...
 

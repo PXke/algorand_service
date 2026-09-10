@@ -1,10 +1,9 @@
 """The bookkeeping ledger every settled x402 payment gets written to.
 
 CLAUDE.md section 9 -- shared across every paid module, not owned by any one
-of them. Moved here from x402_directory 2026-08-30: it was the first paid
-module built, but the ledger's own table (x402_settlements, migration 090)
-was already generic -- no listing-specific field, day-bucketed partition,
-network recorded per row so a TestNet/Mainnet mix is never summed together.
+of them. The ledger's table (x402_settlements, migration 090) is generic:
+day-bucketed partition, network recorded per row so a TestNet/Mainnet mix is
+never summed together.
 See require_paid_request in modules/x402/paid_request.py, the one place that
 should ever call record_settlement.
 
@@ -231,10 +230,6 @@ class CassandraSettlementStore:
         ascending order; against the real schema it silently flipped an
         already-correct newest-first LIMITed page into oldest-first, while
         this docstring's own summary line kept claiming "newest first."
-        X402GradingStmts.LIST_SETTLEMENTS_FOR_DAY (credibility.py) reads the
-        same table the same way and never reverses, because summing spend is
-        order-independent -- that call site was accidentally correct all
-        along; this one just displayed a day's settlements backwards.
         """
         from app.core.cassandra import get_cassandra_session
         from app.core.statements import X402Stmts
@@ -304,14 +299,14 @@ class InMemorySettlementStore:
 
 
 _factory: StoreFactory[SettlementStore] = StoreFactory(
-    backend_name=lambda: settings.x402_directory_store,
+    backend_name=lambda: settings.x402_settlement_store,
     cassandra=CassandraSettlementStore,
     memory=InMemorySettlementStore,
 )
-# Reuses x402_directory_store rather than a new x402_settlement_store setting:
-# one shared ledger, one shared backend choice. If a future module needs the
-# ledger on Cassandra while listings stay on memory (or vice versa), split
-# this into its own setting then -- not speculatively now.
+# One shared ledger for every paid product, on its own backend setting
+# (X402_SETTLEMENT_STORE). falcon_main._register_x402_routes refuses to start
+# the paid routes outside dev while this is "memory" -- CLAUDE.md section 9:
+# every settlement is logged, durably.
 
 
 def get_settlement_store() -> SettlementStore:

@@ -42,4 +42,4 @@ Client flows must match backend: CAIP-122, ARC-0060 / ARC-0025. [wallet-auth-pro
 - `frontend/src/components/WalletDialog.svelte`
 - `frontend/src/lib/api/auth.ts`
 
-Note: `opensource/wallet_auth_flutter/` (formerly consumed here via the newspaper's old Flutter frontend) is now only consumed by the separate x402/KYC app (`frontend_kyc/`) — see [wallet-auth-flutter.md](wallet-auth-flutter.md).
+Note: `opensource/wallet_auth_flutter/` (formerly consumed here via the newspaper's old Flutter frontend, then by the x402 KYA app `frontend_kyc/`, removed 2026-09-10 — `docs/adr/ADR-0006-x402-consolidation.md`) has no live consumer; see [wallet-auth-flutter.md](wallet-auth-flutter.md).

@@ -1,5 +1,7 @@
 # x402 USDC liquidity-routing product — research and design
 
+> **Note (2026-09-10):** "KYC" below means exchange-side customer verification of a human, not this repo's former KYA module (removed 2026-09-10, [ADR-0006](adr/ADR-0006-x402-consolidation.md)); the `x402_uptime` module cited below as the pattern to copy (bool-setting gate, fail-soft quote cache) and the `x402_uptime_price`/`x402_grading_score_price`/`x402_features_demand_price`/`kyc_lookup_price` comparables were all removed 2026-09-10 too — `x402_scan` is the surviving bool-gated stateless-product pattern, and `x402_news_search_price`/`x402_scan_price` the surviving anchors.
+
 Status: **research only, no code written**. Written in response to the owner's
 brief for an x402-paid endpoint that computes and sells the best
 currently-available route (and its real, current cost) for moving USDC onto

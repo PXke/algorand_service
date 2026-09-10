@@ -28,6 +28,10 @@
   --loss: #c81e1e;
   --chain: #4a5bd0;
   --scheduled: #5b6b4a;
+  /* x402 storefront: one accent per product (lib/x402/products.ts). */
+  --x402-scan: #b0621a;
+  --x402-storage: #0e7b6c;
+  --x402-news: #4a5bd0;
   --card-shadow: rgba(20, 22, 28, 0.08);
   --card-hover-shadow: rgba(20, 22, 28, 0.14);
   /* Wire-photo plate. Story art is mostly logos and screenshots exported on
@@ -112,6 +116,9 @@
   --loss: #ff7a70;
   --chain: #7c8dff;
   --scheduled: #a3b58e;
+  --x402-scan: #eba361;
+  --x402-storage: #3fcbae;
+  --x402-news: #7c8dff;
   --card-shadow: rgba(0, 0, 0, 0.35);
   --card-hover-shadow: rgba(0, 0, 0, 0.5);
 
@@ -851,215 +858,217 @@ button:focus-visible {
   }
 }
 
-/* ---- x402 marketplace redesign (routes/marketplace/*.svelte) --------
-   Shared row-list / section-card primitives for the 2026-09-07 marketplace
-   nav/page redesign (docs/x402-marketplace-product-redesign.md §4). Global,
-   not per-component, so Directory/Board/Requests/Trust/Services/Developers
-   read one implementation instead of five copies of the same list markup
-   (CLAUDE.md §3). The legacy News-build hub page (routes/X402.svelte,
-   routes/X402Endpoints.svelte) keeps its own local styles, untouched. */
-.x402-rows {
-  list-style: none;
-  margin: 0;
-  padding: 0;
+/* ---- x402 storefront (routes/marketplace/*.svelte, components/x402/*) --
+   Shared primitives for the per-product storefront: rules encode structure,
+   monospace carries anything a machine reads (routes, prices, addresses,
+   code), serif carries the prose about them. Global so Overview, the three
+   product pages and Developers read one implementation (CLAUDE.md §3). */
+.x402 {
+  --x402-accent: var(--accent);
 }
-.x402-row {
-  padding: 14px 0;
-  border-bottom: 1px solid var(--border);
-  min-width: 0;
+.x402[data-product='scan'] {
+  --x402-accent: var(--x402-scan);
 }
-.x402-row-head {
-  display: flex;
-  justify-content: space-between;
-  align-items: baseline;
-  gap: 16px;
-  min-width: 0;
+.x402[data-product='storage'] {
+  --x402-accent: var(--x402-storage);
 }
-.x402-row-name {
-  font-family: var(--font-display);
-  font-size: 1.02rem;
-  font-weight: 700;
-  letter-spacing: -0.2px;
-  color: var(--on-surface);
-  text-decoration: none;
-  overflow-wrap: anywhere;
-  min-width: 0;
+.x402[data-product='news'] {
+  --x402-accent: var(--x402-news);
 }
-a.x402-row-name:hover {
-  text-decoration: underline;
-  text-underline-offset: 3px;
-  text-decoration-thickness: 1.5px;
-}
-.x402-row-price {
-  flex-shrink: 0;
-  font-family: var(--font-mono);
-  font-size: 12px;
-  font-weight: 600;
-  font-variant-numeric: tabular-nums;
-  color: var(--accent);
-}
-.x402-row-desc {
-  margin: 6px 0 0;
-  font-family: var(--font-serif);
-  font-size: 0.95rem;
-  line-height: 1.5;
-  color: var(--muted);
-  overflow-wrap: anywhere;
-}
-.x402-row-meta {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 6px 10px;
-  margin: 8px 0 0;
-}
-.x402-badge,
-.x402-stamp,
-.x402-tagchip {
-  font-family: var(--font-mono);
-  font-size: 10.5px;
-  letter-spacing: 0.5px;
-  text-transform: uppercase;
-  color: var(--muted);
-}
-.x402-badge {
-  padding: 2px 6px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-control);
-}
-.x402-badge.live {
-  color: var(--gain);
-  border-color: var(--gain);
-}
-.x402-badge.gated {
-  color: var(--muted);
-}
-.x402-badge.verified {
-  color: var(--accent);
-  border-color: var(--accent);
-}
-.x402-tagchip {
-  border: 0;
-  padding: 0;
-  background: none;
-  color: var(--accent);
-  cursor: pointer;
-  text-transform: none;
-}
-.x402-tagchip:hover {
-  text-decoration: underline;
-}
-.x402-hit-count {
-  margin: 0;
-  font-family: var(--font-mono);
-  font-size: 10.5px;
-  font-weight: 600;
-  letter-spacing: 0.7px;
-  text-transform: uppercase;
-  color: var(--muted);
-  font-variant-numeric: tabular-nums;
-}
-.x402-hit-count .sep {
-  margin-inline: 6px;
-  color: var(--subtle);
-}
-.x402-empty {
-  padding: 24px 0;
-  font-family: var(--font-serif);
-}
-.x402-err {
-  color: var(--danger);
-}
-/* Overview's section cards + Trust/Services' product-line rows. */
-.x402-section-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
-  gap: 16px;
-}
-.x402-section-card {
-  padding: 18px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-card);
-  background: var(--surface);
+/* Section within a page: a plain heading over a rule. */
+.x402-block {
   display: flex;
   flex-direction: column;
-  gap: 10px;
-  min-width: 0;
-}
-.x402-section-card h2 {
-  margin: 0;
-  font-family: var(--font-display);
-  font-size: 1.1rem;
-  font-weight: 700;
-}
-.x402-section-card p {
-  margin: 0;
-  font-family: var(--font-serif);
-  font-size: 0.92rem;
-  line-height: 1.5;
-  color: var(--muted);
-}
-.x402-product-lines {
-  list-style: none;
-  margin: 4px 0 0;
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-}
-.x402-product-line {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  padding: 8px 0;
+  gap: 12px;
+  padding-top: 22px;
   border-top: 1px solid var(--border);
 }
-.x402-product-line-head {
-  display: flex;
-  justify-content: space-between;
-  align-items: baseline;
-  gap: 10px;
-}
-.x402-product-line-head a,
-.x402-product-line-head span.x402-product-name {
-  font-family: var(--font-display);
-  font-weight: 700;
-  font-size: 0.95rem;
-  color: var(--on-surface);
-  text-decoration: none;
-}
-.x402-product-line-head a:hover {
-  text-decoration: underline;
-}
-.x402-product-line p {
+.x402-block > h2 {
   margin: 0;
-  font-family: var(--font-serif);
-  font-size: 0.85rem;
-  line-height: 1.45;
-  color: var(--muted);
+  font-family: var(--font-display);
+  font-size: 19px;
+  line-height: 1.3;
+  letter-spacing: -0.2px;
 }
-.x402-stat-row {
+.x402-block > p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 15px;
+  line-height: 1.55;
+  max-width: 60ch;
+}
+.x402-state {
+  margin: 0;
+  color: var(--muted);
+  font-size: 15px;
+}
+.x402-err {
+  margin: 0;
+  color: var(--danger);
+  font-size: 15px;
+}
+/* A machine string the reader is meant to copy. */
+.x402-curl {
+  margin: 0;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-inline-start: 3px solid var(--x402-accent);
+  background: var(--panel);
+  overflow-x: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  line-height: 1.55;
+  color: var(--on-surface);
+  tab-size: 2;
+}
+/* Route table: METHOD PATH on the left, the price on the right, both mono. */
+.x402-routes {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  border-top: 1px solid var(--border);
+}
+.x402-route {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 4px 16px;
+  padding: 11px 0;
+  border-bottom: 1px solid var(--border);
+}
+.x402-route-sig {
   display: flex;
   flex-wrap: wrap;
-  gap: 20px 32px;
-}
-.x402-stat {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-.x402-stat .value {
+  align-items: baseline;
+  gap: 4px 10px;
+  min-width: 0;
   font-family: var(--font-mono);
-  font-size: 1.6rem;
-  font-weight: 700;
+  font-size: 13px;
   color: var(--on-surface);
-  font-variant-numeric: tabular-nums;
 }
-.x402-stat .label {
-  font-family: var(--font-mono);
-  font-size: 10.5px;
+.x402-route-method {
   font-weight: 600;
-  letter-spacing: 0.7px;
-  text-transform: uppercase;
+  color: var(--x402-accent);
+  letter-spacing: 0.3px;
+}
+.x402-route-path {
+  overflow-wrap: anywhere;
+}
+.x402-route-price {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  text-align: end;
+  color: var(--on-surface);
+}
+.x402-route-price.free {
+  color: var(--muted);
+  font-weight: 400;
+}
+.x402-route-desc {
+  grid-column: 1 / -1;
+  margin: 0;
+  font-family: var(--font-serif);
+  font-size: 0.95rem;
+  line-height: 1.5;
+  color: var(--muted);
+  max-width: 68ch;
+  overflow-wrap: anywhere;
+}
+.x402-route-flags {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  font-family: var(--font-sans);
+  font-size: 12.5px;
+  color: var(--subtle);
+}
+.x402-route-flags span::before {
+  content: '';
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  margin-inline-end: 6px;
+  border-radius: 50%;
+  background: var(--x402-accent);
+  vertical-align: 1px;
+}
+/* Status word: a dot in the product's accent for live, grey for gated. */
+.x402-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-family: var(--font-sans);
+  font-size: 13px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+.x402-status::before {
+  content: '';
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--subtle);
+}
+.x402-status.live::before {
+  background: var(--x402-accent);
+}
+/* Address / facilitator facts: label then mono value, one per line. */
+.x402-facts {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 6px 18px;
+  margin: 0;
+  font-size: 14px;
+}
+.x402-facts dt {
   color: var(--muted);
 }
-
+.x402-facts dd {
+  margin: 0;
+  min-width: 0;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+.x402-facts a {
+  color: var(--accent);
+}
+@media (max-width: 519px) {
+  .x402-facts {
+    grid-template-columns: 1fr;
+    gap: 2px;
+  }
+  .x402-facts dd {
+    margin-bottom: 8px;
+  }
+}
+.x402-skeleton {
+  display: block;
+  height: 14px;
+  width: 60%;
+  border-radius: 3px;
+  background: linear-gradient(90deg, var(--callout), var(--panel), var(--callout));
+  background-size: 200% 100%;
+  animation: x402-shimmer 1.4s linear infinite;
+}
+.x402-skeleton.short {
+  width: 30%;
+}
+@keyframes x402-shimmer {
+  from {
+    background-position: 200% 0;
+  }
+  to {
+    background-position: -200% 0;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .x402-skeleton {
+    animation: none;
+  }
+}

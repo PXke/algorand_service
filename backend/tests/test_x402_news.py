@@ -1,15 +1,15 @@
 """x402 News Engine tests: free headline list, free tag discovery, free article read, paid search.
 
-Fully offline. The facilitator is a stub that never touches the network (same
-shape as test_x402_board.py's), Redis is a fake at the get_redis seam (and at
+Fully offline. The facilitator is a stub that never touches the network,
+Redis is a fake at the get_redis seam (and at
 app.core.cache's client for the tag aggregate), the articles live in the news
 module's own in-memory store, and Typesense is stubbed out so search falls
 through to the feed-scan path. Nothing here settles a real payment or reaches
 TestNet.
 
 Replay protection and the settlement ledger are shared infrastructure
-(modules/x402/) already covered by test_x402_directory.py -- they are not
-re-tested here. What IS News-Engine-specific and tested here: the pre-gate
+(modules/x402/) already covered by test_x402_settlement.py and
+test_x402_preview.py -- they are not re-tested here. What IS News-Engine-specific and tested here: the pre-gate
 404 for unknown/draft articles, the pre-gate query validation for search, the
 paid search payload and its redacted preview, the free list's, tag list's
 and free article's bounds and rate limits, the `lang` overlay (and the

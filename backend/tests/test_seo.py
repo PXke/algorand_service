@@ -9,7 +9,6 @@ from pathlib import Path
 
 import pytest
 
-from app.core.config import settings
 from app.core.http import QueryParams, Request
 from app.modules.ecosystem.models.domain import STATUS_APPROVED, StoredProject
 from app.modules.news.models.schemas import ArticleDetail, ArticleFeedItem
@@ -26,7 +25,6 @@ from app.modules.seo.api.routes import (
 )
 from app.modules.seo.markdown import md_to_html, md_to_text, truncate
 from app.modules.seo.topics import SECTION_REDIRECTS, reliable_tags
-from app.modules.x402_directory.models.domain import StoredListing
 
 
 def _article(**kw: object) -> ArticleDetail:
@@ -493,6 +491,10 @@ def test_beacon_path_validation_rejects_made_up_paths() -> None:
     assert not _is_known_app_path("/news/articles/Not A Slug")
     assert not _is_known_app_path("/news/articles/nested/path")
     assert not _is_known_app_path("/random/garbage")
+    # /x402* left the news domain (nginx 301s it to x402.pxke.me); the beacon
+    # must not count it as a news-site pageview anymore.
+    assert not _is_known_app_path("/x402")
+    assert not _is_known_app_path("/x402/endpoints")
 
 
 def test_ssr_track_snippet_marks_recorded_path() -> None:
@@ -876,28 +878,18 @@ def test_build_registry_sitemap_omits_lastmod_when_never_reviewed() -> None:
     assert "<lastmod>" not in entry_xml.split("</url>")[0]
 
 
-def _stored_listing(
-    url: str = "https://svc.test/api", *, created_at_epoch: int = 0
-) -> StoredListing:
-    return StoredListing(
-        url_hash="hash-1",
-        url=url,
-        price="1000",
-        description="A test x402 listing.",
-        schema_json="{}",
-        settlement_tx_id="tx-1",
-        term_end_epoch=9_999_999_999,
-        created_at_epoch=created_at_epoch,
-    )
-
-
-def test_build_x402_sitemap_includes_static_pages_and_listings() -> None:
-    """Directory/developers static pages plus one entry per listing, addressed by its own URL as a query param -- the live SPA's own addressing scheme, not a slug."""
-    xml = sitemap.build_x402_sitemap([_stored_listing("https://svc.test/api")])
-    assert "<loc>https://x402.pxke.me/</loc>" in xml
-    assert "<loc>https://x402.pxke.me/directory</loc>" in xml
-    assert "<loc>https://x402.pxke.me/developers</loc>" in xml
-    assert "<loc>https://x402.pxke.me/listing?url=https%3A%2F%2Fsvc.test%2Fapi</loc>" in xml
+def test_build_x402_sitemap_lists_exactly_the_five_product_pages() -> None:
+    """The x402 sitemap is the overview, one page per paid product, and developers -- nothing per-item, and never another domain's URLs."""
+    xml = sitemap.build_x402_sitemap()
+    assert xml.startswith("<?xml")
+    locs = re.findall(r"<loc>([^<]+)</loc>", xml)
+    assert locs == [
+        "https://x402.pxke.me/",
+        "https://x402.pxke.me/scan",
+        "https://x402.pxke.me/storage",
+        "https://x402.pxke.me/news",
+        "https://x402.pxke.me/developers",
+    ]
     assert "algorand.pxke.me" not in xml
     assert "algorand-registry.pxke.me" not in xml
 
@@ -932,15 +924,11 @@ def test_sitemap_root_host_dispatch_registry(monkeypatch: pytest.MonkeyPatch) ->
 
 
 def test_sitemap_root_host_dispatch_x402(monkeypatch: pytest.MonkeyPatch) -> None:
-    """sitemap_root() serves the x402 flat urlset on the x402 Host, reading live listings via ListingService directly (not the rate-limited HTTP route)."""
-    from app.modules.x402_directory.services.listing_service import ListingService
-
+    """sitemap_root() serves the x402 static five-page urlset on the x402 Host, with no store read at all."""
     monkeypatch.setattr("app.core.cache.cached_json", lambda _key, _ttl, compute: compute())
-    monkeypatch.setattr(
-        ListingService, "search", lambda _self, **_kw: [_stored_listing("https://svc.test/api")]
-    )
     resp = sitemap_root(_host_request("x402.pxke.me", "/sitemap.xml"))
-    assert "x402.pxke.me/listing?url=" in resp.description
+    assert "<loc>https://x402.pxke.me/scan</loc>" in resp.description
+    assert "<loc>https://x402.pxke.me/developers</loc>" in resp.description
     assert "algorand.pxke.me" not in resp.description
 
 
@@ -1519,50 +1507,3 @@ def test_beacon_accepts_slug_article_paths() -> None:
     assert not _is_known_app_path("/news/articles/x/y")
     assert not _is_known_app_path("/news/articles/")
     assert not _is_known_app_path("/news/articles/" + "a" * 100)
-
-
-def test_x402_endpoints_page_is_distinct_from_directory() -> None:
-    """Regression for the 2026-09-06 frontend split.
-
-    /x402/endpoints must SSR its own content, not silently fall back to the
-    directory tab. Before this fix, "news" was removed from X402_TABS (the SPA dropped its
-    own News tab the same way) but nothing added "endpoints" as a real page,
-    so /x402/endpoints resolved through x402_tab's "unknown tab -> directory"
-    fallback and served directory-listing content at a URL that should show
-    PXke's own product catalog and the News Engine instead.
-    """
-    assert "news" not in render.X402_TABS, "News is a page section now, not a Marketplace sub-tab"
-    assert "endpoints" not in render.X402_TABS, (
-        "endpoints is its own page, not a Marketplace sub-tab"
-    )
-
-    directory_head, directory_body = render.render_x402("directory")
-    news_items = [
-        {"title": "A Headline", "url": "https://algorand.pxke.me/news/articles/a-headline"}
-    ]
-    endpoints_head, endpoints_body = render.render_x402("endpoints", news_items=news_items)
-
-    assert "/x402/endpoints" in endpoints_head
-    assert "/x402/endpoints" not in directory_head
-    assert "A Headline" in endpoints_body
-    assert "A Headline" not in directory_body
-    assert render._X402_TAB_HEAD_TITLES["endpoints"] != render._X402_TAB_HEAD_TITLES["directory"]
-
-    assert _is_known_app_path("/x402/endpoints")
-
-
-def test_x402_ssr_news_pricing_matches_the_live_search_price() -> None:
-    """Pins the SSR news pricing dl to the live search-price setting.
-
-    The dl is a static mirror (render.py's own comment says so, not a live
-    settings read) -- it drifted from the real price once already (article
-    $0.01/search $0.02 shipped stale after the route went free at $0.001,
-    caught by a marketing agent re-verifying the live page before this test
-    existed). This pins the news rows so a future price change can't
-    silently re-drift.
-    """
-    rows = dict(render._X402_PRICING_ROWS)
-    assert rows["Read one news article"] == "free"
-    assert rows["Search news articles"] == settings.x402_news_search_price
-    assert "$0.001" in render._X402_TAB_DESCRIPTIONS["news"]
-    assert "free" in render._X402_TAB_DESCRIPTIONS["news"]

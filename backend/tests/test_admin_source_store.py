@@ -114,8 +114,7 @@ def test_epoch_treats_a_naive_driver_datetime_as_utc() -> None:
     """_epoch must treat a timezone-naive datetime as UTC, not the interpreter's local zone.
 
     That's what the real Cassandra driver actually returns for a `timestamp` column
-    (article_admin_sources.added_at). Same bug class root-caused 2026-09-03 in
-    x402_social/stores/cassandra.py: `value.timestamp()` on a naive datetime assumes the
+    (article_admin_sources.added_at). `value.timestamp()` on a naive datetime assumes the
     *local* system zone -- on a UTC+2 host, "13:18:17 wall-clock, no tzinfo" is silently
     read as 11:18:17 UTC, 2 hours off from the real UTC value that was actually stored.
 

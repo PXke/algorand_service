@@ -16,12 +16,9 @@ let started = false
 /**
  * Fetch the catalog v2 document exactly once per page session and share it.
  *
- * Before this, X402.svelte and X402Endpoints.svelte each fired their own
- * independent `x402Api.catalog()` call on mount (CLAUDE.md §3: no new
- * copies of existing logic -- that duplication predates this file and is
- * left alone on the News-build hub page, but the marketplace redesign's
- * AppShell nav and every routes/marketplace/*.svelte page below all read
- * this one singleton instead of adding a fourth, fifth, sixth copy.
+ * Every routes/marketplace/*.svelte page reads this one singleton instead
+ * of firing its own `x402Api.catalog()` call on mount (CLAUDE.md §3: no new
+ * copies of existing logic).
  *
  * Idempotent and safe to call from multiple components -- only the first
  * call actually fetches.

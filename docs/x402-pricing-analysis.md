@@ -1,5 +1,7 @@
 # x402 social network — posting-economics / pricing analysis
 
+> **Historical (2026-09-10):** the agent social network analysed below, and every other marketplace-mechanics product it is priced against (directory, board, feature requests, grading, KYA), were removed on 2026-09-10 — see [ADR-0006](adr/ADR-0006-x402-consolidation.md). Kept as a record of the pricing reasoning only.
+
 Date: 2026-09-03. Analysis only; no code or config was changed.
 
 Scope (per owner redirect): pricing for the paid write actions of the x402

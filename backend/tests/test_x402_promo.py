@@ -20,7 +20,6 @@ from algosdk.encoding import encode_address
 from conftest import execute_pairs
 
 from app.core import rate_limit as rate_limit_core
-from app.core import serialization
 from app.core.config import settings
 from app.core.http import QueryParams, Request
 from app.core.http_errors import json_error_response
@@ -38,7 +37,7 @@ from app.modules.x402_catalog.api import routes as catalog_routes
 
 _WALLET = encode_address(bytes([1]) + bytes(31))
 _WALLET_2 = encode_address(bytes([2]) + bytes(31))
-_RESOURCE = "x402-ping"
+_RESOURCE = "x402-scan-url"
 
 
 # --------------------------------------------------------------------------- #
@@ -105,7 +104,7 @@ def _request(
     headers: dict[str, str] | None = None,
     query: dict[str, Any] | None = None,
     body: bytes = b"",
-    path: str = "/api/v1/x402/ping",
+    path: str = "/api/v1/x402/scan/url",
 ) -> Request:
     return Request(
         method=method,
@@ -143,10 +142,7 @@ def _patch_cassandra(
 
     promo.py imports get_cassandra_session at module top (CLAUDE.md section 3:
     no new function-local import as a DI seam), so the seam is the module's
-    own bound name -- same convention as x402_directory/stores/cassandra.py's
-    own test (test_x402_directory.py's
-    test_cassandra_store_reads_badge_and_latest_probe_columns), not
-    conftest.patch_cassandra (which patches app.core.cassandra's attribute
+    own bound name, not conftest.patch_cassandra (which patches app.core.cassandra's attribute
     directly and only reaches code that re-imports it per call).
     """
     if session is None:
@@ -216,11 +212,9 @@ def test_valid_code_and_wallet_bypasses_payment(promo_store: InMemoryPromoStore)
     assert result.is_promo is True
     assert result.is_preview is False
     # Nothing settled: no txid, no headers -- there is no payment. `payer` IS
-    # set, though, to the caller-supplied `wallet` -- root-caused 2026-09-03:
-    # a route whose product write needs an identity even on a promo bypass
-    # (x402_social's "the payment IS the identity" design) got payer=None and
-    # raised, since attempt_promo_redemption used to leave payer at its
-    # PaymentResult default. `wallet` here is only syntactically validated
+    # set, though, to the caller-supplied `wallet`, so a route whose product
+    # write needs an identity even on a promo bypass never sees payer=None.
+    # `wallet` here is only syntactically validated
     # (is_valid_address, no signature proof) -- same caveat the module
     # docstring's own "Wallet abuse guard" section already documents for
     # every other use of this value, now also true of the identity a promo
@@ -713,7 +707,7 @@ def test_list_promo_codes_remaining_is_none_when_redis_unreachable(
 def test_admin_create_promo_without_admin_wallet_is_rejected() -> None:
     """No admin session configured at all -> the real require_admin_wallet 503s (ADMIN_WALLET_ADDRESSES unset in tests)."""
     response = catalog_routes.x402_admin_create_promo(
-        _admin_create_request(b'{"code":"LAUNCH","resource":"x402-ping","starting_count":5}')
+        _admin_create_request(b'{"code":"LAUNCH","resource":"x402-scan-url","starting_count":5}')
     )
     assert getattr(response, "status_code", 200) != 200
 
@@ -730,7 +724,9 @@ def test_admin_create_promo_wrong_wallet_is_rejected(
     promo_module.set_promo_store(promo_store)
     try:
         response = catalog_routes.x402_admin_create_promo(
-            _admin_create_request(b'{"code":"LAUNCH","resource":"x402-ping","starting_count":5}')
+            _admin_create_request(
+                b'{"code":"LAUNCH","resource":"x402-scan-url","starting_count":5}'
+            )
         )
         assert response.status_code == 403
         assert promo_store.get_code("LAUNCH") is None
@@ -747,12 +743,12 @@ def test_admin_create_promo_succeeds_and_is_readable_back(
     try:
         response = catalog_routes.x402_admin_create_promo(
             _admin_create_request(
-                b'{"code":"LAUNCH","resource":"x402-ping","starting_count":5,"expires_at_epoch":0}'
+                b'{"code":"LAUNCH","resource":"x402-scan-url","starting_count":5,"expires_at_epoch":0}'
             )
         )
         assert isinstance(response, dict)
         assert response["code"] == "LAUNCH"
-        assert response["resource"] == "x402-ping"
+        assert response["resource"] == "x402-scan-url"
         assert response["starting_count"] == 5
         assert response["expires_at_epoch"] == 0
         assert response["active"] is True
@@ -771,7 +767,9 @@ def test_admin_create_promo_duplicate_code_is_409(
     promo_module.set_promo_store(promo_store)
     try:
         response = catalog_routes.x402_admin_create_promo(
-            _admin_create_request(b'{"code":"LAUNCH","resource":"x402-ping","starting_count":5}')
+            _admin_create_request(
+                b'{"code":"LAUNCH","resource":"x402-scan-url","starting_count":5}'
+            )
         )
         assert response.status_code == 409
     finally:
@@ -846,7 +844,7 @@ def _admin_reset_breaker_request(resource: str) -> Request:
 def test_admin_reset_refund_breaker_without_admin_wallet_is_rejected() -> None:
     """No admin session configured at all -> the real require_admin_wallet refuses."""
     response = catalog_routes.x402_admin_reset_refund_breaker(
-        _admin_reset_breaker_request("x402-ping")
+        _admin_reset_breaker_request("x402-scan-url")
     )
     assert getattr(response, "status_code", 200) != 200
 
@@ -869,39 +867,15 @@ def test_admin_reset_refund_breaker_clears_a_tripped_resource(
     fake = _FakeRedis()
     monkeypatch.setattr(circuit_breaker, "get_redis", lambda **_kw: fake)
     monkeypatch.setattr(rate_limit_core, "get_redis", lambda **_kw: fake)
-    circuit_breaker.record_refund_failure("x402-ping")
-    assert circuit_breaker.is_tripped("x402-ping") is True
+    circuit_breaker.record_refund_failure("x402-scan-url")
+    assert circuit_breaker.is_tripped("x402-scan-url") is True
 
     response = catalog_routes.x402_admin_reset_refund_breaker(
-        _admin_reset_breaker_request("x402-ping")
+        _admin_reset_breaker_request("x402-scan-url")
     )
 
-    assert response == {"reset": True, "resource": "x402-ping"}
-    assert circuit_breaker.is_tripped("x402-ping") is False
-
-
-# --------------------------------------------------------------------------- #
-# x402_ping: the worked example's promo branch
-# --------------------------------------------------------------------------- #
-@pytest.mark.usefixtures("fake_redis")
-def test_ping_promo_serves_the_real_response_with_no_settlement(
-    promo_store: InMemoryPromoStore,
-) -> None:
-    """?promo=&promo_wallet= on the worked example gets the REAL response with an empty settlement_tx_id and via="promo"."""
-    _seed(promo_store, resource="x402-ping")
-    promo_module.set_promo_store(promo_store)
-    try:
-        response = catalog_routes.x402_ping(
-            _request(query={"promo": "LAUNCH", "promo_wallet": _WALLET})
-        )
-    finally:
-        promo_module.set_promo_store(None)
-
-    assert response.status_code == 200
-    body = serialization.loads(response.description)
-    assert body["pong"] is True
-    assert body["settlement_tx_id"] == ""
-    assert body["via"] == "promo"
+    assert response == {"reset": True, "resource": "x402-scan-url"}
+    assert circuit_breaker.is_tripped("x402-scan-url") is False
 
 
 # --------------------------------------------------------------------------- #

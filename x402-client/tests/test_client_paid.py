@@ -9,94 +9,141 @@ seam, never mock the network."
 from __future__ import annotations
 
 import pytest
-
 from pxke_x402 import PxkeClient
 from pxke_x402.client import BASE_URL
-from pxke_x402.exceptions import PxkeHTTPError, PxkePaymentError
+from pxke_x402.exceptions import PxkeHTTPError, PxkeOfferValidationError, PxkePaymentError
 
 from .conftest import FakePaymentHTTPClient, FakeResponse, FakeSession
 from .conftest import valid_offer_headers as _offer_headers
 
 
-def test_ping_pays_and_returns_the_receipt() -> None:
+def test_search_news_pays_and_returns_the_result() -> None:
     session = FakeSession(
         [
             FakeResponse(402, headers=_offer_headers()),
-            FakeResponse(200, {"ok": True, "settlement_tx_id": "TX123"}, headers={"payment-response": "..."}),
+            FakeResponse(
+                200, {"items": [], "settlement_tx_id": "TX123"}, headers={"payment-response": "..."}
+            ),
         ]
     )
     fake_payment = FakePaymentHTTPClient()
     client = PxkeClient(session=session, http_client=fake_payment)
 
-    result = client.ping()
+    result = client.search_news("tinyman", limit=5)
 
-    assert result == {"ok": True, "settlement_tx_id": "TX123"}
+    assert result == {"items": [], "settlement_tx_id": "TX123"}
     assert len(fake_payment.calls) == 1
     # The retry carried the payment headers the fake payment client returned.
     retry_call = session.calls[1]
     assert retry_call.headers["PAYMENT-SIGNATURE"] == "fake-signature"
     assert retry_call.method == "GET"
-    assert retry_call.url == f"{BASE_URL}/api/v1/x402/ping"
+    assert retry_call.url == f"{BASE_URL}/api/v1/x402/news/search"
+    assert retry_call.params == {"q": "tinyman", "limit": 5}
 
 
-def test_list_endpoint_sends_the_right_body_and_omits_unset_optional_fields() -> None:
+# --------------------------------------------------------------------------- #
+# Sandboxed URL scan
+# --------------------------------------------------------------------------- #
+def test_scan_url_parses_the_402_challenge_signs_and_resends_the_same_body() -> None:
+    """The unpaid POST gets a 402 whose offer is decoded from PAYMENT-REQUIRED, handed to the payment client, and the retry resends the identical JSON body with the payment header."""
+    session = FakeSession(
+        [
+            FakeResponse(402, headers=_offer_headers(amount="10000")),
+            FakeResponse(
+                200,
+                {
+                    "source_url": "https://example.com/file.zip",
+                    "risk": {"score": 0.0, "verdict": "no concerns found", "malicious": False},
+                    "settlement_tx_id": "TXSCAN",
+                },
+                headers={"payment-response": "receipt-blob"},
+            ),
+        ]
+    )
+    fake_payment = FakePaymentHTTPClient()
+    client = PxkeClient(session=session, http_client=fake_payment)
+
+    result = client.scan_url("https://example.com/file.zip")
+
+    assert result["settlement_tx_id"] == "TXSCAN"
+    assert result["risk"]["malicious"] is False
+    first_call, retry_call = session.calls
+    assert first_call.method == "POST"
+    assert first_call.url == f"{BASE_URL}/api/v1/x402/scan/url"
+    assert first_call.json_body == {"url": "https://example.com/file.zip"}
+    assert first_call.params == {}  # no bypass params by default
+    assert first_call.headers is None  # the unpaid request carries no payment header
+    # The 402 challenge (headers + body) reached the payment client exactly once.
+    assert len(fake_payment.calls) == 1
+    challenge_headers, _challenge_body = fake_payment.calls[0]
+    assert "payment-required" in challenge_headers
+    assert retry_call.json_body == first_call.json_body
+    assert retry_call.headers["PAYMENT-SIGNATURE"] == "fake-signature"
+
+
+def test_scan_url_refuses_a_402_offer_that_fails_validation_before_signing() -> None:
+    """The 402 challenge is decoded and checked BEFORE the payment client sees it: an over-cap amount never reaches the signer."""
+    session = FakeSession([FakeResponse(402, headers=_offer_headers(amount="5000000"))])
+    fake_payment = FakePaymentHTTPClient()
+    client = PxkeClient(session=session, http_client=fake_payment)
+
+    with pytest.raises(PxkeOfferValidationError) as excinfo:
+        client.scan_url("https://example.com/file.zip")
+
+    assert "5000000" in str(excinfo.value)
+    assert fake_payment.calls == []
+    assert len(session.calls) == 1
+
+
+def test_scan_url_fetch_failure_after_payment_raises_payment_error_with_settled_true() -> None:
+    """A caller-supplied url that can't be fetched is charged (422, payment kept), not refunded."""
     session = FakeSession(
         [
             FakeResponse(402, headers=_offer_headers()),
-            FakeResponse(200, {"listing": {}, "settlement_tx_id": "TX1", "term_days": 30}),
+            FakeResponse(
+                422,
+                {
+                    "error": {"code": "fetch_failed", "message": "connection refused"},
+                    "settlement_tx_id": "TXKEPT",
+                },
+                headers={"payment-response": "receipt-blob"},
+            ),
         ]
     )
     client = PxkeClient(session=session, http_client=FakePaymentHTTPClient())
 
-    client.list_endpoint("https://api.example.com/v1/quote", "$0.01", "FX quotes")
+    with pytest.raises(PxkePaymentError) as excinfo:
+        client.scan_url("https://down.example.com/file.zip")
 
-    first_call, retry_call = session.calls
-    assert first_call.json_body == {
-        "url": "https://api.example.com/v1/quote",
-        "price": "$0.01",
-        "description": "FX quotes",
-    }
-    assert retry_call.json_body == first_call.json_body  # same body resent with payment
-
-
-def test_list_endpoint_includes_optional_fields_when_given() -> None:
-    session = FakeSession(
-        [FakeResponse(402, headers=_offer_headers()), FakeResponse(200, {"settlement_tx_id": "TX1"})]
-    )
-    client = PxkeClient(session=session, http_client=FakePaymentHTTPClient())
-
-    client.list_endpoint(
-        "https://api.example.com/v1/quote",
-        "$0.01",
-        "FX quotes",
-        assets=["USDC"],
-        tags=["fx", "market-data"],
-        category="finance",
-        schema={"type": "object"},
-    )
-
-    assert session.calls[0].json_body == {
-        "url": "https://api.example.com/v1/quote",
-        "price": "$0.01",
-        "description": "FX quotes",
-        "assets": ["USDC"],
-        "tags": ["fx", "market-data"],
-        "category": "finance",
-        "schema": {"type": "object"},
-    }
+    assert excinfo.value.status_code == 422
+    assert excinfo.value.settled is True
+    assert excinfo.value.settlement_tx_id == "TXKEPT"
+    assert "connection refused" in str(excinfo.value)
 
 
 def test_a_validation_error_before_the_gate_raises_http_error_and_never_pays() -> None:
     """A malformed body is a plain 4xx, not a 402 -- nothing charged, no payment built."""
-    session = FakeSession([FakeResponse(400, {"error": {"code": "bad_request", "message": "score must be 1-5"}})])
+    session = FakeSession(
+        [
+            FakeResponse(
+                400,
+                {
+                    "error": {
+                        "code": "invalid_request",
+                        "message": "url must be http:// or https://",
+                    }
+                },
+            )
+        ]
+    )
     fake_payment = FakePaymentHTTPClient()
     client = PxkeClient(session=session, http_client=fake_payment)
 
     with pytest.raises(PxkeHTTPError) as excinfo:
-        client.submit_grade("https://example.com", 9)
+        client.scan_url("ftp://example.com/file.zip")
 
     assert excinfo.value.status_code == 400
-    assert "score must be 1-5" in str(excinfo.value)
+    assert "url must be http:// or https://" in str(excinfo.value)
     assert fake_payment.calls == []  # no payment was ever attempted
     assert len(session.calls) == 1  # no retry either
 
@@ -108,7 +155,7 @@ def test_a_settled_but_refused_response_raises_payment_error_with_settled_true()
             FakeResponse(402, headers=_offer_headers()),
             FakeResponse(
                 403,
-                {"error": {"code": "listing_owned_by_another_payer", "message": "not your listing"}},
+                {"error": {"code": "not_backup_owner", "message": "not your backup"}},
                 headers={"payment-response": "receipt-blob"},
             ),
         ]
@@ -116,7 +163,7 @@ def test_a_settled_but_refused_response_raises_payment_error_with_settled_true()
     client = PxkeClient(session=session, http_client=FakePaymentHTTPClient())
 
     with pytest.raises(PxkePaymentError) as excinfo:
-        client.list_endpoint("https://example.com", "$0.01", "desc")
+        client.storage_renew_backup("b1", "OTHERWALLET")
 
     assert excinfo.value.status_code == 403
     assert excinfo.value.settled is True
@@ -130,7 +177,7 @@ def test_a_failure_building_the_payment_raises_payment_error_not_a_raw_exception
     client = PxkeClient(session=session, http_client=broken_payment_client)
 
     with pytest.raises(PxkePaymentError) as excinfo:
-        client.ping()
+        client.search_news("tinyman")
 
     assert "bad offer encoding" in str(excinfo.value)
     assert len(session.calls) == 1  # never got to retry
@@ -140,157 +187,14 @@ def test_settlement_tx_id_is_surfaced_on_success() -> None:
     session = FakeSession(
         [
             FakeResponse(402, headers=_offer_headers()),
-            FakeResponse(200, {"grade": {"score": 5}, "settlement_tx_id": "TXABC"}),
+            FakeResponse(200, {"risk": {"score": 0.0}, "settlement_tx_id": "TXABC"}),
         ]
     )
     client = PxkeClient(session=session, http_client=FakePaymentHTTPClient())
 
-    result = client.submit_grade("https://example.com", 5, comment="great")
+    result = client.scan_url("https://example.com/file.zip")
 
     assert result["settlement_tx_id"] == "TXABC"
-
-
-# --------------------------------------------------------------------------- #
-# Social network (Phase S0/S1)
-# --------------------------------------------------------------------------- #
-def test_social_register_sends_the_right_body() -> None:
-    session = FakeSession(
-        [
-            FakeResponse(402, headers=_offer_headers()),
-            FakeResponse(200, {"wallet": "AGENT1", "settlement_tx_id": "TX1"}),
-        ]
-    )
-    client = PxkeClient(session=session, http_client=FakePaymentHTTPClient())
-
-    result = client.social_register("Scout", bio="finds things", interests=["nft", "defi"])
-
-    assert result["wallet"] == "AGENT1"
-    _first_call, retry_call = session.calls
-    assert retry_call.url == f"{BASE_URL}/api/v1/x402/social/register"
-    assert retry_call.json_body == {
-        "name": "Scout",
-        "bio": "finds things",
-        "mission": "",
-        "location": "",
-        "interests": ["nft", "defi"],
-        "emoji": "",
-    }
-
-
-def test_social_create_post_and_comment_url_encode_the_post_id() -> None:
-    session = FakeSession(
-        [
-            FakeResponse(402, headers=_offer_headers()),
-            FakeResponse(200, {"post_id": "p/1", "settlement_tx_id": "TX1"}),
-        ]
-    )
-    client = PxkeClient(session=session, http_client=FakePaymentHTTPClient())
-
-    client.social_create_post("hello world", tags=["intro"])
-
-    retry_call = session.calls[1]
-    assert retry_call.url == f"{BASE_URL}/api/v1/x402/social/posts"
-    assert retry_call.json_body == {"body_md": "hello world", "tags": ["intro"], "group_id": ""}
-
-    session2 = FakeSession(
-        [
-            FakeResponse(402, headers=_offer_headers()),
-            FakeResponse(200, {"comment_id": "c1", "settlement_tx_id": "TX2"}),
-        ]
-    )
-    client2 = PxkeClient(session=session2, http_client=FakePaymentHTTPClient())
-
-    client2.social_create_comment("post/with-slash", "nice post")
-
-    retry_call2 = session2.calls[1]
-    assert retry_call2.url == f"{BASE_URL}/api/v1/x402/social/posts/post%2Fwith-slash/comments"
-    assert retry_call2.json_body == {"body_md": "nice post"}
-
-
-def test_social_follow_and_join_group_send_no_body() -> None:
-    session = FakeSession(
-        [
-            FakeResponse(402, headers=_offer_headers()),
-            FakeResponse(200, {"settlement_tx_id": "TX1"}),
-        ]
-    )
-    client = PxkeClient(session=session, http_client=FakePaymentHTTPClient())
-
-    client.social_follow("AGENT2")
-
-    retry_call = session.calls[1]
-    assert retry_call.url == f"{BASE_URL}/api/v1/x402/social/agents/AGENT2/follow"
-    assert retry_call.json_body is None
-
-
-def test_social_report_and_vote_send_the_right_bodies() -> None:
-    session = FakeSession(
-        [
-            FakeResponse(402, headers=_offer_headers()),
-            FakeResponse(200, {"case": {"case_id": "c1"}, "settlement_tx_id": "TX1"}),
-        ]
-    )
-    client = PxkeClient(session=session, http_client=FakePaymentHTTPClient())
-
-    client.social_report("post", "p1", "spam", note="looks like spam")
-
-    retry_call = session.calls[1]
-    assert retry_call.url == f"{BASE_URL}/api/v1/x402/social/reports"
-    assert retry_call.json_body == {
-        "target_type": "post",
-        "target_id": "p1",
-        "category": "spam",
-        "note": "looks like spam",
-    }
-
-    session2 = FakeSession(
-        [
-            FakeResponse(402, headers=_offer_headers()),
-            FakeResponse(200, {"case_id": "case/with-slash", "settlement_tx_id": "TX2"}),
-        ]
-    )
-    client2 = PxkeClient(session=session2, http_client=FakePaymentHTTPClient())
-
-    client2.social_vote("case/with-slash", "uphold")
-
-    retry_call2 = session2.calls[1]
-    assert retry_call2.url == f"{BASE_URL}/api/v1/x402/social/cases/case%2Fwith-slash/vote"
-    assert retry_call2.json_body == {"verdict": "uphold"}
-
-
-def test_social_agent_search_sends_comma_joined_interests_as_a_query_param() -> None:
-    session = FakeSession(
-        [
-            FakeResponse(402, headers=_offer_headers()),
-            FakeResponse(200, {"agents": [], "query": {}, "settlement_tx_id": "TX1"}),
-        ]
-    )
-    client = PxkeClient(session=session, http_client=FakePaymentHTTPClient())
-
-    client.social_agent_search(["defi", "nft"], limit=10)
-
-    retry_call = session.calls[1]
-    assert retry_call.url == f"{BASE_URL}/api/v1/x402/social/agents/search"
-    assert retry_call.params == {"interests": "defi,nft", "limit": 10}
-
-
-# --------------------------------------------------------------------------- #
-# Uptime check
-# --------------------------------------------------------------------------- #
-def test_uptime_check_sends_the_url_in_the_body() -> None:
-    session = FakeSession(
-        [
-            FakeResponse(402, headers=_offer_headers()),
-            FakeResponse(200, {"reachable": True, "settlement_tx_id": "TX1"}),
-        ]
-    )
-    client = PxkeClient(session=session, http_client=FakePaymentHTTPClient())
-
-    client.uptime_check("https://example.com")
-
-    retry_call = session.calls[1]
-    assert retry_call.url == f"{BASE_URL}/api/v1/x402/uptime/check"
-    assert retry_call.json_body == {"url": "https://example.com"}
 
 
 # --------------------------------------------------------------------------- #
@@ -313,7 +217,8 @@ def test_storage_create_backup_base64_encodes_data_and_declares_its_size() -> No
     assert retry_call.json_body == {"data": "aGVsbG8gd29ybGQ=", "label": "my backup"}
 
 
-def test_storage_renew_backup_sends_wallet_in_the_body() -> None:
+def test_storage_renew_backup_sends_wallet_as_a_query_param_and_no_body() -> None:
+    """The server looks the backup up by `?wallet=` BEFORE the 402 offer is built (it needs the stored size to price the renewal), so the wallet must travel in the query string, not the JSON body."""
     session = FakeSession(
         [
             FakeResponse(402, headers=_offer_headers()),
@@ -324,6 +229,8 @@ def test_storage_renew_backup_sends_wallet_in_the_body() -> None:
 
     client.storage_renew_backup("b/1", "WALLETADDR")
 
-    retry_call = session.calls[1]
-    assert retry_call.url == f"{BASE_URL}/api/v1/x402/storage/backups/b%2F1/renew"
-    assert retry_call.json_body == {"wallet": "WALLETADDR"}
+    first_call, retry_call = session.calls
+    assert first_call.url == f"{BASE_URL}/api/v1/x402/storage/backups/b%2F1/renew"
+    assert first_call.params == {"wallet": "WALLETADDR"}
+    assert first_call.json_body is None
+    assert retry_call.params == {"wallet": "WALLETADDR"}  # resent unchanged with the payment

@@ -30,7 +30,7 @@ def test_describe_json_endpoint_with_no_output_example_does_not_raise() -> None:
 
 
 def test_describe_json_endpoint_body_type_json_declares_a_body_extension() -> None:
-    """body_type="json" must produce a body-shaped declaration, not the query-params default -- this is what x402_directory's POST /x402/list relies on."""
+    """body_type="json" must produce a body-shaped declaration, not the query-params default -- this is what x402_scan's POST /x402/scan/url relies on."""
     result = describe_json_endpoint(
         input={"url": "https://example.com"},
         input_schema={"type": "object"},
@@ -42,7 +42,7 @@ def test_describe_json_endpoint_body_type_json_declares_a_body_extension() -> No
 
 
 def test_describe_json_endpoint_without_body_type_declares_a_query_extension() -> None:
-    """No body_type (the GET/query-params default) must not produce a body-shaped declaration -- this is what kyc_verify's GET route relies on."""
+    """No body_type (the GET/query-params default) must not produce a body-shaped declaration -- this is what x402_news's GET /x402/news/search relies on."""
     result = describe_json_endpoint(
         input={"wallet": "..."},
         input_schema={"properties": {"wallet": {"type": "string"}}},

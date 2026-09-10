@@ -411,33 +411,15 @@ def build_registry_sitemap(entries: list) -> str:
     return _urlset_xml(url_entries)
 
 
-def build_x402_sitemap(listings: list) -> str:
-    """Single flat urlset for x402.pxke.me -- the directory/overview/developers pages plus one entry per live listing.
-
-    `listings` is `list[app.modules.x402_directory.models.domain.StoredListing]`
-    -- same untyped-for-boundary-reasons choice as build_registry_sitemap
-    above; only `.url` and `.created_at_epoch` are read. Listings are
-    addressed by their own URL as a query param (`/listing?url=...`, the
-    live SPA router's own scheme -- frontend/src/App.svelte's
-    resolveMarketplaceView -- there is no per-listing slug to route to
-    instead), which is unusual for a sitemap but matches what the live page
-    actually serves; only a real slug-based redesign of that routing would
-    change it, which is out of scope here.
-    """
-    from urllib.parse import quote
-
+def build_x402_sitemap() -> str:
+    """Single flat urlset for x402.pxke.me -- exactly the five product pages the marketplace SPA serves (overview, one page per paid product, developers). No per-item entries: nothing on the x402 site is user-listed anymore."""
     url_entries = [
         _UrlEntry(loc=x402_site_url() + "/"),
-        _UrlEntry(loc=x402_absolute("/directory")),
+        _UrlEntry(loc=x402_absolute("/scan")),
+        _UrlEntry(loc=x402_absolute("/storage")),
+        _UrlEntry(loc=x402_absolute("/news")),
         _UrlEntry(loc=x402_absolute("/developers")),
     ]
-    for item in listings:
-        lastmod = _iso_date(item.created_at_epoch) if item.created_at_epoch else None
-        url_entries.append(
-            _UrlEntry(
-                loc=x402_absolute(f"/listing?url={quote(item.url, safe='')}"), lastmod=lastmod
-            )
-        )
     return _urlset_xml(url_entries)
 
 

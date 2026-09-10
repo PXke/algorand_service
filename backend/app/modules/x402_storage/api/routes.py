@@ -10,8 +10,8 @@ Auth shape (no session -- see services/auth_service.py's own module
 docstring for why): the free routes that need to know WHO is asking (list,
 detail, delete) read `wallet`, `nonce`, `proof_method` and `signature_b64`
 straight from query params (GET/DELETE never carry a body in this backend's
-own convention -- see x402_directory/api/routes.py's admin-delete docstring)
-and verify them fresh, in THIS request, via `_authenticate` below. There is
+own convention) and verify them fresh, in THIS request, via `_authenticate`
+below. There is
 no bearer token anywhere in this module.
 """
 
@@ -457,9 +457,9 @@ def x402_storage_renew_backup(request: Request) -> Response:
     400'd an unpaid request instead, because its price is
     `compute_price(backup.size_bytes)`, which needs the backup looked up
     first, and x402_storage_backups is partitioned by wallet -- a point read
-    needs the wallet up front). Exactly the same trust level as before and
-    as x402_directory's own renew taking `url` from its body: this is purely
-    a lookup hint, never proof of ownership -- see the ownership check below.
+    needs the wallet up front). Exactly the same trust level as before: this
+    is purely a lookup hint, never proof of ownership -- see the ownership
+    check below.
 
     Remaining life is capped at x402_storage_max_remaining_days (90): if the
     backup is already at that ceiling, this returns a free 400 before the
@@ -476,12 +476,11 @@ def x402_storage_renew_backup(request: Request) -> Response:
     Ownership CANNOT be checked before the gate -- the real payer is only
     known once the payment has settled -- so a renewal by a wallet other
     than the one that created the backup is refused with the payment already
-    taken and the backup untouched (403), same accepted tradeoff and same
+    taken and the backup untouched (403) -- an accepted tradeoff, with a
     "payment kept, receipt served, never refunded, never counted against the
-    circuit breaker" contract as x402_board's own renew (that check is
-    re-evaluated here, before ever calling run_with_refund, for the exact
-    same reason x402_board's docstring gives: refunding a fully
-    caller-controlled rejection would be a free way to pump the breaker).
+    circuit breaker" contract (that check is re-evaluated here, before ever
+    calling run_with_refund, because refunding a fully caller-controlled
+    rejection would be a free way to pump the breaker).
     """
     if circuit_breaker.is_tripped(_RESOURCE_RENEW):
         return json_error_response(

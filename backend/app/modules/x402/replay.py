@@ -1,9 +1,8 @@
 """Replay protection for the x402 payment header.
 
-Shared across every paid module. Moved here from x402_directory 2026-08-30
-for the same reason as settlement.py: this was never actually
-directory-specific, and every future paid module needs the identical
-claim-before-gate behaviour.
+Shared across every paid module, next to settlement.py: every paid module
+needs the identical claim-before-gate behaviour, so it lives in the shared
+x402 core rather than in any one product.
 """
 
 from __future__ import annotations

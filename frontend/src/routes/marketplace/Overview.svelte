@@ -1,171 +1,298 @@
 <script lang="ts">
   /**
-   * Marketplace root (x402.pxke.me/). Replaces the old behaviour of aliasing
-   * '/' straight to the directory tab -- see
-   * docs/x402-marketplace-product-redesign.md §4.2 "Home": one sentence,
-   * live numbers, the five catalog sections as real navigable groups (not a
-   * flat 80-route list), one primary CTA. Everything here reads the shared
-   * catalog v2 document (lib/x402/catalogStore.ts) fetched once for the
-   * whole app -- no separate fetch, no hand-maintained product list.
+   * Storefront home (x402.pxke.me/): the three products as a rate card,
+   * how a paid call works, and the one URL an agent should fetch first.
+   * Prices, status, payTo, facilitator and assets are all read live from
+   * the catalog.
    */
   import { navigate } from '../../lib/router'
-  import { ensureX402Catalog, x402CatalogState } from '../../lib/x402/catalogStore'
-  import { sectionGroups, catalogStats } from '../../lib/x402/catalog'
   import { messages, t } from '../../lib/i18n'
+  import { ensureX402Catalog, x402CatalogState } from '../../lib/x402/catalogStore'
+  import { productGroups, cheapestPriceText } from '../../lib/x402/catalog'
+  import { X402_PRODUCTS } from '../../lib/x402/products'
+  import { X402_CATALOG_URL } from '../../lib/api/x402'
   import PageMeta from '../../components/PageMeta.svelte'
 
   ensureX402Catalog()
 
-  const sections = $derived(sectionGroups($x402CatalogState.catalog))
-  const stats = $derived(catalogStats($x402CatalogState.catalog))
+  const catalog = $derived($x402CatalogState.catalog)
+  const loading = $derived($x402CatalogState.loading)
+  const failed = $derived($x402CatalogState.failed)
+  const groups = $derived(productGroups(catalog))
+  const assets = $derived((catalog?.assets ?? []).map((a) => a.symbol).join(', '))
 
-  function go(href: string, e: MouseEvent) {
-    e.preventDefault()
-    navigate(href)
+  function go(href: string) {
+    return (e: MouseEvent) => {
+      e.preventDefault()
+      navigate(href)
+    }
   }
 </script>
 
-<PageMeta
-  title="PXke x402 marketplace"
-  description="List, find and vet x402 endpoints on Algorand -- agents pay per call in USDC, EURQ or USDQ, all under one payTo."
-  path="/"
-/>
+<PageMeta title={t($messages, 'x402HomeTitle')} description={t($messages, 'x402HomeLead')} path="/" />
 
-<div class="page stack x402-overview">
-  <header>
-    <span class="accent-slug"></span>
-    <p class="kicker">x402 on Algorand mainnet</p>
-    <h1>A marketplace agents can pay into, in one call</h1>
-    <p class="lead muted">
-      List an x402 endpoint for other agents to find, or search what is already listed. Every
-      product below -- including PXke's own -- shares one catalog, one payTo, and one settlement
-      ledger. Humans browse everything for free; agents pay per call.
-    </p>
-    <div class="cta-row">
-      <a class="btn btn-primary" href="/list" onclick={(e) => go('/list', e)}>
-        List an endpoint
-      </a>
-      <a class="btn btn-outlined" href="/directory" onclick={(e) => go('/directory', e)}>
-        Browse the directory
-      </a>
-    </div>
+<div class="page x402 home">
+  <header class="hero">
+    <h1>{t($messages, 'x402HomeTitle')}</h1>
+    <p class="lead">{t($messages, 'x402HomeLead')}</p>
   </header>
 
-  {#if $x402CatalogState.catalog}
-    <div class="x402-stat-row">
-      <div class="x402-stat">
-        <span class="value">{stats.products}</span>
-        <span class="label">live products</span>
-      </div>
-      <div class="x402-stat">
-        <span class="value">{stats.routes}</span>
-        <span class="label">routes</span>
-      </div>
-      <div class="x402-stat">
-        <span class="value">{$x402CatalogState.catalog.network_name}</span>
-        <span class="label">network</span>
-      </div>
-    </div>
+  <ol class="card" aria-label={t($messages, 'x402HomeTitle')}>
+    {#each groups as group (group.key)}
+      {@const def = X402_PRODUCTS[group.key]}
+      {@const price = cheapestPriceText(group.routes)}
+      <li class="x402" data-product={group.key}>
+        <a class="row" href={def.path} onclick={go(def.path)}>
+          <span class="name">{t($messages, def.nameKey)}</span>
+          <span class="price">
+            {#if loading}
+              <span class="x402-skeleton short"></span>
+            {:else if price}
+              {t($messages, 'x402FromPrice', { price })}
+            {:else if group.routes.length}
+              {t($messages, 'x402Free')}
+            {/if}
+          </span>
+          <span class="pitch">{t($messages, def.pitchKey)}</span>
+          <span class="meta">
+            {#if group.meta}
+              <span class="x402-status" class:live={group.meta.status === 'live'}>
+                {group.meta.status === 'live' ? t($messages, 'x402StatusLive') : t($messages, 'x402StatusGated')}
+              </span>
+              <span class="entry">{group.meta.entry}</span>
+            {:else if !loading}
+              <span class="entry">{def.leadMethod} {def.leadPath}</span>
+            {/if}
+          </span>
+        </a>
+      </li>
+    {/each}
+  </ol>
+  {#if failed}
+    <p class="x402-err" role="alert">{t($messages, 'x402CatalogUnavailable')}</p>
   {/if}
 
-  {#if $x402CatalogState.failed}
-    <p class="muted">
-      The live catalog could not be loaded right now -- fetch it directly at
-      <code>GET /.well-known/x402</code>.
-    </p>
-  {:else if !$x402CatalogState.catalog}
-    <p class="muted">{t($messages, 'loading')}</p>
-  {:else}
-    <section class="x402-section-grid">
-      {#each sections as section (section.key)}
-        <div class="x402-section-card">
-          <h2>{section.title}</h2>
-          <p>{section.summary}</p>
-          <ul class="x402-product-lines">
-            {#each section.products as product (product.key)}
-              <li class="x402-product-line">
-                <div class="x402-product-line-head">
-                  <span class="x402-product-name">{product.title}</span>
-                  <span class="x402-badge" class:live={product.status === 'live'} class:gated={product.status !== 'live'}>
-                    {product.status}
-                  </span>
-                </div>
-                <p>{product.summary}</p>
-              </li>
-            {/each}
-          </ul>
-        </div>
-      {/each}
-    </section>
-  {/if}
+  <section class="x402-block" aria-labelledby="how-heading">
+    <h2 id="how-heading">{t($messages, 'x402HowHeading')}</h2>
+    <p>{t($messages, 'x402HowLead')}</p>
+    <ol class="wire">
+      <li>
+        <code>HTTP 402</code>
+        <p>{t($messages, 'x402HowStep1')}</p>
+      </li>
+      <li>
+        <code>sign</code>
+        <p>{t($messages, 'x402HowStep2')}</p>
+      </li>
+      <li>
+        <code>HTTP 200</code>
+        <p>{t($messages, 'x402HowStep3')}</p>
+      </li>
+    </ol>
+    {#if catalog}
+      <dl class="x402-facts">
+        <dt>{t($messages, 'x402NetworkLabel')}</dt>
+        <dd>{catalog.network_name}</dd>
+        {#if assets}
+          <dt>{t($messages, 'x402AssetsLabel')}</dt>
+          <dd>{assets}</dd>
+        {/if}
+        <dt>{t($messages, 'x402PayToLabel')}</dt>
+        <dd>{catalog.pay_to}</dd>
+        {#if catalog.facilitator_url}
+          <dt>{t($messages, 'x402FacilitatorLabel')}</dt>
+          <dd><a href={catalog.facilitator_url} target="_blank" rel="noopener noreferrer">{catalog.facilitator_url}</a></dd>
+        {/if}
+      </dl>
+    {:else if loading}
+      <p class="x402-state" role="status">{t($messages, 'x402CatalogLoading')}</p>
+    {/if}
+  </section>
 
-  <section class="agents" aria-label="For agents">
-    <h2>For agents</h2>
-    <p class="muted">
-      Fetch the machine-readable catalog first -- one document lists every live route, its
-      price, and how to pay:
-    </p>
-    <pre class="curl"><code>GET https://algorand-api.pxke.me/.well-known/x402</code></pre>
-    <p class="muted">
-      See the <a href="/developers" onclick={(e) => go('/developers', e)}>Developers</a> page for
-      the full accordion, OpenAPI document and quickstart.
-    </p>
+  <section class="x402-block" aria-labelledby="agents-heading">
+    <h2 id="agents-heading">{t($messages, 'x402AgentsHeading')}</h2>
+    <p>{t($messages, 'x402AgentsBody')}</p>
+    <pre class="x402-curl">curl -s {X402_CATALOG_URL}</pre>
+    <p><a class="quiet" href="/developers" onclick={go('/developers')}>{t($messages, 'x402DevTitle')}</a></p>
   </section>
 </div>
 
 <style>
-  header h1 {
-    margin: 8px 0 0;
-    font-size: clamp(28px, 4vw, 36px);
+  .home {
+    display: flex;
+    flex-direction: column;
+    gap: 32px;
+  }
+  .hero {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    padding-top: 10px;
+  }
+  .hero h1 {
+    margin: 0;
+    font-family: var(--font-display);
+    font-size: clamp(34px, 6vw, 56px);
+    line-height: 1.02;
+    letter-spacing: -1.2px;
+    font-weight: 700;
+    max-width: 16em;
   }
   .lead {
-    margin: 8px 0 0;
-    max-width: 46rem;
+    margin: 0;
     font-family: var(--font-serif);
-    font-size: 17px;
-    line-height: 1.55;
+    font-size: clamp(17px, 2.2vw, 20px);
+    line-height: 1.5;
+    color: var(--body);
+    max-width: 34em;
   }
-  .cta-row {
+
+  /* The rate card: three rows, each with a thick rule in its product's
+     accent and the price set in mono on the right. */
+  .card {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+  }
+  .row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-areas:
+      'name price'
+      'pitch pitch'
+      'meta meta';
+    gap: 6px 20px;
+    padding: 16px 0 16px 18px;
+    border-inline-start: 6px solid var(--x402-accent);
+    color: inherit;
+    text-decoration: none;
+    min-width: 0;
+  }
+  .row:hover,
+  .row:focus-visible {
+    background: var(--panel);
+    text-decoration: none;
+    outline: none;
+  }
+  .row:focus-visible {
+    box-shadow: inset 0 0 0 2px var(--x402-accent);
+  }
+  .name {
+    grid-area: name;
+    font-family: var(--font-display);
+    font-size: clamp(24px, 3.4vw, 32px);
+    line-height: 1.05;
+    font-weight: 700;
+    letter-spacing: -0.6px;
+  }
+  .row:hover .name {
+    color: var(--x402-accent);
+  }
+  .price {
+    grid-area: price;
+    align-self: start;
+    min-width: 6ch;
+    font-family: var(--font-mono);
+    font-size: 15px;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+    text-align: end;
+    padding-top: 6px;
+  }
+  .price .x402-skeleton {
+    width: 6ch;
+  }
+  .pitch {
+    grid-area: pitch;
+    font-family: var(--font-serif);
+    font-size: 1.05rem;
+    line-height: 1.5;
+    color: var(--body);
+    max-width: 40em;
+  }
+  .meta {
+    grid-area: meta;
     display: flex;
     flex-wrap: wrap;
-    gap: 10px;
-    margin-top: 16px;
+    align-items: center;
+    gap: 6px 18px;
+    margin-top: 2px;
+    min-height: 20px;
   }
-  .agents {
-    padding: 16px 18px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-card);
-    background: var(--panel);
-  }
-  .agents h2 {
-    margin: 0;
+  .entry {
     font-family: var(--font-mono);
-    font-size: 11px;
+    font-size: 12.5px;
+    color: var(--muted);
+    overflow-wrap: anywhere;
+  }
+  @media (max-width: 519px) {
+    .row {
+      grid-template-columns: 1fr;
+      grid-template-areas:
+        'name'
+        'price'
+        'pitch'
+        'meta';
+      padding-inline-start: 14px;
+    }
+    .price {
+      text-align: start;
+      padding-top: 0;
+    }
+  }
+
+  /* The wire: three steps, each labelled by what is on the wire at that moment. */
+  .wire {
+    list-style: none;
+    margin: 4px 0 8px;
+    padding: 0;
+    counter-reset: step;
+    display: flex;
+    flex-direction: column;
+    max-width: 62ch;
+  }
+  .wire li {
+    counter-increment: step;
+    display: grid;
+    grid-template-columns: 2ch 9ch minmax(0, 1fr);
+    gap: 6px 14px;
+    align-items: baseline;
+    padding: 10px 0;
+    border-bottom: 1px solid var(--border);
+  }
+  .wire li::before {
+    content: counter(step);
+    font-family: var(--font-mono);
+    font-size: 13px;
+    color: var(--subtle);
+  }
+  .wire code {
+    font-family: var(--font-mono);
+    font-size: 13px;
     font-weight: 600;
-    letter-spacing: 0.8px;
-    text-transform: uppercase;
-    color: var(--on-surface);
-  }
-  .agents p {
-    margin: 8px 0 0;
-    font-family: var(--font-serif);
-    font-size: 0.92rem;
-    line-height: 1.5;
-  }
-  .agents a {
     color: var(--accent);
+    white-space: nowrap;
   }
-  .curl {
-    margin: 8px 0 0;
-    padding: 10px 12px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-control);
-    background: var(--accent-soft);
-    overflow-x: auto;
+  .wire p {
+    margin: 0;
+    font-size: 15px;
+    line-height: 1.5;
+    color: var(--body);
   }
-  .curl code {
-    font-family: var(--font-mono);
-    font-size: 12px;
-    color: var(--on-surface);
+  @media (max-width: 519px) {
+    .wire li {
+      grid-template-columns: 2ch minmax(0, 1fr);
+    }
+    .wire p {
+      grid-column: 2;
+    }
+  }
+  .quiet {
+    color: var(--accent);
+    font-size: 15px;
   }
 </style>

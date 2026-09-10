@@ -7,7 +7,6 @@
   import { navigate, pathOnly } from '../lib/router'
   import { articleChromeCollapsed } from '../lib/articleChrome'
   import { recoverFromStaleChunk, clearStaleChunkGuard } from '../lib/staleChunk'
-  import { ensureX402Catalog, x402CatalogState } from '../lib/x402/catalogStore'
   import BrandMark from './BrandMark.svelte'
   import Icon from './Icon.svelte'
   import MarketsBar from './MarketsBar.svelte'
@@ -16,13 +15,6 @@
   import type { Component } from 'svelte'
 
   let { children }: { children: import('svelte').Snippet } = $props()
-
-  // The marketplace build's nav below reads the live catalog v2 document
-  // (sections[]) instead of a hand-maintained page list -- fetched once,
-  // shared with every routes/marketplace/*.svelte page (lib/x402/
-  // catalogStore.ts). `config.product` is fixed per build, so this never
-  // fires an extra request on a newspaper page load.
-  if (config.product === 'marketplace') ensureX402Catalog()
 
   let drawerOpen = $state(false)
   let walletOpen = $state(false)
@@ -62,60 +54,28 @@
      near-identical feed tabs plus two marketing pages made the row read as
      noise.
 
-     Marketplace build (config.product === 'marketplace', x402.pxke.me): x402
-     pages are the only surface, so this same tab row carries the marketplace's
-     own top-level pages instead of the newspaper's -- no newspaper chrome, no
-     second nav component. Each entry is tagged with the catalog v2 section
-     (`sections[]`) it belongs to and only shows once that section is actually
-     present in the live document -- genuinely restructured per
-     docs/x402-marketplace-product-redesign.md §4.1 (Directory · Board ·
-     Requests · Trust · Services · Developers), not the old hardcoded
-     Directory/Board/Requests/Grades/Our-Endpoints list this replaces. "List an
-     endpoint" is deliberately a CTA in `moreNav` below, not a nav pill --
-     Social has no entry at all (agent-only, per the redesign's own "not in
-     the nav" rule). */
+     Marketplace build (config.product === 'marketplace', x402.pxke.me): the
+     storefront's own pages sit in this same tab row -- one per product plus
+     Developers -- no newspaper chrome, no second nav component. Static
+     routes, so the nav never depends on the catalog fetch. */
   const MARKETPLACE_NAV_PAGES = [
     {
-      section: 'discover',
-      href: '/directory',
-      label: 'Directory',
-      icon: 'hub' as const,
-      match: (p: string) => p === '/directory' || p === '/listing',
+      href: '/scan',
+      labelKey: 'x402ProductScanName',
+      icon: 'search' as const,
+      match: (p: string): boolean => p === '/scan',
     },
     {
-      section: 'discover',
-      href: '/board',
-      label: 'Board',
-      icon: 'bar_chart' as const,
-      match: (p: string) => p === '/board',
-    },
-    {
-      section: 'discover',
-      href: '/requests',
-      label: 'Requests',
-      icon: 'lightbulb' as const,
-      match: (p: string) => p === '/requests',
-    },
-    {
-      section: 'trust',
-      href: '/trust',
-      label: 'Trust',
-      icon: 'insights' as const,
-      match: (p: string) => p === '/trust',
-    },
-    {
-      section: 'services',
-      href: '/services',
-      label: 'Services',
+      href: '/storage',
+      labelKey: 'x402ProductStorageName',
       icon: 'layers' as const,
-      match: (p: string) => p === '/services',
+      match: (p: string): boolean => p === '/storage',
     },
     {
-      section: 'meta',
-      href: '/developers',
-      label: 'Developers',
+      href: '/news',
+      labelKey: 'x402ProductNewsName',
       icon: 'article' as const,
-      match: (p: string) => p === '/developers',
+      match: (p: string): boolean => p === '/news',
     },
   ] as const
 
@@ -137,18 +97,12 @@
 
   const sections = $derived(
     config.product === 'marketplace'
-      ? (() => {
-          const liveSectionKeys = $x402CatalogState.catalog
-            ? new Set($x402CatalogState.catalog.sections?.map((s) => s.key) ?? [])
-            : null
-          // While the catalog hasn't loaded (or failed), show every page --
-          // these are static routes, not conjured from the document, so a
-          // slow/failed fetch degrades product summaries, never the nav
-          // itself.
-          return MARKETPLACE_NAV_PAGES.filter(
-            (entry) => !liveSectionKeys || liveSectionKeys.has(entry.section),
-          )
-        })()
+      ? MARKETPLACE_NAV_PAGES.map((entry) => ({
+          href: entry.href,
+          label: t($messages, entry.labelKey),
+          icon: entry.icon,
+          match: entry.match,
+        }))
       : config.product === 'registry'
       ? REGISTRY_NAV_PAGES
       : [
@@ -183,10 +137,10 @@
     config.product === 'marketplace'
       ? [
           {
-            href: '/list',
-            label: t($messages, 'x402CtaListLabel'),
-            icon: 'send' as const,
-            match: (p: string) => p === '/list',
+            href: '/developers',
+            label: t($messages, 'x402DevTitle'),
+            icon: 'article' as const,
+            match: (p: string) => p === '/developers',
           },
         ]
       : config.product === 'registry'
@@ -212,10 +166,13 @@
             match: (p: string) => p === '/contact',
           },
           {
-            href: '/x402',
+            // The x402 storefront is its own site (x402.pxke.me): a real
+            // cross-origin navigation from the drawer, never go()/navigate().
+            href: config.marketplaceSiteUrl,
             label: t($messages, 'navX402'),
             icon: 'hub' as const,
-            match: (p: string) => p === '/x402' || p.startsWith('/x402/'),
+            match: (_p: string): boolean => false,
+            external: true,
           },
         ],
   )
@@ -450,14 +407,24 @@
               ? 'Registry'
               : 'PXke'}</span
           >
-          <span class="dateline">
-            <span class="date-long">{dateline}</span>
-            <span class="date-short">{datelineShort}</span>
-            <span class="clock-pair">
-              <span class="clock-sep" aria-hidden="true">·</span>
-              <span class="clock" {@attach liveClock($activeLocale)}></span>
+          {#if config.product === 'news'}
+            <span class="dateline">
+              <span class="date-long">{dateline}</span>
+              <span class="date-short">{datelineShort}</span>
+              <span class="clock-pair">
+                <span class="clock-sep" aria-hidden="true">·</span>
+                <span class="clock" {@attach liveClock($activeLocale)}></span>
+              </span>
             </span>
-          </span>
+          {:else}
+            <!-- The edition stamp is newspaper chrome. A marketplace or a
+                 directory says what it is instead. -->
+            <span class="tagline">
+              {config.product === 'marketplace'
+                ? t($messages, 'x402Masthead')
+                : 'Algorand projects, human-reviewed'}
+            </span>
+          {/if}
         </span>
       </a>
 
@@ -490,16 +457,34 @@
           </button>
         {/if}
 
-        <button
-          class="icon-btn"
-          class:active={onSearch}
-          type="button"
-          title={t($messages, 'navSearch')}
-          aria-label={t($messages, 'navSearch')}
-          onclick={() => go('/search')}
-        >
-          <Icon name="search" size={22} />
-        </button>
+        {#if config.product === 'news'}
+          <button
+            class="icon-btn"
+            class:active={onSearch}
+            type="button"
+            title={t($messages, 'navSearch')}
+            aria-label={t($messages, 'navSearch')}
+            onclick={() => go('/search')}
+          >
+            <Icon name="search" size={22} />
+          </button>
+        {:else}
+          <!-- The marketplace and registry builds have no /search route; their
+               one call to action takes the search icon's place. -->
+          {#each moreNav.slice(0, 1) as cta (cta.href)}
+            <a
+              class="masthead-cta"
+              class:active={cta.match($pathOnly)}
+              href={cta.href}
+              onclick={(e) => {
+                e.preventDefault()
+                go(cta.href)
+              }}
+            >
+              {cta.label}
+            </a>
+          {/each}
+        {/if}
 
         <!-- Suggestions is config-gated and Admin is wallet-gated, so for an
              ordinary reader this menu held exactly one entry: the page they
@@ -567,7 +552,17 @@
           >
             {shortAddr($walletAddress)}
           </button>
-        {:else}
+        {:else if config.product !== 'registry'}
+          <!-- No registry action needs a connected wallet for a non-admin
+               visitor (2026-09-08 Fable review): the submit flow is free/
+               no-login, and the only thing a wallet unlocks anywhere on this
+               site is the admin panel, which a signed-in admin already sees
+               via the branch above (cross-domain session, see
+               lib/auth/session.ts's restoreFromCookie). Offering a "Connect
+               wallet" prompt with nothing behind it just confuses a visitor
+               -- RegistrySubmit.svelte's own lead line already says "Free,
+               no wallet needed" directly under where this button used to
+               sit. -->
           <button
             class="wallet-stamp article-secondary"
             type="button"
@@ -632,7 +627,7 @@
        no ALGO price/round ticker chrome. MarketsBar's own showOn already
        gates on `/`, which the registry build also uses as its root, so this
        is excluded at the call site rather than inside the shared component. -->
-  {#if config.product !== 'registry'}
+  {#if config.product === 'news'}
     <MarketsBar />
   {/if}
 
@@ -673,14 +668,20 @@
           : t($messages, 'navNews')}
       </p>
       {#each drawerNav as item (item.href)}
-        <button
-          type="button"
-          class="drawer-link"
-          class:selected={item.match($pathOnly)}
-          onclick={() => go(item.href)}
-        >
-          {item.label}
-        </button>
+        {#if 'external' in item && item.external}
+          <a class="drawer-link" href={item.href} onclick={() => (drawerOpen = false)}>
+            {item.label}
+          </a>
+        {:else}
+          <button
+            type="button"
+            class="drawer-link"
+            class:selected={item.match($pathOnly)}
+            onclick={() => go(item.href)}
+          >
+            {item.label}
+          </button>
+        {/if}
       {/each}
 
       <p class="drawer-label">{t($messages, 'navAppearance')}</p>
@@ -688,7 +689,8 @@
         <button type="button" class="drawer-link" onclick={() => logout()}>
           {shortAddr($walletAddress)}
         </button>
-      {:else}
+      {:else if config.product !== 'registry'}
+        <!-- Same reasoning as the desktop wallet-stamp button above. -->
         <button
           type="button"
           class="drawer-link"
@@ -928,6 +930,46 @@
     }
     .date-short {
       display: none;
+    }
+  }
+  .tagline {
+    display: none;
+    font-family: var(--font-sans);
+    font-size: 12px;
+    color: var(--masthead-muted);
+    margin-top: 3px;
+  }
+  @media (min-width: 860px) {
+    .tagline {
+      display: block;
+    }
+  }
+  .masthead-cta {
+    display: none;
+    align-items: center;
+    min-height: 34px;
+    padding: 0 14px;
+    margin-inline-end: 6px;
+    border: 1px solid var(--masthead-ink);
+    border-radius: var(--radius-control);
+    color: var(--masthead-ink);
+    font-family: var(--font-sans);
+    font-size: 13px;
+    font-weight: 600;
+    text-decoration: none;
+    white-space: nowrap;
+  }
+  .masthead-cta:hover {
+    background: var(--masthead-ink);
+    color: var(--surface);
+    text-decoration: none;
+  }
+  .masthead-cta.active {
+    opacity: 0.55;
+  }
+  @media (min-width: 700px) {
+    .masthead-cta {
+      display: inline-flex;
     }
   }
   .actions {
@@ -1380,6 +1422,9 @@
   .drawer-link:hover {
     color: var(--accent);
     background: transparent;
+  }
+  a.drawer-link {
+    text-decoration: none;
   }
   .drawer-link.selected {
     color: var(--accent);

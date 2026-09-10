@@ -1,10 +1,8 @@
 /**
- * Browser x402 "exact" AVM payment client -- the shared `payWithWallet`
- * helper docs/x402-marketplace-product-redesign.md §2.2 proposes, so every
- * future paid-write flow (board placement, grading, ...) reuses this rather
- * than a second hand-built payment group (CLAUDE.md §3, "no new copies of
- * existing logic"). First consumer: X402RegisterForm.svelte's "Pay & submit"
- * button.
+ * Browser x402 "exact" AVM payment client -- the one shared `payWithWallet`
+ * helper every in-browser paid call goes through (CLAUDE.md §3, "no new
+ * copies of existing logic"). Consumer: the "Try it from your wallet" panel
+ * on the /scan storefront page (X402ScanTryPanel.svelte).
  *
  * Mirrors, field-for-field, the mainnet-proven Python reference for this
  * exact backend (`x402-client/pxke_x402/client.py`'s `_paid_request` +
@@ -153,7 +151,7 @@ export type PayStep =
   | 'submitting'
 
 export type PayWithWalletParams = {
-  /** Absolute URL of the paid route (e.g. `${apiBase}/api/v1/x402/list`). */
+  /** Absolute URL of the paid route (e.g. `${apiBase}/api/v1/x402/scan/url`). */
   url: string
   /** The exact JSON body to POST both before and after payment -- unread on the unpaid attempt (challenge_if_unpaid runs before body parsing) but sent identically both times, same as the Python reference client. */
   body: Record<string, unknown>
@@ -436,9 +434,8 @@ async function errorFromResponse(
  * `PAYMENT-SIGNATURE` and the facilitator verifies + settles it
  * server-side, same as every other x402 client. Throws `X402PaymentError`
  * on any failure; check `.settled` before assuming no money moved (a
- * "settles but refused" response -- e.g. relisting a URL someone else
- * already owns -- still charges the payer, by design; see
- * `x402_directory/api/routes.py`'s own docstring).
+ * "settles but refused" response -- e.g. a storage renewal by a wallet that
+ * does not own the backup -- still charges the payer, by design).
  */
 export async function payWithWallet(params: PayWithWalletParams): Promise<PayWithWalletResult> {
   const { url, body, payerAddress, algod, signGroup, signal, onStep, expectedPayTo, maxPaymentAtomic } = params

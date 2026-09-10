@@ -24,7 +24,12 @@ def _dt(epoch: int) -> datetime | None:
 
 
 def _epoch(value: datetime | None) -> int:
-    """UTC epoch seconds from a stored timestamp (naive-but-UTC driver convention, see x402_directory's cassandra store for the incident this avoids)."""
+    """UTC epoch seconds from a stored timestamp.
+
+    The Cassandra driver returns timezone-naive datetimes that are already
+    UTC wall-clock values -- calling .timestamp() directly would make Python
+    assume the server's LOCAL zone and silently shift the result.
+    """
     if value is None:
         return 0
     if value.tzinfo is None:
@@ -116,9 +121,9 @@ class CassandraProjectStore:
 
     Store-before-mark (CLAUDE.md section 2): the by-domain LWT claim lands
     before the canonical row, which lands before any category/tag/status
-    projection. Every write path mirrors x402_directory's CassandraListingStore
-    shape (read `previous` before a projection-affecting write, delete the
-    superseded rows, insert the fresh ones).
+    projection. Every write path follows the same shape: read `previous`
+    before a projection-affecting write, delete the superseded rows, insert
+    the fresh ones.
     """
 
     def insert_if_domain_absent(self, item: StoredProject) -> bool:

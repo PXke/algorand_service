@@ -47,13 +47,12 @@ class SessionStore:
         """Atomically pop the pending nonce challenge JSON for a (wallet, nonce) pair, or None if absent.
 
         Keyed by (wallet, nonce), not wallet alone (2026-09-07 security
-        review, finding 2 -- the same bug already found and fixed in
-        x402_social's session_service.py: a wallet-only key means ANY
-        verify request naming that wallet, garbage nonce/signature
-        included, would GETDEL whatever real challenge the wallet owner
-        had just minted -- an attacker who knows only the public admin
-        address (on-chain, not secret) could grief every login attempt by
-        hammering verify with no rate limit on this route. Keying by the
+        review, finding 2): a wallet-only key means ANY verify request
+        naming that wallet, garbage nonce/signature included, would GETDEL
+        whatever real challenge the wallet owner had just minted -- an
+        attacker who knows only the public admin address (on-chain, not
+        secret) could grief every login attempt by hammering verify with
+        no rate limit on this route. Keying by the
         unguessable nonce too means a wrong-nonce attempt simply misses,
         leaving the legitimate pending challenge untouched. GETDEL so two
         parallel verify requests for the same (wallet, nonce) still cannot

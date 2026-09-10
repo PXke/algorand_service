@@ -1,5 +1,7 @@
 # x402 flight-search product — research and architecture analysis
 
+> **Note (2026-09-10):** the price comparables below cite `x402_social_*`, `x402_features_*`, `x402_grading_*`, `x402_board_price` and `kyc_lookup_price` — products removed on 2026-09-10 (see [ADR-0006](adr/ADR-0006-x402-consolidation.md)). Live anchors today are `x402_news_search_price` ($0.001), `x402_scan_price` ($0.01) and the storage per-KB rate.
+
 Status: **research only, no code written**. Written in response to the owner's
 brainstorm for an x402-paid "delegate my flight search to an agent" product
 built on SerpApi's Google Flights data. Per instructions this file is left

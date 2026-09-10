@@ -1,6 +1,6 @@
 # Wallet Auth Protocol — ARC-0025, ARC-0060, SIWA / CAIP-122
 
-This document describes the **Wallet Auth brick** implementation across backend (`backend/app/modules/auth/`) and the frontend client (`frontend/src/lib/auth/`, Vite + Svelte). The `opensource/wallet_auth_flutter/` Flutter package this doc used to describe client-side now belongs to the separate x402/KYC app (`frontend_kyc/`), not the main newspaper frontend.
+This document describes the **Wallet Auth brick** implementation across backend (`backend/app/modules/auth/`) and the frontend client (`frontend/src/lib/auth/`, Vite + Svelte). The `opensource/wallet_auth_flutter/` Flutter package this doc used to describe client-side is no longer consumed by any live frontend: its last consumer, the x402 KYA app (`frontend_kyc/`), was removed on 2026-09-10 (see `docs/adr/ADR-0006-x402-consolidation.md`); the package stays in `opensource/` as a historical component.
 
 **Coverage:** full **SIWA / CAIP-122** message generation, **ARC-0060 AUTH** verification (reference-aligned with `assets/arc-0060/arc60wallet.api.ts`), and **ARC-0025** WalletConnect session + `algo_signTxn` fallback.
 

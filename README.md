@@ -1,12 +1,19 @@
 # Algorand Platform
 
 Monorepo for **PXke Algorand**, an Algorand-focused, largely autonomous
-newspaper — Robyn backend, Celery workers (frontier crawler, writer
-pipeline, gatekeeper, social distribution), and a Vite + Svelte web SPA.
+newspaper — Falcon backend, Celery workers (frontier crawler, writer
+pipeline, gatekeeper, social distribution), and a Vite + Svelte web SPA —
+plus a second product sharing the same backend: the **PXke x402
+marketplace** (`x402.pxke.me`), three pay-per-call services for agents
+settled in USDC/EURQ/USDQ on Algorand mainnet through the GoPlausible
+facilitator: the News Engine (free headlines/tags/articles, paid search),
+a sandboxed file/tarball scan, and agent backup storage. See
+`docs/x402-quickstart.md`, `docs/x402-marketplace-api.md` and
+`docs/adr/ADR-0006-x402-consolidation.md` (why it is exactly these three).
 
 ## Workspace Layout
 
-- `backend/`: Robyn API service
+- `backend/`: Falcon API service (newspaper + x402 marketplace modules `x402*/`)
 - `conduit/`: Conduit + Cassandra exporter (algod → on-chain tables)
 - `workers/`: Celery asynchronous workers
 - `frontend/`: Vite + Svelte SPA (primary web client)
@@ -46,6 +53,7 @@ milestones above:
 - **Admin console** — wallet-gated ops/CMS: article edit, source curation, classifier retrain, gatekeeper tuning, publish queue, analytics (`backend/app/modules/admin/`, SPA `/admin`)
 - **Social auto-distribution** — Bluesky, Telegram posting on publish (`workers/app/modules/distribution/`)
 - **8-language article translation** (every non-English UI locale), 9-language UI (`frontend/src/lib/i18n/`)
+- **x402 marketplace** — three paid products of our own behind one shared payment gate (`backend/app/modules/x402/` + `x402_news/`, `x402_scan/`, `x402_storage/`), catalog + `/.well-known/x402` + `/openapi.json` discovery, settlement ledger, auto-refund and circuit breaker, Python SDK in `x402-client/`
 - **msgspec** for all wire schemas (pydantic fully removed); **prepared-statement registry** for all Cassandra queries (`backend/app/core/statements.py`)
 
 - **Weekly digest** — Monday beat + manual task; market + feed highlights → [docs/modules/weekly-price-analysis.md](docs/modules/weekly-price-analysis.md)

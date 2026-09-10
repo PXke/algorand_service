@@ -1,5 +1,7 @@
 # Algorand ecosystem directory (roadmap item 26) — design pass
 
+> **Note (2026-09-10):** the `x402_board`, `x402_directory` and `x402_features` modules this design cites as code to reuse (§5 featured tier, submission shape) were removed in the x402 consolidation — see `docs/adr/ADR-0006-x402-consolidation.md`. The shipped registry (`backend/app/modules/ecosystem/`) is self-contained; the v1.1 featured-tier plan below needs an owner re-read before it is built.
+
 Date: 2026-09-07. Read-only design pass; no code was changed, nothing was
 deployed, nothing was posted anywhere. Answers `CLAUDE.md` §9.1 item 26's
 "needs a submission/moderation design before any code" gate, with item 26b

@@ -1,5 +1,7 @@
 # x402 List (x402-list.com) — submission draft
 
+> **STALE (2026-09-10):** this draft cites `GET /api/v1/x402/features/demand` and other routes of products removed on 2026-09-10 ([ADR-0006](adr/ADR-0006-x402-consolidation.md)). Do not submit as written; rebuild the entry from the live catalog (`GET /api/v1/x402`), which now lists only news, scan and storage.
+
 Status: **DRAFT ONLY — not sent.** Nothing has been POSTed to x402-list.com
 and no form has been opened in a browser. Do not submit until the owner has
 supplied a real email address (see the flag below) and, ideally, confirmed

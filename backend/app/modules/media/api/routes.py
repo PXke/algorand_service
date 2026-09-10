@@ -111,15 +111,6 @@ def _cache_set(url: str, ctype: str, data: bytes) -> None:
         _redis().set(_cache_key(url), ctype.encode("latin-1") + b"\0" + data, ex=_CACHE_TTL)
 
 
-# Backward-compat alias: `resolve_public_ip` used to live here as
-# `_resolve_public_ip` before it was promoted to `app.core.ssrf_guard`
-# (see that module's own docstring). `app.modules.x402_grading.services.
-# usage_proof` still imports this private name directly from this module;
-# leave the alias in place until that caller is migrated too, rather than
-# breaking it as a side effect of this move.
-_resolve_public_ip = resolve_public_ip
-
-
 def _stream_fetch(
     url: str, *, transport: httpx.BaseTransport | None = None
 ) -> tuple[int, str, bytes]:

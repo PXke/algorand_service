@@ -67,14 +67,9 @@ def _configure(monkeypatch: pytest.MonkeyPatch, *, enabled: bool = True, **store
     monkeypatch.setattr(settings, "x402_network", ALGORAND_TESTNET_CAIP2)
     monkeypatch.setattr(settings, "x402_pay_to_address", _PAY_TO)
     monkeypatch.setattr(settings, "x402_public_api_base", "https://algorand-api.pxke.me")
-    for setting in (
-        "x402_directory_store",
-        "x402_board_store",
-        "x402_features_store",
-        "x402_grading_store",
-        "news_store",
-        "kyc_store",
-    ):
+    monkeypatch.setattr(settings, "x402_scan_enabled", True)
+    monkeypatch.setattr(settings, "x402_storage_local_root", "/tmp/x402-storage-wellknown-test")
+    for setting in ("news_store", "x402_storage_meta_store"):
         monkeypatch.setattr(settings, setting, stores.get(setting, "cassandra"))
     monkeypatch.setattr(rate_limit_core, "get_redis", _FakeRedis)
 
@@ -158,15 +153,17 @@ def test_openapi_is_valid_shaped_and_lists_a_paid_and_a_free_route(
     assert isinstance(spec["paths"], dict)
     assert spec["paths"]
 
-    # A known paid route: POST /api/v1/x402/list (directory listing).
-    paid_op = spec["paths"]["/api/v1/x402/list"]["post"]
+    # A known paid route: POST /api/v1/x402/scan/url.
+    paid_op = spec["paths"]["/api/v1/x402/scan/url"]["post"]
     assert paid_op["x-x402-paid"] is True
-    assert paid_op["x-x402-resource"] == "x402-directory-list"
-    assert paid_op["x-x402-price-usd"] == settings.x402_listing_price
+    assert paid_op["x-x402-resource"] == "x402-scan-url"
+    assert paid_op["x-x402-price-usd"] == settings.x402_scan_price
+    assert paid_op["x-x402-supports-preview"] is True
+    assert "x-x402-supports-receipts" not in paid_op
     assert paid_op["responses"]["402"]
 
-    # A known free route: GET /api/v1/x402/search.
-    free_op = spec["paths"]["/api/v1/x402/search"]["get"]
+    # A known free route: GET /api/v1/x402/news.
+    free_op = spec["paths"]["/api/v1/x402/news"]["get"]
     assert free_op["x-x402-paid"] is False
     assert "402" not in free_op["responses"]
 

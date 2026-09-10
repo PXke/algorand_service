@@ -44,7 +44,7 @@ const REQUIREMENT: X402PaymentRequirement = {
 const REQUIRED: X402PaymentRequired = {
   x402Version: 2,
   error: null,
-  resource: { url: 'https://algorand-api.pxke.me/api/v1/x402/list', description: 'list', mimeType: 'application/json' },
+  resource: { url: 'https://algorand-api.pxke.me/api/v1/x402/scan/url', description: 'scan', mimeType: 'application/json' },
   accepts: [REQUIREMENT],
   extensions: null,
 }
@@ -309,7 +309,7 @@ describe('payWithWallet', () => {
     const steps: string[] = []
 
     const result = await payWithWallet({
-      url: 'https://algorand-api.pxke.me/api/v1/x402/list',
+      url: 'https://algorand-api.pxke.me/api/v1/x402/scan/url',
       body: { url: 'https://example.com', price: '$0.01' },
       payerAddress: PAYER,
       algod,

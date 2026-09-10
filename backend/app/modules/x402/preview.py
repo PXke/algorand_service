@@ -6,10 +6,9 @@ facilitator call at all. See guard.require_payment's `preview` kwarg for the
 bypass itself and paid_request.require_paid_request's `preview` kwarg for how
 a route wires the two together (worked example: x402_catalog's x402_ping).
 
-Query-param trigger (`?preview=true`), same convention this codebase already
-uses for the free/paid distinctions on GET routes (see x402_grading's
-`/grades/score`, which reads its own `?url=` before deciding whether to
-charge). A route opts a caller INTO preview by calling `preview_requested`
+Query-param trigger (`?preview=true`), the same convention this codebase
+uses for free/paid distinctions on GET routes. A route opts a caller INTO
+preview by calling `preview_requested`
 itself and passing the result to `require_paid_request(..., preview=...)` —
 a route that never calls this is completely unaffected, preview or not.
 

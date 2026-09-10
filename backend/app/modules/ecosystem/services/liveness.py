@@ -1,4 +1,4 @@
-"""Submit-time and re-check liveness, reusing x402_uptime's SSRF-guarded reachability checker.
+"""Submit-time and re-check liveness, built on the SSRF-guarded reachability checker.
 
 CLAUDE.md section 3: no new copy of existing logic -- `check_target`
 (SSRF-guarded DNS resolution, redirect-limited, body never read) already
@@ -12,7 +12,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from app.core.config import settings
-from app.modules.x402_uptime.services.checker import check_target
+from app.modules.ecosystem.services.checker import check_target
 
 # check_target()'s own `reachable` flag means only "got a transport-level
 # HTTP response at all" -- any status, including 4xx/5xx, counts. That was

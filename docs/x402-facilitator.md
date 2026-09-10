@@ -30,22 +30,23 @@ memory or a different package version; re-verify if `x402-avm` is upgraded.
   - **Standard** — one project, one endpoint, one price.
   - **Composite** — several endpoints under one project, same `payTo`,
     individually discoverable, roll up under one merchant on the leaderboard.
-    **This is almost certainly our category** — the directory/KYC/probe/
-    bounties marketplace is exactly this shape.
+    **This is our category** — three separately-priced products (news
+    search, file scan, backup storage) under one `payTo` is exactly this
+    shape, and was already the right category before the 2026-09-10
+    consolidation (ADR-0006) when there were ten.
   - **Orchestrator** — the product's own endpoint settles the client's
     payment first, then pays *other teams'* downstream endpoints from its own
-    wallet as part of its workflow. Only the probe (paying other listed
-    endpoints) resembles this, and it's explicitly excluded from ranking
-    (labelled probe traffic) — so Composite, not Orchestrator, is the right
-    top-level category.
+    wallet as part of its workflow. Nothing we run pays any downstream
+    endpoint — so Composite, not Orchestrator, is the right top-level
+    category.
   - Full definitions: https://algorand.co/blog/the-x402-global-challenge-is-live-how-to-build-submit-your-entry
 - **Anti-gaming enforcement is real, not just good practice**: the
   Administrator explicitly reserves the right to audit and exclude
   "artificial volume, wash transactions, repeated self-payments" from
-  leaderboard results (Official Rules §14). Every safeguard in CLAUDE.md §2
-  (no self-payment except the labelled probe, amount-weighted not
-  count-weighted ranking) is a disqualification-risk mitigation, not
-  optional polish.
+  leaderboard results (Official Rules §14). Every safeguard in CLAUDE.md §9
+  (no self-payment except labelled operator probe wallets, which the
+  settlements feed excludes in code) is a disqualification-risk mitigation,
+  not optional polish.
 - EURQ/USDQ/USDT asset ids appear **nowhere** in official challenge material
   — multi-asset support needs independent research (Quantoz's own docs /
   Algorand asset explorer) and doesn't move the Volume score anyway. Treat as
@@ -127,20 +128,45 @@ Other consequences, observed on our own merchant entry:
 `settings.x402_public_api_base` + the request path as the offer's
 `resource.url` (`_resource_url`), while the short id passed as `resource=`
 stays what the settlement ledger records. Routes with a path parameter pass
-`resource_path=` to override the advertised path with the template (the
-feature-vote route advertises `/api/v1/x402/features/{request_id}/vote`).
+`resource_path=` to override the advertised path with the template (e.g.
+the storage renew route advertises
+`/api/v1/x402/storage/backups/{backup_id}/renew`; before the consolidation
+the feature-vote route advertised `/api/v1/x402/features/{request_id}/vote`,
+which is where this was first found).
 Our merchant reads `bazaar: true` with 7 challenge-tagged, catalogued
-routes as of 2026-09-06 (out of 27 paid routes) — the other 20 are blocked
-by a separate bug, also found and fixed 2026-09-05/06: most of our paid
-routes validated their request body BEFORE running the payment gate, so an
-unpaid probe (which is how any x402 client, and the facilitator's own
-`verify` call, first learns the price) got a plain validation error instead
-of ever seeing the 402 challenge. Fixed via a shared
-`app/modules/x402/paid_request.py:challenge_if_unpaid()` primitive applied
-across every paid module. See `test_x402_bazaar_extension_sweep.py` for the
-regression coverage (drives every real route registrar unpaid against a
-stub facilitator and validates the emitted extension survives the
+routes as of 2026-09-06 (out of 27 paid routes at the time) — the other 20
+were blocked by a separate bug, also found and fixed 2026-09-05/06: most of
+our paid routes validated their request body BEFORE running the payment
+gate, so an unpaid probe (which is how any x402 client, and the
+facilitator's own `verify` call, first learns the price) got a plain
+validation error instead of ever seeing the 402 challenge. Fixed via a
+shared `app/modules/x402/paid_request.py:challenge_if_unpaid()` primitive
+applied across every paid module. See `test_x402_bazaar_extension_sweep.py`
+for the regression coverage (drives every real route registrar unpaid
+against a stub facilitator and validates the emitted extension survives the
 facilitator's own parser).
+
+**Stale Bazaar entries after the 2026-09-10 consolidation (ADR-0006).**
+As of 2026-09-10 the Bazaar still catalogs 7 of our routes for merchant
+`S1NBVk9ZVFZOQjdBNk5LQ000VzJXQk9P` (re-fetched live that day):
+`GET /api/v1/x402/news/search`, `GET /api/v1/x402/ping`,
+`POST /api/v1/x402/list`, `GET /api/v1/x402/features/demand`,
+`GET /api/v1/x402/grades/score`, `POST /api/v1/x402/grades`,
+`POST /api/v1/x402/board`. Five of those belong to removed products
+(directory, feature board, grading, visibility board) and the `ping` route
+was removed with them, so six of the seven will `404` after the next
+deploy; only `news/search` survives. **The facilitator exposes no
+delete/unregister endpoint** — verified 2026-09-10 against
+`/docs/openapi.json`: the discovery namespace is read-only (`GET
+/discovery/resources`, `/discovery/resources/{id}`, `/discovery/merchants`,
+`/discovery/merchants/{id}`, `/discovery/all`, `/discovery/facilitators`,
+`/discovery/paymentmethods`), `/data/*` is all `GET`, and the only `POST`s
+are `/verify`, `/settle`, `/agent/query|suggest`, `/mcp/call`,
+`/platform/favorites|feedback` and `/sponsorship/purchase/{tier}`. Stale
+entries can therefore only age out on the facilitator's own schedule or be
+purged by GoPlausible on request. Lesson, now in the endpoint checklist:
+every `resource.url` we advertise is a public commitment we cannot
+retract.
 
 ### Merchant profile enrichment (name/description/website/logo/banner)
 
@@ -243,14 +269,14 @@ requirement.
 ## Bazaar discovery extension
 
 Confirmed from `x402/extensions/bazaar/resource_service.py` (in active use
-by every paid module: `modules/x402_directory/`, `x402_board/`,
-`x402_features/`, `x402_grading/`, `x402_news/`, `modules/kya/api/routes.py`).
+by every paid module: `modules/x402_news/`, `x402_scan/`, `x402_storage/`).
 
 **Do not call `declare_discovery_extension(..., output={"example": ...})`
 with a bare dict** — that is what the submission guide shows, and it 500s the
 route before it ever emits a 402: the installed `x402-avm==2.0.2` reads
-`output.example` as an attribute, so `output` must be an `OutputConfig`. Both
-KYA paid routes shipped with that bug (fixed 2026-08-30). The repo's wrapper
+`output.example` as an attribute, so `output` must be an `OutputConfig`. Two
+paid routes (in the since-removed KYA module) shipped with that bug, fixed
+2026-08-30. The repo's wrapper
 `modules/x402/discovery.py:describe_json_endpoint` makes the mistake
 structurally impossible, so always go through it:
 
@@ -292,11 +318,13 @@ extension via `require_payment(extensions=...)`.
 ## Phase 0 acceptance — PASSED 2026-08-30
 
 A real payment round-tripped end-to-end on TestNet against the live
-GoPlausible facilitator: `POST /api/v1/x402/list` with no payment → `402` with
-a correct offer → built + signed a real payment → retried → `200` with a
-`settlement_tx_id` → independently confirmed on-chain via the public indexer
-(not just trusted from our own backend's response) → confirmed the listing
-appears in `GET /api/v1/x402/search`. Settlement tx
+GoPlausible facilitator: `POST /api/v1/x402/list` (the directory listing
+route, removed 2026-09-10 — the shared gate it exercised is unchanged and
+is what every surviving paid route runs through) with no payment → `402`
+with a correct offer → built + signed a real payment → retried → `200` with
+a `settlement_tx_id` → independently confirmed on-chain via the public
+indexer (not just trusted from our own backend's response) → confirmed the
+resulting listing was readable back. Settlement tx
 `VXFLM6A225ODFIV52XET7CZTYV22TF32562FA5IPZXJ74QHUXVNQ`, confirmed round
 66808163, `asset-id 10458941`, sender = payer wallet, receiver = `payTo`
 wallet, group-settled alongside the facilitator's own fee-payer leg (fee: 0 on
@@ -401,6 +429,61 @@ This only affects **client-side** signer implementations (anything paying
 *through* our marketplace, or a test harness proving Phase 0) — it does not
 affect our own server-side code, which never implements `ClientAvmSigner` and
 was already correct.
+
+## Browser-side payment: the wallet signs only the ASA leg
+
+Kept from `docs/x402-marketplace-product-redesign.md` (deleted 2026-09-10)
+because it is protocol plumbing, not product design, and it is what
+`frontend/src/lib/x402/pay.ts` implements. A browser can pay one of our
+routes with a connected wallet, through the same gate every x402 client
+uses, with **no new backend payment path**:
+
+1. Call the paid route with no payment → `402` with `accepts[]` (asset,
+   amount, `payTo`, network, and `extra.feePayer` injected from the
+   facilitator's `/supported` — `x402/mechanisms/avm/exact/server.py`; the
+   gasless leg is the one confirmed working in Phase 0 above).
+2. Build a 2-txn atomic group with `algosdk`: txn 0 = a 0-ALGO self-payment
+   from `feePayer` with the pooled flat fee, **left unsigned**; txn 1 = the
+   ASA transfer `payer → payTo` of `amount` of `asset`, fee 0. Assign the
+   group id. This is the same construction the package's own client does.
+3. Ask the wallet to sign **only txn 1**. Pera's
+   `signTransaction([[{txn: t0, signers: []}, {txn: t1, signers: [addr]}]])`
+   is the documented partial-group contract (the same call the login flow
+   makes); Defly mirrors it; Lute's ARC-0001 `signTxns` accepts
+   `signers: []` the same way.
+4. Base64 the group (`[unsigned t0, signed t1]`, `paymentIndex: 1`), wrap
+   it in the x402 v2 `PaymentPayload` (`x402_version`, `accepted` = the
+   chosen requirement echoed back, `resource`, extensions), set it as the
+   `PAYMENT-SIGNATURE` header and re-send the same request. The backend
+   does everything else it already does.
+
+**Why not a plain payment QR (ARC-26 `algorand://` URI)?** A bare ASA
+transfer to `payTo` is *not an x402 settlement*: no facilitator
+verify/settle, no `PAYMENT-SIGNATURE`, no ledger row, no way to bind the
+transfer to a request, and it does not count toward the challenge's USDC
+volume (see "What's still unverified" below — plain transfers almost
+certainly do not count). Making it work would mean a backend that watches
+the chain for incoming transfers — a second payment path, which CLAUDE.md
+§9 forbids. Verify any browser flow against a live wallet, on mainnet,
+supervised: the partial-group signing, the payload shape `x402-avm==2.0.2`
+accepts from a browser client, and that the settled tx carries the
+challenge tag (it rides on the asset `extra`, so nothing the client does
+can drop it).
+
+## The settlement memo is fixed at signing time
+
+Kept from `docs/x402-execution-trust-evaluation.md` (deleted 2026-09-10).
+Any design of the form "the settlement transaction's note carries a hash of
+the *response*" is impossible under x402: the payer's client signs the
+payment transaction *before* sending the paid request — the signed txn
+travels in the payment header and the facilitator settles it as-is. The
+note is therefore fixed before the response exists. A payer *can* put
+`H(request ‖ nonce)` in their own txn note today with nothing from us, and
+that proves only what the payer already knows. Anything binding a
+settlement to response content has to be an off-chain, server-signed
+artifact referencing the settlement tx id (the facilitator already serves
+`GET /api/receipt/{txId}` for the payment leg) — which is what the removed
+fulfillment-receipts feature was, and why it was a header, not a memo.
 
 ## What's still unverified — check live before relying on it
 

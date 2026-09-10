@@ -119,7 +119,10 @@ def test_add_comment_and_list_comments_round_trip_anchor(monkeypatch: pytest.Mon
     session = patch_cassandra(monkeypatch)
     anchor = CommentQuoteAnchor(quote="Algorand mainnet", prefix="on ", suffix=" launched")
     created = store.add_comment(
-        _ARTICLE_ID, body="worth double-checking this claim", author_name="Reviewer A", anchor=anchor
+        _ARTICLE_ID,
+        body="worth double-checking this claim",
+        author_name="Reviewer A",
+        anchor=anchor,
     )
     assert created.anchor_quote == "Algorand mainnet"
     assert created.anchor_prefix == "on "
@@ -191,8 +194,7 @@ def test_epoch_treats_a_naive_driver_datetime_as_utc() -> None:
     """_epoch must treat a timezone-naive datetime as UTC, not the interpreter's local zone.
 
     That's what the real Cassandra driver actually returns for a `timestamp` column
-    (share_links.created_at/revoked_at, draft_comments.created_at). Same bug class
-    root-caused 2026-09-03 in x402_social/stores/cassandra.py: `value.timestamp()` on a
+    (share_links.created_at/revoked_at, draft_comments.created_at): `value.timestamp()` on a
     naive datetime assumes the *local* system zone -- on a UTC+2 host, "13:18:17
     wall-clock, no tzinfo" is silently read as 11:18:17 UTC, 2 hours off from the real UTC
     value that was actually stored.

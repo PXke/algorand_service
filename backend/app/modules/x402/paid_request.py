@@ -5,10 +5,8 @@ call. Every paid route in every module should call require_paid_request, not
 the bare require_payment in guard.py -- that stays the low-level primitive
 this wraps.
 
-Moved out of x402_directory 2026-08-30 (was require_paid_request there,
-directory-specific in name only): every future paid module needs the
-identical replay-then-gate-then-ledger sequence, so this is where it
-actually belongs. See modules/x402/replay.py and settlement.py for the two
+Every paid module needs the identical replay-then-gate-then-ledger sequence,
+so it lives here. See modules/x402/replay.py and settlement.py for the two
 pieces this composes.
 
 Fulfillment contract every paid route MUST follow
@@ -66,16 +64,6 @@ ever calling `require_paid_request` -- a tripped resource must be refused
 before the payment gate, so no further money is ever at risk while tripped
 (see modules/x402/circuit_breaker.py). `run_with_refund` itself only handles
 what happens once payment has already succeeded.
-
-Signed fulfillment receipts (migration 109) piggyback on this same opt-in:
-pass `request=request` (as above) and, once
-`settings.x402_receipt_signing_mnemonic` is configured, every successful
-`run_with_refund` call also signs and stores a receipt and adds it to
-`result.settlement_headers` -- so it reaches the client for free through the
-`**result.settlement_headers` every caller already spreads into its
-response headers. See modules/x402/receipts.py. Omitting `request`, or
-leaving the signing key unconfigured, is not an error -- it just means no
-receipt this time.
 """
 
 from __future__ import annotations
@@ -94,7 +82,6 @@ from app.modules.x402 import circuit_breaker
 from app.modules.x402.guard import PaymentResult, require_payment
 from app.modules.x402.preview import preview_rate_limited, preview_requested
 from app.modules.x402.promo import attempt_promo_redemption, promo_request_params
-from app.modules.x402.receipts import attach_fulfillment_receipt
 from app.modules.x402.refund import send_refund
 from app.modules.x402.replay import claim_payment, release_claim
 from app.modules.x402.settlement import (
@@ -258,9 +245,9 @@ def run_with_refund(
     resource: str,
     product_write: Callable[[], _T],
     settlement_store: SettlementStore | None = None,
-    request: Request | None = None,
+    request: Request | None = None,  # noqa: ARG001 -- kept for the product routes' shared call shape
 ) -> _T | Response:
-    """Run `product_write()`; on an unexpected exception, refund the payer instead of leaving a 500. A `PlatformError` (any module's own business-rejection exception -- DirectoryError, BoardError, GradingError, FeatureError, ...) is a DIFFERENT thing and is never refunded -- see below.
+    """Run `product_write()`; on an unexpected exception, refund the payer instead of leaving a 500. A `PlatformError` (any module's own business-rejection exception, e.g. StorageError) is a DIFFERENT thing and is never refunded -- see below.
 
     See this module's own docstring ("Opt-in: auto-refund on product-write
     failure") for the full contract and the exact call shape a route uses.
@@ -269,14 +256,11 @@ def run_with_refund(
     check that itself, the same way a route calling mark_fulfilled directly
     does not either.
 
-    On success: returns `product_write()`'s return value untouched, after a
-    best-effort attempt to attach a signed fulfillment receipt (modules/
-    x402/receipts.py -- evidence, not a guarantee; see that module's own
-    docstring). Pass `request` (the route's own `Request`) so a receipt can
-    hash the request body -- omit it (or leave the signing key unconfigured)
-    and receipt generation is silently skipped, never a failure. The caller
-    still calls `mark_fulfilled` itself afterward -- this function never
-    does, so the existing store-before-mark contract is unchanged.
+    On success: returns `product_write()`'s return value untouched. `request`
+    (the route's own `Request`) is accepted so every caller keeps one call
+    shape; it is not read here. The caller still calls `mark_fulfilled`
+    itself afterward -- this function never does, so the existing
+    store-before-mark contract is unchanged.
 
     On a `PlatformError` (found-in-audit gap, 2026-09-02): every module in
     this codebase already raises its own PlatformError subclass for a
@@ -387,5 +371,4 @@ def run_with_refund(
         response.headers.update(result.settlement_headers)
         return response
 
-    attach_fulfillment_receipt(result, resource=resource, request=request, outcome=outcome)
     return outcome

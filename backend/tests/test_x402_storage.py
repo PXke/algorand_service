@@ -3,13 +3,11 @@
 Fully offline. Redis is a fake at every get_redis seam (auth_service,
 app.core.rate_limit, circuit_breaker), the metadata store is the module's
 own in-memory backend unless a test specifically exercises the Cassandra row
-mapper against a fake session (mirrors test_x402_directory.py's own
-`_row_to_listing` pattern), and the storage connector is either a real
+mapper against a fake session, and the storage connector is either a real
 LocalDiskStorageBackend rooted at a pytest tmp_path or a small in-memory fake
 for the service/route-level tests that don't care about real disk I/O.
 Wallet-signature proofs are REAL ed25519 signatures from algosdk test
-accounts, not stubs -- same convention test_x402_social.py uses for its own
-challenge/session tests.
+accounts, not stubs.
 """
 
 from __future__ import annotations

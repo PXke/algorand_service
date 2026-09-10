@@ -1,8 +1,7 @@
 """x402_scan_url's auto-refund + circuit-breaker retrofit.
 
 Route-level: `require_paid_request` is monkeypatched directly to a canned
-PaymentResult (real, promo, or error), same convention test_x402_grading.py
-already uses -- the payment gate itself is covered elsewhere
+PaymentResult (real, promo, or error) -- the payment gate itself is covered elsewhere
 (test_x402_preview.py/test_x402_promo.py). This file only exercises what's
 new here: circuit-breaker-before-gate, refund-on-failure for a real payment,
 and the promo path's specific error codes staying refund-free.

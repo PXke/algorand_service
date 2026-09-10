@@ -96,10 +96,12 @@ When you spawn sub-agents:
 
 ## 9. x402 Agent Marketplace (Algorand Global x402 Challenge, deadline Sept 1)
 
-A second product, `backend/modules/x402/` + `backend/modules/kyc/` and its
-successors, sharing the same backend/Cassandra/Redis/deploy pipeline as the
-newspaper but a **separate concern** — do not conflate its rules with
-sections 1-8 above, and do not let newspaper work block it or vice versa.
+A second product, `backend/app/modules/x402/` (shared payment plumbing) plus
+the three product modules `x402_news/`, `x402_scan/`, `x402_storage/` and
+the `x402_catalog/` + `x402_wellknown/` discovery surface, sharing the same
+backend/Cassandra/Redis/deploy pipeline as the newspaper but a **separate
+concern** — do not conflate its rules with sections 1-8 above, and do not
+let newspaper work block it or vice versa.
 Reference: `docs/x402-facilitator.md` (verified facilitator/CAIP-2/tag
 mechanics — work from that file, not memory or the official docs' literal
 wording, which is wrong about the challenge tag).
@@ -113,9 +115,11 @@ Non-negotiable constraints (verbatim from the build plan, owner-approved):
   real-entity/company compliance), PII storage, and fiat handling are out of
   scope, Phase 2 at the earliest.** Separately, **KYA (Know Your Agent —
   wallet age, on-chain behaviour, self-declared web identity, an on-chain
-  attestation; roadmap item 8 below) is in scope now.** These are two
-  different things with easily-confused acronyms — KYA ships, KYB does not,
-  ever, without an explicit new owner decision.
+  attestation; roadmap item 8 below) was built as `modules/kya/` and then
+  REMOVED in the 2026-09-10 consolidation (ADR-0006) — it no longer ships.**
+  These are two different things with easily-confused acronyms — neither
+  KYA nor KYB ships today, and KYB never does without an explicit new owner
+  decision.
 - Cassandra + Redis only, via `StoreFactory[T]` and a `Protocol` per store.
   Memory backend for dev/test only.
 - TestNet until Phase 0 acceptance passes; mainnet is a config flip, done
@@ -123,9 +127,10 @@ Non-negotiable constraints (verbatim from the build plan, owner-approved):
 - Every settlement logged: asset id, amount, tx id, payer, resource, UTC
   timestamp, EUR value at time of settlement. This is the bookkeeping ledger.
 - No wash volume, ever. Nothing in the codebase may pay our own endpoints
-  from our own wallets except the probe, which is labelled as such and
-  excluded from any ranking. The competition administrator explicitly audits
-  for and disqualifies this — it is not just good practice.
+  from our own wallets except a labelled operator probe (wallets listed in
+  `X402_PROBE_PAYERS`), which the settlement ledger excludes from the public
+  settlements feed and from any ranking. The competition administrator
+  explicitly audits for and disqualifies this — it is not just good practice.
 - Multi-asset `accepts` in the 402 offer from day one, even if only USDC is
   enabled initially. Note: the competition's Volume score is USDC-specific;
   other assets help the Innovation score, not Volume — don't over-invest
@@ -145,30 +150,49 @@ the registration form unattended.
 
 ### 9.1 Product roadmap (owner brainstorm, 2026-08-29 — numbered as named, not priority order)
 
+**Consolidation, owner decision 2026-09-10** (`docs/adr/ADR-0006-x402-consolidation.md`):
+the marketplace mechanics were removed — directory (3), visibility board
+(2), feature-request board (4), grading (6), probe/monitoring (7, and 20
+with it), KYA (8), the agent social network, the uptime check, fulfillment
+receipts and the ping route. Kept and live: News Engine (1), sandboxed scan
+(18b), backup storage (12). Do not rebuild any removed item without a new
+owner decision. The struck-through items below keep their original text so
+the history stays readable; they are not open work.
+
 Every product below is a `require_payment()` consumer sharing the same gate,
 store-factory pattern, and settlement ledger — never new protocol code per
-product. **Phase 0 gates everything else**: nothing here starts until a real
-TestNet payment has actually round-tripped through `/api/v1/x402/list`
-(built, unit-tested, never yet run against a live wallet/facilitator as of
-this writing) and the mainnet flip (§4.2) is done. Do not let roadmap breadth
-become an excuse to defer proving the one thing the deadline depends on.
+product. Phase 0 (a real payment round-tripping through the shared gate
+against the live facilitator) **passed 2026-08-30** and the mainnet flip is
+done — see `docs/x402-facilitator.md`.
 
-1. **News Engine pay-per-call** — the existing newspaper's article/data feed
-   behind a micro-price. Reuses live data already in Cassandra; no new infra.
-2. **Paid visibility board** — agents pay to appear with a link back, free to
-   browse ("Million Dollar Homepage for bots"). Same shape as the directory.
-3. **x402 endpoint directory** — **LIVE** (verified 2026-09-01 — the most
+1. **News Engine pay-per-call** — **LIVE** (`x402_news`). The existing
+   newspaper's article/data feed behind a micro-price: free headlines, tags
+   and full article reads, paid full-text search. Reuses live data already
+   in Cassandra; no new infra.
+2. ~~**Paid visibility board** — agents pay to appear with a link back, free to
+   browse ("Million Dollar Homepage for bots"). Same shape as the directory.~~
+   **REMOVED 2026-09-10** (ADR-0006): shipped as `x402_board`, 0 real
+   placements ever, deleted with its tables.
+3. ~~**x402 endpoint directory** — **LIVE** (verified 2026-09-01 — the most
    complete product here: full CRUD, category/tag search, probe +
    probe-history reads, LWT-guarded first-insert). Pay to list, pay to boost
-   rank, agents pay for ranked JSON search, humans browse free. See §4.1/§5.1.
-4. **Feature-request board** — agents pay to request an endpoint and vote;
-   builders pay to read demand. Same shape as the directory.
+   rank, agents pay for ranked JSON search, humans browse free. See §4.1/§5.1.~~
+   **REMOVED 2026-09-10** (ADR-0006): shipped as `x402_directory`; the only
+   listing ever stored was our own search route. Deleted with its tables.
+   Do not confuse with item 26 (the Algorand Open Registry, a separate
+   free ecosystem showcase that stays).
+4. ~~**Feature-request board** — agents pay to request an endpoint and vote;
+   builders pay to read demand. Same shape as the directory.~~
+   **REMOVED 2026-09-10** (ADR-0006): shipped as `x402_features`; 3
+   requests ever, 2 of them our own probes. Deleted with its tables.
 5. **Bounty version of the request board** — a vote is an escrowed payment,
    released on a passing test. First smart contract (Algorand Python,
    VibeKit) — do not install VibeKit before this item is actually started.
-6. **Endpoint grading** — agents pay a small stake to grade endpoints they
-   actually paid; paid score lookup. Already scoped in the build plan (§5.3).
-7. **Probe / monitoring** — scheduled probing of every listed endpoint
+6. ~~**Endpoint grading** — agents pay a small stake to grade endpoints they
+   actually paid; paid score lookup. Already scoped in the build plan (§5.3).~~
+   **REMOVED 2026-09-10** (ADR-0006): shipped as `x402_grading`, deleted
+   with its tables.
+7. ~~**Probe / monitoring** — scheduled probing of every listed endpoint
    (reachability, latency, 402 validity). Probe traffic is flagged and
    excluded from every ranking — this is the one deliberate exception to "no
    wash volume." **LIVE, and the read side is deliberately FREE, not
@@ -178,8 +202,15 @@ become an excuse to defer proving the one thing the deadline depends on.
    effectively public" reasoning as the News Engine's free article read, and
    a direct answer to a real agent's ask on Moltbook. Every listing detail
    read already surfaces the newest probe result automatically. **Item 20
-   below is merged into this item, not a separate product** — see 20.
-8. **Know Your Agent (KYA)** — tiered bot/agent identity (wallet, web
+   below is merged into this item, not a separate product** — see 20.~~
+   **REMOVED 2026-09-10** (ADR-0006), together with item 20: the
+   `workers/app/modules/x402_probe/` beat and its tables are gone with the
+   directory it probed. The separate paid uptime check (`x402_uptime`) was
+   removed at the same time; its `check_target` helper survives only as
+   `ecosystem/services/checker.py`, serving the Open Registry's liveness
+   check (item 26). `X402_PROBE_PAYERS` (operator wallets excluded from the
+   settlements feed) is the one piece of "probe" vocabulary that stays.
+8. ~~**Know Your Agent (KYA)** — tiered bot/agent identity (wallet, web
    identity, verified owner, behaviour), on-chain attestation, paid verify.
    This is `modules/kyc/` (module directory name predates the KYA/KYB
    terminology split — rename opportunistically if touching this module, not
@@ -189,9 +220,12 @@ become an excuse to defer proving the one thing the deadline depends on.
    test); the module is code-complete (enrollment, tiered trust signals,
    paid verify/payout) and registered live, but gated off in prod by owner
    decision, and still has no real on-chain attestation write — only
-   off-chain indexer-derived signals.
-   **This is KYA, not KYB** — see the constraints note above. Do not conflate
-   with regulated Know-Your-Business/entity compliance, which stays excluded.
+   off-chain indexer-derived signals.~~
+   **REMOVED 2026-09-10** (ADR-0006): the `kya` module (formerly `kyc/`),
+   its Flutter frontend and its tables are deleted; it never ran in prod.
+   **This was KYA, not KYB** — see the constraints note above. Do not
+   conflate with regulated Know-Your-Business/entity compliance, which
+   stays excluded.
 9. **Starter credit** — endpoint-funded trial USDC for newly-identified
    agents. Real fund distribution to third parties — needs an explicit
    abuse/sybil design before any code, not a subagent's unilateral call.
@@ -201,9 +235,14 @@ become an excuse to defer proving the one thing the deadline depends on.
 11. **Confidential-until-reveal payments** — stake-building: private now,
     provably yours later, view keys for auditors. Real cryptography design
     needed before any code.
-12. **Pay-per-MB storage** — S3-compatible upload/get/renew on a cheap
-    backend (Wasabi/B2/R2), plus pay-to-reveal for private data. Needs a
-    provider + cost-model decision first — real recurring infra spend.
+12. **Pay-per-MB storage** — **LIVE** as Agent backup storage
+    (`x402_storage`): opaque, versioned backup blobs on a local-disk
+    connector on the API host, priced per KB per retention term, wallet-
+    signature-authenticated free reads/deletes, a reaper beat for expiry.
+    The original idea (S3-compatible upload/get/renew on a cheap backend
+    such as Wasabi/B2/R2, plus pay-to-reveal for private data) still needs a
+    provider + cost-model decision before the connector moves off local disk
+    — real recurring infra spend.
 13. **Storage router** — one endpoint, store-by-intent (size, term,
     durability, budget), routed across cheap providers + Arweave for
     permanence. Depends on 12 existing first.
@@ -221,29 +260,26 @@ become an excuse to defer proving the one thing the deadline depends on.
     needs the SAME care about process lifecycle a bare script doesn't get).
 18. **Transaction simulation / fuzzing** — per run. Needs a simulate-endpoint
     design (algod's own simulate API is the likely base) before any code.
-18b. **Sandboxed file/tarball scan** (owner idea, 2026-08-31) — an agent hands
-    us a URL to a file it's wary of opening itself; we download, run it
-    through ClamAV (or similar) and/or unpack+inspect an archive, and report
-    back "safe/unsafe" plus contents, so the agent gets isolation without
-    running untrusted code itself. Sells the same shape as 17: a paid,
-    externally-triggered job needing real process-lifecycle discipline. Needs,
-    before any code: a real sandbox design (a fresh, network-isolated,
-    hard-killed container per request — no host filesystem access, no ability
-    to phone home if the scanned content turns out to be malicious), a
-    decision on max file size / scan timeout, and real infra spend (a
-    Docker/container host, not something `workers/` already has). Same
-    "needs deliberate design first" flag as 12/15/16/17.
+18b. **Sandboxed file/tarball scan** (owner idea, 2026-08-31) — **LIVE** as
+    `x402_scan` (`POST /api/v1/x402/scan/url`): an agent hands us a URL to a
+    file it's wary of opening itself; we download it (bounded, SSRF-pinned),
+    run it through ClamAV, file-type, entropy, indicator extraction and a
+    zip/tar-bomb-safe member listing inside a network-isolated container
+    that never executes the input, and report back a verdict plus contents.
+    Sells the same shape as 17: a paid, externally-triggered job needing real
+    process-lifecycle discipline. Static analysis only in this version; any
+    dynamic/execution sandbox is a new design decision, not an extension.
 19. **Agent-to-agent job escrow** — pay when output passes a test. Overlaps
     5/10 — same resolution needed on the shared escrow primitive.
 20. **~~Reputation / uptime-proof ledger~~** — **merged into item 7, not a
-    separate product** (owner decision 2026-09-02): the original idea was
-    "endpoints pay to attach verified proofs," but item 7's free probe data
-    already surfaces automatically on every listing, which covers the same
-    value without a second payment flow. Do not build a separate paid
-    "attach a proof" route — if this is ever revisited, keep the measured
-    layer itself free forever (charging endpoints to influence what's
-    presented as measurement would poison the one trust signal this
-    marketplace owns).
+    separate product** (owner decision 2026-09-02), and **removed with it
+    2026-09-10** (ADR-0006): the original idea was "endpoints pay to attach
+    verified proofs," but item 7's free probe data already surfaced
+    automatically on every listing, which covered the same value without a
+    second payment flow. Do not build a separate paid "attach a proof"
+    route — if this is ever revisited, keep the measured layer itself free
+    forever (charging endpoints to influence what's presented as
+    measurement would poison the one trust signal a marketplace owns).
 21. **USDC→EURQ swap route** — so agents pay euro-priced services without
     noticing. Depends on Quantoz integration (Phase 2 in the original build
     plan) — do not front-run this before 12/13's storage work or Phase 0.
@@ -280,9 +316,10 @@ become an excuse to defer proving the one thing the deadline depends on.
     submit their own Algorand project/product with a category, and PXke
     publishes it as a reference/visibility page. Purpose is visibility, not
     revenue — the operator's own words: "we don't have fucking visibility."
-    Distinct from item 3's x402 directory (paid, x402-native endpoints
-    only): this is a broader Algorand-ecosystem showcase, open to any
-    project regardless of x402 support. Design done (see
+    Distinct from the removed item 3 x402 directory (which was paid and
+    x402-native endpoints only): this is a broader Algorand-ecosystem
+    showcase, open to any project regardless of x402 support, and it stays
+    (`backend/app/modules/ecosystem/`, `workers` `ecosystem_probe`). Design done (see
     `docs/awesome-algorand-directory-design.md`): 17 categories, multiple
     free tags per entry, a submit-time + periodic liveness check on every
     listed page, free/anonymous human-reviewed submissions, featured tier
@@ -296,9 +333,13 @@ become an excuse to defer proving the one thing the deadline depends on.
     directory. Not scoped, not started — a community/ops decision, not an
     engineering task yet.
 
-**Sequencing note**: items 1, 2, 4 are the cheapest next builds after Phase 0
-proves out — same shape as the directory, no new infra or fund-custody
-design required. Items 5/9/10/11/12/16/19/21/22/23/25 all need an explicit
-human design decision (financial exposure, new infra spend, or cryptography)
-before any agent starts writing code against them — flag and stop, don't
-guess and build.
+**Sequencing note** (rewritten 2026-09-10): the three live products are 1,
+12 and 18b; work on them means depth (reliability, pricing, the storage
+connector moving off local disk), not breadth. Items 2/3/4/6/7/8/20 are
+removed and are not "next builds" under any sequencing — a new owner
+decision reopens them, nothing else. Items 5/9/10/11/13/14/15/16/17/18/19/
+21/22/23/25 all need an explicit human design decision (financial
+exposure, new infra spend, or cryptography) before any agent starts
+writing code against them — flag and stop, don't guess and build. Item 26
+(Open Registry) is a separate, free, non-x402 product with its own design
+doc and proceeds on its own track.

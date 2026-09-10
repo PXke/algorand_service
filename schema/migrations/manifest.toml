@@ -1062,3 +1062,11 @@ file = "backend/schema/migrations/app/125_ecosystem_entry_requests.cql"
 tier = "prod"
 status = "active"
 description = "Adds ecosystem_entry_requests (request_id PK) and ecosystem_entry_requests_by_status (admin queue projection) for the Algorand Open Registry's 'suggest a change' feature (owner ask 2026-09-08: 'Yes we need a suggest a change') -- a free, anonymous change/removal request against an already-approved entry, distinct from ecosystem_projects (a fresh submission). See app/modules/ecosystem/models/domain.py's EntryRequest and services/request_service.py."
+
+[[migrations]]
+stream = "app"
+version = "126"
+file = "backend/schema/migrations/app/126_drop_removed_x402_products.cql"
+tier = "prod"
+status = "active"
+description = "x402 consolidation (ADR-0006): drop the 50 tables of the removed marketplace products (directory, board, features, grading, probe, receipts, uptime, kyc, social); settlements, promo and storage tables kept"

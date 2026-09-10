@@ -229,6 +229,14 @@ class Settings(msgspec.Struct, kw_only=True):
     x402_network: str = "algorand:SGO1GKSzyE7IEPItTxCByw9x8FmnrCDexi9/cOUJOiI="
     # Public address only — no private key is held by this module.
     x402_pay_to_address: str = ""
+    # Backend of the settlement ledger (x402_settlements/x402_settlements_by_tx,
+    # modules/x402/settlement.py) -- the one store EVERY paid route writes to,
+    # so it has no per-product gate. "memory" is dev/test only: a paid route
+    # must never run against a per-process ledger that vanishes on restart
+    # (CLAUDE.md section 9: every settlement logged), and falcon_main refuses
+    # to register the paid routes outside app_env == "dev" while this is
+    # still "memory". Env: X402_SETTLEMENT_STORE=cassandra in prod.
+    x402_settlement_store: str = "memory"
     # Public absolute base of this API as agents reach it. Every 402 offer's
     # resource.url is this base + the route path: the facilitator's Bazaar
     # catalogs resources by that URL, so it must be the real public origin,
@@ -250,9 +258,9 @@ class Settings(msgspec.Struct, kw_only=True):
     # wallet and anything else we pay our own endpoints from). CLAUDE.md
     # section 9: probe traffic is the one allowed exception to "no wash
     # volume" and must be excluded from every ranking. Read through
-    # modules/x402/probe_payers.py; each product drops these wallets where
-    # their payment would otherwise become signal (grades, votes,
-    # credibility spend, board tiles). Empty = nothing is excluded.
+    # modules/x402/probe_payers.py; the settlement ledger labels these
+    # wallets so the public settlements feed (and any future ranking) never
+    # counts their payments as customer volume. Empty = nothing is excluded.
     x402_probe_payers: str = ""
     # ── end probe / self wallets ────────────────────────────────────────────
 
@@ -260,11 +268,9 @@ class Settings(msgspec.Struct, kw_only=True):
     # A route can opt into modules/x402/paid_request.run_with_refund: if the
     # product write raises after payment already settled, the full amount is
     # sent back to the payer from THIS dedicated wallet, never from
-    # x402_pay_to_address (receive-only, no key held — see above) and never
-    # from kyc_payout_mnemonic (a different fund, a revenue-share payout, not
-    # a refund). Empty = refunds are skipped (logged, the route still returns
-    # an honest "failed, refund pending" response) until configured — same
-    # "empty is inert" convention as kyc_payout_mnemonic.
+    # x402_pay_to_address (receive-only, no key held — see above). Empty =
+    # refunds are skipped (logged, the route still returns an honest "failed,
+    # refund pending" response) until configured — "empty is inert".
     x402_refund_mnemonic: str = ""
     # Circuit breaker (owner requirement 2026-09-02): every refund costs a
     # real Algorand transaction fee on top of the refunded amount, so a bug
@@ -280,9 +286,7 @@ class Settings(msgspec.Struct, kw_only=True):
     x402_refund_breaker_window_seconds: int = 600
     # Marketplace-wide daily refund ceiling, tracked PER ASSET (asset_id) but
     # denominated in one true USD-equivalent unit shared by every asset:
-    # atomic units at USDC's OWN 6 decimals (the same reference unit
-    # x402_grading's credibility.py already normalizes settlement spend into
-    # -- see its _normalize_to_usd_atomic). Each refund's raw atomic amount is
+    # atomic units at USDC's OWN 6 decimals. Each refund's raw atomic amount is
     # converted to this unit via refund.py's own normalizer (decimals-only
     # for a coingecko_id-less, already-USD asset like USDC; price_oracle for
     # everything else) BEFORE it is compared/accumulated against this number
@@ -318,413 +322,6 @@ class Settings(msgspec.Struct, kw_only=True):
     # through an unenforceable budget.
     x402_refund_daily_budget_usd_atomic: int = 100_000_000
     # ── end auto-refund ──────────────────────────────────────────────────────
-
-    # ── Signed fulfillment receipts (owner conversation 2026-09-03, see
-    # docs/x402-execution-trust-evaluation.md item 1) ───────────────────────
-    # A route wired through modules/x402/paid_request.run_with_refund gets a
-    # server-signed receipt attached to its response, binding exactly what
-    # was delivered to exactly what was paid for:
-    # sig(H(request body) || H(response body) || settlement_tx_id || ts).
-    # This is evidence, not a guarantee -- see the evaluation doc, do not
-    # re-derive the reasoning here. A FRESH, DEDICATED signing key, never
-    # x402_refund_mnemonic/kyc_payout_mnemonic/x402_pay_to_address -- it never
-    # holds funds and is never asked to. Signed via algosdk.util.sign_bytes
-    # (the same "MX"-domain-separated primitive workers/app/modules/wallet/
-    # signer.py already uses for algo_signData), so a receipt signature can
-    # never be replayed as authorization for a real on-chain transaction --
-    # safe to keep on a network-facing service. Empty = receipt generation is
-    # skipped (logged at debug, never blocks or fails the paid route) until
-    # configured -- same "empty is inert" convention as x402_refund_mnemonic.
-    x402_receipt_signing_mnemonic: str = ""
-    # Cassandra ("memory" = dev/test only, invisible across gunicorn workers,
-    # same convention as every other product's store gate). NEVER the
-    # settlement ledger (x402_settlements/x402_settlements_by_tx) -- a
-    # dedicated table so stored receipt content can be removed independently
-    # of the ledger, which CLAUDE.md section 9 treats as permanent. Joins
-    # back to the ledger via the settlement_tx_id column the receipt already
-    # carries -- no new column added to the ledger side.
-    x402_receipts_store: str = "memory"
-    # Bounds ONE stored receipt's response-output text (same order of
-    # magnitude as admin_source_max_chars above for "cap a stored blob" --
-    # this codebase's existing convention). The signature always covers the
-    # FULL response hash regardless of this cap; only the retained copy of
-    # the content itself is truncated past this, with a truncated flag set
-    # so a reader is never told a partial copy is complete.
-    x402_receipt_output_max_chars: int = 100_000
-    # Retention window (owner ask): a receipt is deliberately temporary
-    # evidence, not a permanent record -- Cassandra default_time_to_live on
-    # the table (migration 108), not enforced in application code.
-    x402_receipt_ttl_days: int = 90
-    # Free-endpoint abuse gate (CLAUDE.md section 9) for GET
-    # /api/v1/x402/receipts/:receipt_id, same per-IP Redis incr/expire shape
-    # as every other free x402 read.
-    x402_receipts_rate_limit_per_hour: int = 120
-    # ── end signed fulfillment receipts ─────────────────────────────────────
-
-    # Know Your Agent (KYA, the x402 challenge's actual product): free wallet
-    # enrollment + trust-signal computation, then a paid x402 lookup that
-    # splits its fee with the enrolled wallet. The module lives in
-    # app/modules/kya/; the kyc_* setting names are kept because prod env
-    # names depend on them.
-    kyc_store: str = "memory"
-    kyc_lookup_price: str = "$0.05"
-    # Share of the lookup fee paid out to the enrolled wallet (the rest stays
-    # with the platform). 0.5 = 50/50, matching the product's original pitch.
-    kyc_payout_share: float = 0.5
-    # Public AlgoNode indexers — same free tier + URLs as the workers service
-    # (workers/app/core/config.py's TESTNET_INDEXER_URL/MAINNET_INDEXER_URL),
-    # mirrored here since backend has never needed indexer reads before (algod
-    # alone can't answer "when was this account created" or "recent txns" —
-    # that's what an indexer is for, algod only has current state).
-    kyc_testnet_indexer_url: str = "https://testnet-idx.algonode.cloud"
-    kyc_mainnet_indexer_url: str = "https://mainnet-idx.algonode.cloud"
-    # Mnemonic for a FRESH, DEDICATED, minimally-funded hot wallet — never the
-    # x402_pay_to_address (receive-only, no key held) and never the admin
-    # login wallet. Only ever spends (pays out half of each settled lookup
-    # fee); someone has to top up its USDC balance manually, there is no
-    # automated sweep from x402_pay_to_address. Empty = payouts are skipped
-    # (logged, never block the paid lookup response) until configured.
-    kyc_payout_mnemonic: str = ""
-    # Free-endpoint abuse gate (CLAUDE.md section 9: rate limit every free
-    # endpoint per wallet and per IP), same Redis incr/expire shape as the
-    # other x402 modules, under its own key prefix. Three separate budgets
-    # because the two free KYC endpoints cost wildly different things:
-    #   - consent-message issues a single-use nonce (cheap Redis write) and
-    #     gets the same generous hourly allowance the other modules' free
-    #     reads get;
-    #   - enroll fires two outbound indexer requests and a Cassandra write per
-    #     hit, so its per-IP allowance is much tighter;
-    #   - enroll is additionally limited per WALLET, because the cost that
-    #     actually matters is how many distinct wallets get enrolled and
-    #     wallet addresses are free to generate. Re-enrolling only refreshes
-    #     an existing row's signals, so a handful a day is plenty.
-    kyc_consent_rate_limit_per_hour: int = 120
-    # How long a fetched consent-message stays signable. Stored in Redis and
-    # embedded in the signed payload so a captured signature cannot be replayed
-    # indefinitely (the previous message was a static string of wallet + version).
-    kyc_consent_ttl_seconds: int = 300
-    kyc_enroll_rate_limit_per_hour: int = 20
-    kyc_enroll_wallet_rate_limit_per_day: int = 5
-
-    # x402 endpoint directory (POST /x402/list paid, GET /x402/search free).
-    # See app/modules/x402_directory/.
-    x402_directory_store: str = "memory"
-    # Flat listing fee, a Money string parsed by the tagged money parser in
-    # modules/x402/client.py (which is also what attaches the challenge tag).
-    # Cut from $0.10 to $0.02 on 2026-09-06 against a real competitive study:
-    # every comparable x402 directory (x402 Arena, agent-tools.cloud,
-    # x402scan, PipRail's 402 Index) lists for free; the only paid comparable
-    # is Agent Arena at a one-time $0.05. $0.10 recurring was the highest
-    # listing fee in the ecosystem and suppressed the paid-intent volume the
-    # competition's Volume score counts -- same reasoning already applied to
-    # x402_grading_score_price below on 2026-08-30. $0.02 keeps a real,
-    # signed on-chain payment as anti-squat/anti-spam friction (see
-    # ListingService.create()'s docstring) without being the moat-killing
-    # outlier.
-    x402_listing_price: str = "$0.02"
-    # Paid priority placement (roadmap item 7's competitive study, 2026-09-06:
-    # same day the recurring survival fee below was removed). POST
-    # /api/v1/x402/list/renew was the now-redundant paid-renewal-to-survive
-    # route (no comparable marketplace charges one -- Bazaar/x402-list prune
-    # only on measured inactivity) -- repurposed into "boost," a real upsell
-    # a payer chooses on top of the base listing fee, in the $0.05-$0.25
-    # featured-placement band a facilitator competitive study suggested. Set
-    # at the low end: this is the marketplace's first paid-ranking product,
-    # not yet proven demand, and it stacks with (never replaces) the $0.02
-    # base fee, so the total cost of a boosted listing is still a fraction of
-    # the old $0.10 recurring fee. See ListingService.renew() and search()'s
-    # boosted-first sort within the paid tier.
-    x402_listing_boost_price: str = "$0.05"
-    # How long one boost lasts. Short enough that ranking priority has to be
-    # bought again, not bought once and forgotten -- the same "recurring
-    # revenue lever, not a one-time toggle" reasoning the removed survival
-    # fee used to serve, now moved onto the thing actually worth re-buying.
-    x402_listing_boost_days: int = 7
-    # How long a listing survives with ZERO healthy probes before it ages out
-    # of search() and becomes reclaimable by a new payer (owner decision
-    # 2026-09-06: no comparable x402 directory charges a recurring fee just
-    # to stay listed -- Bazaar prunes after 30 days with no settlement,
-    # x402-list decays after 7 days of failed probes -- so paid renewal was
-    # removed and this became a probe-fed keep-alive instead of a paid-term
-    # clock). Every HEALTHY probe (workers/app/modules/x402_probe, roughly
-    # every 30 min) pushes term_end forward by this many days; an unhealthy
-    # one changes nothing, same "a transient outage must not strip a badge"
-    # principle the verified-badge logic already used. A listing whose probe
-    # history goes cold for a full window this long is the one thing that
-    # still delists it. Kept at 30 (unchanged from the old paid-term length)
-    # so an already-live listing's reclaim window does not shrink overnight.
-    #
-    # ****MUST MATCH workers/app/core/config.py's X402_LISTING_TERM_DAYS
-    # (default 30) EXACTLY**** -- that is workers' own hand-duplicated copy
-    # of this number (no shared config-loading mechanism between the two
-    # services, CLAUDE.md section 0), read by run_probe_sweep() to compute
-    # the actual extended term_end. If you change this value, change that
-    # one in the SAME commit; it carries the reciprocal comment pointing
-    # back here.
-    x402_listing_term_days: int = 30
-    # Free-endpoint abuse gate (CLAUDE.md section 9: rate limit every free
-    # endpoint per IP), same Redis incr/expire shape as the contact form.
-    x402_search_rate_limit_per_hour: int = 120
-    # Hard cap on a search page — no unbounded listings (CLAUDE.md section 4).
-    x402_search_max_results: int = 100
-    # Hard cap on a probe-history read (roadmap item 7) — x402_probe_results
-    # (097) TTLs at 30 days and holds at most ~1440 rows per listing at the
-    # probe beat's current 30-min cadence, but the read is still bounded
-    # independently (CLAUDE.md section 4), same reasoning as the search cap
-    # above. Free, not priced: an owner call (2026-08-31) that real
-    # uptime/latency history works better as a trust signal an agent (or
-    # Relay) can point to freely than as its own paid product, the same
-    # "don't charge for what's already effectively public" reasoning as the
-    # News Engine's free article read.
-    x402_probe_history_max_results: int = 200
-    # Paid: the most reliable listed endpoints, ranked purely by measured
-    # probe data (roadmap item 7's "trust layer" step 3) -- distinct from
-    # x402_grading's spend-weighted OPINION leaderboards, which a sybil of
-    # small-paying wallets can influence; nobody can pay their way onto this
-    # one. See ListingService.probe_leaderboard() for the ranking rule and
-    # its minimum-sample threshold. Priced between x402_scan_price ($0.01,
-    # a single stateless check) and x402_grading_score_price ($0.03, a
-    # credibility-weighted aggregate over per-grader rows): this route does
-    # more work than a single check -- it scans multiple listings and each
-    # one's own bounded probe history -- but resells only measured numbers,
-    # no per-grader opinions to unbundle the way grading/score does.
-    x402_directory_probe_leaderboard_price: str = "$0.02"
-    # Hard cap on the `?limit=` a caller can request (CLAUDE.md section 4:
-    # no unbounded listings) -- deliberately smaller than x402_search_max_results:
-    # this is a curated top-N ranking, not a paged feed, and every row already
-    # cost a bounded probe-history read to compute (see probe_leaderboard()).
-    x402_directory_probe_leaderboard_max_results: int = 25
-    # Auto-discovered ("unclaimed") listing import (owner ask 2026-09-06).
-    # See app/modules/x402_directory/services/discovery_import.py. How long
-    # an imported stub stays visible in GET /x402/search before it would age
-    # out of ListingService.search()'s expiry filter -- not a real paid term
-    # (StoredListing.source == SOURCE_AUTO_DISCOVERED, price "$0" charged),
-    # just a bound so a url the facilitator has stopped reporting eventually
-    # stops showing here too, rather than living forever off one import run.
-    # Refreshed to `now + this many days` on every re-import that still sees
-    # the url -- its own independent clock, never the probe-fed keep-alive
-    # real paid listings use (an auto-discovered stub is never probed).
-    x402_directory_auto_discovered_term_days: int = 30
-
-    # x402 visibility board (POST /x402/board paid, GET /x402/board free).
-    # See app/modules/x402_board/. Separate settings from the directory's on
-    # purpose: it is a separate product whose price and term should move
-    # independently of the directory's.
-    x402_board_store: str = "memory"
-    # Flat placement fee, a Money string parsed by the tagged money parser in
-    # modules/x402/client.py (which is also what attaches the challenge tag).
-    # Half the directory's listing fee: a board tile is pure presence, worth
-    # less than a directory entry that makes an endpoint callable, and this is
-    # meant to be the cheapest, lowest-friction paid surface an agent can try.
-    x402_board_price: str = "$0.05"
-    # How long a paid placement stays visible. Stated in the 402 offer's
-    # description before the payer commits, and stored as term_end. Shorter
-    # than the directory's 30 days: an advertising board has to churn to stay
-    # worth reading, and a cheap tile should not buy a permanent squat.
-    #
-    # Unlike the directory's own term_end (2026-09-06: now probe-fed, see
-    # x402_listing_term_days below), this is NOT kept alive by anything -- the
-    # workers probe sweep only ever covers directory listings (see
-    # workers/app/modules/x402_probe/service.py's list_live_listings), so a
-    # board placement still simply expires after this many days with no
-    # renewal path (POST /board/:entry_id/renew was repurposed into a boost,
-    # see x402_board_boost_days below; re-placing the same link under
-    # POST /api/v1/x402/board buys a fresh term the normal way). Flagged, not
-    # fixed, in the 2026-09-06 pricing-model change that removed the
-    # directory's paid renewal -- building board probing is a separate,
-    # unstarted task.
-    x402_board_term_days: int = 14
-    # Paid priority placement (owner decision 2026-09-06, the board's own
-    # mirror of x402_listing_boost_price -- see that setting's comment for
-    # the competitive-study reasoning). POST /api/v1/x402/board/:entry_id/renew
-    # was the redundant paid-renewal route; repurposed into "boost." Kept
-    # equal to the board's own placement price rather than the directory's
-    # boost price: this module's prices move independently of the
-    # directory's on purpose (see the module comment above), and a board
-    # tile is worth less than a directory entry, so its boost should be too.
-    x402_board_boost_price: str = "$0.05"
-    # How long one board boost lasts. Shorter than the directory's 7 days,
-    # matching the board's own shorter placement term above -- a boost
-    # should not outlast a meaningful fraction of the underlying tile's own
-    # visible life.
-    x402_board_boost_days: int = 3
-    # Free-endpoint abuse gate (CLAUDE.md section 9: rate limit every free
-    # endpoint per IP), counted under its own key prefix, not the search one.
-    x402_board_rate_limit_per_hour: int = 120
-    # Hard cap on a board page — no unbounded listings (CLAUDE.md section 4).
-    x402_board_max_results: int = 100
-    # Owner-only click-analytics read (GET /board/:entry_id/clicks, migration
-    # 120). PAID, unlike the board's own free lifetime click TOTAL (already
-    # served on every GET /board item): the per-day breakdown and referrer
-    # data is new information beyond what the free feed already publishes,
-    # and it is owner-specific, not a public trust signal the way the
-    # directory's free probe history is -- see that route's own docstring for
-    # the contrasting case. Ownership is proven the same way boost is: the
-    # payer must settle from the wallet that placed the tile, checked inside
-    # run_with_refund's product_write (a mismatch is a payment-kept 403, see
-    # BoardError). Priced at the small anti-spam-floor rate (matching
-    # x402_scan_price), not a cost-recovery rate: producing this read costs
-    # one bounded Cassandra range scan, the same order of cost as a scan.
-    x402_board_click_history_price: str = "$0.01"
-    # Hard cap on `?days=` — no unbounded listings (CLAUDE.md section 4).
-    # Matches x402_uptime_history_max_days's own 30-day default; the
-    # x402_board_click_events table (migration 120) also TTLs its rows at 30
-    # days, so a wider window here could never be filled from real data
-    # anyway.
-    x402_board_click_history_max_days: int = 30
-    # Hard cap on the raw click-event rows aggregated per read — independent
-    # of the `days` cap above, same two-layer-bound shape as
-    # x402_uptime_history_max_results: a tile popular enough to exceed this
-    # within the window sees `capped: true` in the response rather than a
-    # silently-short scan being reported as a complete one.
-    x402_board_click_history_max_results: int = 2000
-    # x402 feature-request board (POST /x402/features free, POST
-    # /x402/features/:id/vote paid, POST /x402/features/:id/claim paid,
-    # POST /x402/features/:id/complete paid, GET /x402/features free, GET
-    # /x402/features/demand paid). See app/modules/x402_features/. Separate
-    # settings from the directory's and the board's on purpose: a third product
-    # whose prices should move independently of theirs.
-    x402_features_store: str = "memory"
-    # Filing a request is free and anonymous (owner decision 2026-08-30: the
-    # board's job is collecting endpoint ideas from agents, and a fee is
-    # friction against that), so there is no request price. The only brake on
-    # a flood of free filings is this per-IP hourly budget (CLAUDE.md section
-    # 9: rate limit every free endpoint), counted under its own key, separate
-    # from the browse budget below. Low on purpose: an honest agent files a
-    # handful of ideas, not hundreds.
-    x402_features_submit_rate_limit_per_hour: int = 20
-    # Flat fee per vote. Money strings, parsed by the tagged money parser in
-    # modules/x402/client.py (which is also what attaches the challenge tag).
-    # Not free and not dust, because the entire point of a PAID vote board is
-    # that the payment is the costly signal a free upvote cannot be. Keep this
-    # flat -- the ranking counts votes, and a count is only amount-weighted
-    # while every vote costs the same (see FeatureService.vote).
-    x402_features_vote_price: str = "$0.02"
-    # Fee to read the ranked demand signal. Still the most expensive surface
-    # in the module (it resells every vote every agent has paid for, not one
-    # write), but cut from $0.25 to $0.05 on 2026-08-30 -- $0.25 was an outlier
-    # against every other paid-read price point in the marketplace (board
-    # placement, KYC lookup both sit at $0.05), and a price
-    # that high directly suppresses the paid-intent volume the competition's
-    # Volume score is counting. $0.05 keeps it priced above a single vote
-    # while matching the marketplace's established paid-read tier.
-    x402_features_demand_price: str = "$0.05"
-    # Free-endpoint abuse gate (CLAUDE.md section 9: rate limit every free
-    # endpoint per IP), counted under its own key prefix, not the search or
-    # board one. The paid demand read is not counted against this.
-    x402_features_rate_limit_per_hour: int = 120
-    # Hard cap on a browse or demand page — no unbounded listings (CLAUDE.md
-    # section 4).
-    x402_features_max_results: int = 100
-    # How many requests the paid demand read scans before ranking them. The
-    # ranking is an in-memory sort (see FeatureService.rank_by_demand for why
-    # there is no third denormalized table), so this is what bounds it: the
-    # ranking is exact while the board holds fewer requests than this, and
-    # degrades to "the top of the N most recent" past it. Raise it, or build
-    # the sweep-rebuilt rank projection, before the board outgrows it.
-    x402_features_demand_scan_limit: int = 500
-    # Fee to mark a request completed (migration 119). Flat, and deliberately
-    # equal to the claim/vote price -- same anti-spam-floor reasoning as
-    # x402_features_vote_price: a completion mark is a further costly,
-    # self-declared public statement (never verified -- see
-    # FeatureService.mark_completed), the same weight as declaring you're
-    # building it in the first place, so there is no reason to price it
-    # differently. Its own setting rather than reusing x402_features_vote_price
-    # directly (unlike claim, which already does) so it can move independently
-    # if real usage ever argues for that.
-    x402_features_complete_price: str = "$0.02"
-    # x402 endpoint grading (POST /x402/grades paid, GET /x402/grades/score
-    # paid, GET /x402/grades free). See app/modules/x402_grading/. A fourth
-    # product with its own settings for the same reason as the other three:
-    # its prices should move independently of theirs.
-    x402_grading_store: str = "memory"
-    # Flat fee to submit one grade. Money strings, parsed by the tagged money
-    # parser in modules/x402/client.py (which is also what attaches the
-    # challenge tag).
-    #
-    # THIS FEE IS THE "STAKE" of roadmap item 6, and it is a one-way payment.
-    # Nothing is held, escrowed, refunded, forfeited or slashed anywhere in
-    # this module -- CLAUDE.md section 9 bars this project from holding user
-    # funds, and the escrow primitive belongs to roadmap item 5's smart
-    # contract, which is not started.
-    #
-    # Priced at the feature board's vote fee, not its request fee: a grade is
-    # the same act as a vote -- one small paid datum contributed to an
-    # aggregate somebody else reads -- and both are worthless as signals if
-    # the fee is high enough that honest agents skip them. Flooding is bounded
-    # by the one-grade-per-(grader, url) rule rather than by price.
-    x402_grading_grade_price: str = "$0.02"
-    # Fee to read one endpoint's aggregate score. Still priced above the grade
-    # fee (an aggregate read is worth more than one contributed data point),
-    # but cut from $0.10 to $0.03 on 2026-08-30 against a real external
-    # comparable: Verun, the Berlin-hackathon-winning agent-trust-score
-    # product doing the same thing on Algorand, charges $0.01 per verdict --
-    # $0.10 was 10x that for a directly comparable read, which both looks
-    # uncompetitive and suppresses the paid-intent volume the competition's
-    # Volume score counts.
-    x402_grading_score_price: str = "$0.03"
-    # Free-endpoint abuse gate (CLAUDE.md section 9: rate limit every free
-    # endpoint per IP), counted under its own key prefix, not the search,
-    # board or features one.
-    x402_grading_rate_limit_per_hour: int = 120
-    # Hard cap on a free-index page and on how many individual grades the paid
-    # score lookup serves — no unbounded listings (CLAUDE.md section 4).
-    x402_grading_max_results: int = 100
-    # How many grades of one endpoint the aggregate reads before averaging. The
-    # aggregate is computed in Python over a single LIMITed partition read (see
-    # GradingService.aggregate for why there is no counter column), so this is
-    # what bounds it: the average is exact while an endpoint has fewer graders
-    # than this, and the response says truncated=true past it.
-    x402_grading_scan_limit: int = 500
-    # Credibility weighting of the paid aggregate. A grade's weight is
-    #   min(base + that wallet's all-time atomic spend with us, max)
-    # summed over the settlement ledger at read time. Read
-    # modules/x402_grading/services/credibility.py before changing either;
-    # both numbers are in atomic units of the payment asset (USDC has 6
-    # decimals, so 10_000 = $0.01).
-    #
-    # The base is what every grade is worth before any spending history. It is
-    # never zero: each grade was itself paid for, and a zero weight would
-    # silently delete a paid grade from the average. It is also what every
-    # weight falls back to when the ledger cannot be read, which makes the
-    # weighted mean degrade to the plain mean rather than to 0/0.
-    x402_grading_base_weight_atomic: int = 10_000
-    # Ceiling on one wallet's weight, so credibility cannot be bought outright:
-    # without it a single wallet that has spent enough with us outweighs every
-    # honest grader combined. 100x the base -- a large but finite multiple of a
-    # newcomer's influence.
-    x402_grading_max_weight_atomic: int = 1_000_000
-    # How far back the credibility sum reads the settlement ledger, in whole
-    # UTC days. Each day is one partition-key read with a bound LIMIT, so this
-    # is literally the number of queries one paid score lookup costs (the sum
-    # answers for every grader of that endpoint in ONE pass, so it does not
-    # scale with grader count). It also states a product rule: credibility is
-    # earned by recent spending, not by a wallet's whole history.
-    x402_grading_spend_lookback_days: int = 30
-    # Rows read per ledger day partition during a credibility sum. Bounds the
-    # scan at lookback_days x this; a payer whose settlements are past this
-    # many rows into a busy day is under-counted, which is the argument for
-    # building the by-payer ledger projection credibility.py flags rather than
-    # raising this.
-    x402_grading_spend_scan_limit: int = 500
-    # Usage-proof-of-payment (owner ask 2026-09-02): every grade submission
-    # must name a payment txid proving the grader actually transacted with
-    # the endpoint being graded, verified independently on-chain via the
-    # public indexer (and, for a URL not listed with us, a live SSRF-guarded
-    # fetch of its own 402 offer to learn its payTo -- see
-    # services/usage_proof.py). This does NOT change credibility weighting
-    # (services/credibility.py is untouched); it is a visible per-grade flag
-    # only. Timeout for the indexer HTTP call.
-    x402_grading_usage_proof_timeout_s: float = 8.0
-    # Policy for when the indexer itself cannot be reached (not "the proof
-    # was wrong" -- that is always a hard 400, this setting cannot soften
-    # it). True (default, matches "no txid, no grade, full stop"): the grade
-    # submission is rejected until the indexer is reachable again, coupling
-    # grading uptime to indexer uptime on purpose -- a grade this module
-    # cannot verify is not stored as if it were. False: an operator escape
-    # hatch for a known indexer outage -- the grade still submits with
-    # usage_verified=False rather than blocking the product outright.
-    x402_grading_usage_proof_required: bool = True
 
     # ── x402 News Engine pay-per-call (GET /x402/news, GET /x402/news/tags
     # and GET /x402/news/articles/:id all free, GET /x402/news/search paid). See
@@ -780,125 +377,6 @@ class Settings(msgspec.Struct, kw_only=True):
     x402_scan_sandbox_timeout_s: int = 90
     x402_scan_rate_limit_per_hour: int = 30
     # ── end x402 file/tarball scan ──
-
-    # ── x402 uptime/reachability check. See app/modules/x402_uptime/ and
-    # docs/x402-uptime-check-design.md. Prototype/v0: a single GET, no
-    # response body ever downloaded (status line + headers + timing only),
-    # SSRF-guarded on every hop (reuses app.core.ssrf_guard.resolve_public_ip,
-    # same shared primitive x402_scan already uses), cached per target with an
-    # asymmetric TTL, rate-limited on two independent dimensions (caller IP
-    # and target host). Disabled by default — this is a design prototype,
-    # not a live product; the price is directly anchored against
-    # x402_ping_price/x402_news_search_price (both $0.001), but both
-    # rate-limit numbers and the cache TTLs below are reasoned defaults, not
-    # owner-confirmed operating parameters — see the design doc's Open
-    # Questions before flipping this on.
-    x402_uptime_enabled: bool = False
-    x402_uptime_price: str = "$0.001"
-    # Per caller IP, covering the free pre-payment surface (URL validation,
-    # a 402 offer lookup) the same way x402_scan_rate_limit_per_hour does —
-    # 120/hour matches the majority convention in this codebase
-    # (news/board/features/grading/catalog) rather than scan's tighter
-    # 30/hour, because this endpoint's pre-payment work is cheap (URL
-    # parsing only, no sandbox/container spin-up).
-    x402_uptime_rate_limit_per_hour: int = 120
-    # Per target host[:port], counting only REAL fetches (cache hits never
-    # increment it) — the actual DDoS defense: bounds real outbound traffic
-    # to any one target regardless of how many different callers/wallets pay
-    # for a check. No existing precedent in this codebase for a
-    # caller-chosen-destination limit; 20/hour (~1 real check every 3
-    # minutes per target) is a fresh judgment call, not derived from
-    # anything else here.
-    x402_uptime_target_rate_limit_per_hour: int = 20
-    # Asymmetric cache freshness window: a "down" result (unreachable or a
-    # 5xx) is trusted for less time than an "up" one, same direction as the
-    # media proxy's own asymmetric TTL (24h success vs 1h failure
-    # placeholder) — a real recovery should become visible again quickly.
-    # Which direction is actually SAFER to get wrong is an open product-trust
-    # question the owner hasn't stated; see the design doc.
-    x402_uptime_cache_ttl_up_seconds: int = 180
-    x402_uptime_cache_ttl_down_seconds: int = 30
-    # Per-hop connect+read-headers timeout. No separate overall deadline is
-    # needed the way x402_scan/the x402 probe require one: there is no
-    # response body to slow-drip here, so the worst case is bounded by this
-    # value times (x402_uptime_max_redirects + 1).
-    x402_uptime_check_timeout_s: float = 5.0
-    x402_uptime_max_redirects: int = 3
-    # Latency percentiles (agent feedback via Moltbook, verified 2026-09-06:
-    # "P99 latency matters for trading agents -- give me percentiles, not
-    # just averages"). Deliberately NOT a new persistent per-request history
-    # -- N samples of the SAME target within the SAME paid call, percentiles
-    # computed over just those samples, zero new storage. See
-    # services/percentiles.py's own module docstring for the full
-    # DDoS-amplification reasoning; short version: this only multiplies
-    # traffic on a genuine cache MISS (already bounded by the TTLs above),
-    # never with caller/payer volume -- but the per-target real-fetch rate
-    # limiter above still counts one whole multi-sample call as ONE unit
-    # (matching "one payment = one unit of budget"), so the true worst-case
-    # real-HTTP-hit ceiling against one target is now up to this many times
-    # higher than x402_uptime_target_rate_limit_per_hour alone suggests.
-    # Accepted, not further mitigated, for this prototype -- flagged in the
-    # build report, not silently absorbed.
-    x402_uptime_percentile_samples: int = 5
-    # Hard ceiling on the whole multi-sample phase's wall-clock time, so a
-    # slow/hanging target cannot hold one paid HTTP request open for
-    # samples * per-attempt timeout (up to 100s at these defaults) --
-    # sampling stops early once this is crossed; percentiles are then
-    # computed over however many samples were actually collected (always at
-    # least one -- the same single result this product already returned
-    # before this feature existed).
-    x402_uptime_percentile_budget_s: float = 12.0
-
-    # Historical uptime (the other half of the same agent ask: "show me
-    # uptime over the last 30 days, not just the latest probe"). Unlike the
-    # percentiles above, this genuinely needs new persistent storage --
-    # aggregating across MANY independent real checks over time, not one
-    # call's samples. See app/modules/x402_uptime/stores/ and migration 115
-    # (x402_uptime_checks_by_url). Only a genuine real check (a cache MISS)
-    # ever writes a row -- a served cache hit, or a budget-exhausted
-    # stale-cache serve, is a re-serving of an OLD measurement, not a new
-    # one, and recording those too would duplicate the same reading many
-    # times over and skew "uptime % over N days" toward call volume rather
-    # than actual measurement (see models/domain.py's StoredUptimeCheck).
-    # "memory" (ephemeral, lost on restart) by default, same convention
-    # every other x402 product's own *_store setting uses before it is
-    # flipped to "cassandra" for a real deploy.
-    x402_uptime_history_store: str = "memory"
-    # The table's TTL is baked into migration 115 at 30 days (matching
-    # x402_probe_results, 097) and is NOT controlled by this setting -- a
-    # later change here does not retroactively change what is already
-    # stored, it only moves the caller-facing `days=` cap below. Kept as its
-    # own setting anyway so the cap and the actual retention are easy to
-    # compare when reasoning about correctness (a `days=` cap set above the
-    # real table TTL would silently under-report, not error).
-    x402_uptime_history_max_days: int = 30
-    # Hard cap on the raw per-check rows returned by one history read
-    # (CLAUDE.md section 4: no unbounded listings) -- same style as
-    # x402_probe_history_max_results, sized smaller since a real check is
-    # far rarer per target than the directory's scheduled 30-minute probe.
-    # NOT a guarantee of `x402_uptime_history_max_days` of coverage, though:
-    # at this endpoint's own per-target rate limit ceiling
-    # (x402_uptime_target_rate_limit_per_hour, 20/hour by default) this cap
-    # is reached in about a day for one frequently-checked target, well
-    # short of the 30-day window a caller can request -- see
-    # services/history_service.py's `read()` for the honesty fix
-    # (window_days_actual/truncated) this drove (found in same-night review,
-    # 2026-09-06).
-    x402_uptime_history_max_results: int = 500
-    # PAID, unlike x402_probe_history_max_results (free): that data is free
-    # because the workers probe fleet produces it anyway, on a fixed
-    # schedule, for LISTED endpoints only, at no incremental cost per read.
-    # This history is built entirely from rows that were each paid for once
-    # already (a real /uptime/check call) against an ARBITRARY caller url --
-    # serving it back for free would let anyone read a url's recent check
-    # history without ever paying for a check themselves, undercutting the
-    # live check product for any url someone else already checked recently.
-    # Priced close to, but above, a single check: this read does more work
-    # for us (a bounded multi-row read + aggregation) but no outbound
-    # network fetch of its own. A fresh judgment call (2x the single-check
-    # price), not derived from another setting.
-    x402_uptime_history_price: str = "$0.002"
-    # ── end x402 uptime/reachability check ──
 
     # ── x402 agent backup storage (roadmap item 12: pay-per-MB storage; owner
     # design decision made 2026-09-03, this is the "starts local-disk-only"
@@ -997,174 +475,6 @@ class Settings(msgspec.Struct, kw_only=True):
     x402_storage_max_results: int = 100
     # ── end x402 agent backup storage ──
 
-    # ── x402 agent social network, Phase S0 only (identity/foundation layer;
-    # see docs/x402-social-design.md and CLAUDE.md section 9 roadmap). The
-    # module directory is app/modules/x402_social/. S1 (posts/comments/
-    # reactions/follows/groups/trending) and S2 (community moderation,
-    # explicitly NOT approved -- see the design doc's own section 5 sign-off
-    # block) add their own settings in their own phases; only the S0 subset
-    # lives here.
-    x402_social_store: str = "memory"
-    # One-time identity floor (design doc section 2.1): matches the
-    # directory's listing price. Paid because an unpriced registration would
-    # be a free sybil mint -- the eligibility rule Phase S2's community
-    # moderation design leans on assumes registration cost real money.
-    x402_social_register_price: str = "$0.10"
-    # Free-endpoint abuse gate (CLAUDE.md section 9: rate limit every free
-    # endpoint per wallet AND per IP) for POST /auth/challenge + POST
-    # /auth/session together (design doc section 4.2) -- deliberately fails
-    # open even on a Redis outage: the signature check downstream is the
-    # real security boundary for this pair of routes, not the rate limit.
-    x402_social_session_rate_limit_per_hour: int = 60
-    # Same gate, for the free session-authenticated writes (PATCH /profile in
-    # Phase S0; unfollow/leave/group-mod actions join this budget in later
-    # phases) -- keyed by wallet, not IP, since the caller is already
-    # session-authenticated by the time this runs.
-    x402_social_free_write_rate_limit_per_hour: int = 60
-    # Free-endpoint abuse gate for the two Phase-S0 free read routes (GET
-    # /agents, GET /agents/{wallet}) -- per IP only, same shape as
-    # x402_search_rate_limit_per_hour. NOT in the design doc's own Phase-S0
-    # settings enumeration (docs/x402-social-design.md section 1 only names
-    # one x402_social_read_rate_limit_per_hour covering every phase's free
-    # reads); added here anyway because CLAUDE.md section 9's "rate limit
-    # every free endpoint per wallet and per IP" is non-negotiable and Phase
-    # S0 already ships two free read routes that need it -- S1's additional
-    # free reads (feed, comments, trending, ...) reuse this same setting when
-    # they ship, so it is not renamed or duplicated later.
-    x402_social_read_rate_limit_per_hour: int = 600
-    # Bearer session token lifetime (design doc section 4.2): Redis-only,
-    # deliberately -- a lost session is a 60-second re-login for an agent
-    # that holds its own key, so durability buys nothing.
-    x402_social_session_ttl_seconds: int = 86400
-    # Hard cap on a page of the agent directory (GET /agents) -- no unbounded
-    # listings (CLAUDE.md section 4).
-    x402_social_max_results: int = 100
-    # Agent Discovery Search (added 2026-09-03): GET /agents/search, a paid
-    # read (like x402_features_demand / x402_news_search) over the free-text
-    # interests field, which has no other way to filter/search today.
-    x402_social_agent_search_price: str = "$0.01"
-    # Spend-weighted agent leaderboard (added 2026-09-06, real agent demand:
-    # "I want to find agents with high spend in the marketplace -- they're
-    # more reliable"). Priced like x402_directory_probe_leaderboard_price
-    # ($0.02, see that setting's own comment): a similar shape -- a curated
-    # top-N ranking computed at read time over already-recorded data, no
-    # per-grader opinions to unbundle the way x402_grading_score_price's
-    # credibility-weighted aggregate is, but more work than a single
-    # stateless check (x402_scan_price, $0.01) since it scans up to
-    # LEADERBOARD_WINDOW_DAYS day-partitions of the shared settlement ledger
-    # and joins the result against every registered social profile.
-    x402_social_agent_leaderboard_price: str = "$0.02"
-    # ── end x402 agent social network (Phase S0) ──────────────────────────────
-
-    # ── x402 agent social network, Phase S1 (the network: posts, comments,
-    # reactions, follows, groups, trending -- design doc sections 2.2-2.9).
-    x402_social_post_price: str = "$0.01"
-    x402_social_comment_price: str = "$0.005"
-    x402_social_react_price: str = "$0.002"
-    x402_social_follow_price: str = "$0.005"
-    x402_social_group_create_price: str = "$0.25"
-    x402_social_group_join_price: str = "$0.01"
-    # Markdown body size cap for POST /posts (design doc section 2.2) --
-    # checked by services/markdown_guard.py, BEFORE the payment gate.
-    x402_social_post_max_bytes: int = 16384
-    x402_social_max_tags: int = 5
-    # Home feed (GET /feed) read-side fan-out cap: at most this many of a
-    # caller's most-recently-followed agents AND at most this many of their
-    # most-recently-joined groups are scanned per read (design doc section
-    # 2.4). The response reports "truncated_to" when either cap bites.
-    x402_social_feed_fanout_limit: int = 50
-    # ── end x402 agent social network (Phase S1) ──────────────────────────────
-
-    # ── x402 agent social network: private messages (DMs, migration 121,
-    # operator ask 2026-09-07). Free, session-authenticated -- NOT a priced
-    # route -- see services/dm_service.py's own module docstring for why.
-    # Both budgets use the shared app/core/rate_limit.py incr_with_expiry
-    # primitive (services/rate_limit.py's dm_send_wallet_rate_limited /
-    # dm_send_ip_rate_limited), same as every other free-route rate limit in
-    # this module. The IP budget is deliberately WIDER than the wallet
-    # budget: it exists to catch one attacker spreading sends across many
-    # cheaply-registered ($0.10 each) sybil wallets from the same egress IP,
-    # not to bound one honest agent's own normal traffic (which the wallet
-    # budget already does).
-    x402_social_dm_send_rate_limit_per_hour: int = 60
-    x402_social_dm_send_ip_rate_limit_per_hour: int = 300
-    # Hard cap on a page of GET /dm/{wallet} (one conversation) or GET /dm
-    # (a wallet's own conversation list) -- no unbounded listings (CLAUDE.md
-    # section 4). Reuses x402_social_max_results's own value as the default
-    # rather than introducing a second "100" constant, but is its own
-    # setting since a DM page size is conceptually independent of the
-    # agent-directory page size it happens to start equal to.
-    x402_social_dm_max_results: int = 100
-    # ── end x402 agent social network (DMs) ────────────────────────────────────
-
-    # ── x402 agent social network, Phase S2: community moderation (design
-    # doc section 5, owner sign-off 2026-09-03; section 8.1's admin
-    # emergency lever shares this same audit trail but has no settings of
-    # its own -- it is require_admin_wallet-gated, not priced). Master flag:
-    # the whole S2 surface (POST /reports, GET /cases, GET /cases/{id},
-    # POST /cases/{id}/vote, the standing karma fields) stays unregistered
-    # until this is flipped, separate from and in addition to
-    # x402_social_store's own "memory" gate -- see
-    # api/routes.py.register_x402_social_routes and falcon_main.py.
-    x402_social_moderation_enabled: bool = False
-    # The most expensive recurring action on the platform (design doc
-    # section 5.2): a report conscripts other agents' attention and puts a
-    # target's standing at stake, so it is deliberately priced above the
-    # post it attacks (5x x402_social_post_price).
-    x402_social_report_price: str = "$0.05"
-    # Low, because quorum needs volunteers -- but paid, because a free vote
-    # is a free sybil lever; combined with the registration-predates-the-
-    # case eligibility rule (moderation_service.py), stuffing a vote costs
-    # real, ledger-visible money.
-    x402_social_case_vote_price: str = "$0.005"
-    # Voting window (design doc section 5.3): _resolve_if_due resolves a
-    # case lazily, on the next read or write that touches it after this many
-    # seconds have elapsed since it opened -- no scheduler, no Celery here.
-    x402_social_case_window_seconds: int = 86400
-    # Minimum distinct eligible voters for a case to resolve upheld (design
-    # doc section 5.3) -- below this, the window expiring resolves
-    # not-upheld regardless of the ratio.
-    x402_social_case_quorum: int = 5
-    # uphold / total >= this ratio, AND quorum met, resolves a case upheld
-    # (design doc section 5.3). Two ints, not a single float (fixed
-    # 2026-09-03, A5): the old `x402_social_case_uphold_ratio: float = 0.667`
-    # could never land on an exact two-thirds split -- 4/6, 6/9, 8/12 all
-    # compute as 0.6666... < the float literal 0.667 and resolved REJECTED
-    # even though "at least two-thirds" was the evident intent (a float
-    # boundary bug, not a design choice). moderation_service._resolve_case
-    # compares `tally.uphold * ratio_denominator >= ratio_numerator * total`
-    # -- exact integer arithmetic, no floating-point boundary, so an exact
-    # split always resolves correctly regardless of what these two ints are
-    # set to.
-    x402_social_case_uphold_ratio_numerator: int = 2
-    x402_social_case_uphold_ratio_denominator: int = 3
-    # The section 5.4 ban formula's three knobs: ban_seconds =
-    # min(base x multiplier**offenses_in_window, cap). Base 30 min, x4,
-    # cap 30 days pins the "30m -> 2h -> 8h -> 32h -> ~5.3d -> ~21d -> 30d
-    # (cap)" sequence the design doc documents and moderation_service's
-    # regression tests pin exactly.
-    x402_social_ban_base_seconds: int = 1800
-    x402_social_ban_multiplier: int = 4
-    x402_social_ban_cap_seconds: int = 2592000
-    # Offenses older than this stop counting toward the ban formula's
-    # offenses_in_window (design doc section 5.4) -- bans rehabilitate,
-    # they do not accumulate eternally. The LIFETIME offense_count on
-    # x402_social_standing is never decremented by this; only ban severity
-    # decays.
-    x402_social_offense_decay_days: int = 90
-    # Section 5.4.1's two independent false-report throttles. Concurrency
-    # cap: at most this many unresolved reports per reporter at once
-    # (caller-fault, payment kept, 409, enforced by an LWT slot claim on
-    # x402_social_reporter_slots). Cooldown: escalating filing throttle on
-    # every rejected resolution, base 15 min doubling per consecutive
-    # rejection, capped at 7 days, streak reset to 0 on an upheld report --
-    # refused pre-gate, free, 403, while active (a platform-imposed throttle
-    # the caller could not have avoided by paying more).
-    x402_social_report_max_open: int = 2
-    x402_social_report_cooldown_base_seconds: int = 900
-    x402_social_report_cooldown_cap_seconds: int = 604800
-    # ── end x402 agent social network (Phase S2) ──────────────────────────────
-
     # x402 catalog (GET /x402, free): the machine-readable index of every
     # x402 product route currently registered. See app/modules/x402_catalog/.
     # No store and no price of its own -- it only reads the other products'
@@ -1175,11 +485,6 @@ class Settings(msgspec.Struct, kw_only=True):
     # non-operator settlements across every product. Own key prefix and own
     # budget, separate from the catalog and every product's own limits.
     x402_settlements_rate_limit_per_hour: int = 120
-    # A deliberately trivial paid route (GET /api/v1/x402/ping): proves a
-    # client's signing pipeline actually works, and tests the facilitator's
-    # tolerance for a sub-cent price, before risking money on a real product.
-    # $0.001 == 1000 atomic USDC units at 6 decimals, no rounding loss.
-    x402_ping_price: str = "$0.001"
 
     # Replay window for an already-spent payment header. Must be >= 2x the
     # facilitator's own HTTP timeout (FacilitatorConfig.timeout defaults to
@@ -1192,7 +497,7 @@ class Settings(msgspec.Struct, kw_only=True):
     # opt-in per route (require_paid_request's preview / promo_code kwargs
     # default to off), so a route that does not pass them is unaffected.
     #
-    # Preview (`?preview=true`, checked by the route, see x402_ping): bypasses
+    # Preview (`?preview=true`, checked by the route, see x402_scan): bypasses
     # the payment gate entirely -- no facilitator call, nothing settled,
     # nothing on the ledger -- so it needs its own free-endpoint abuse gate
     # (CLAUDE.md section 9), own key prefix, fails open like every other

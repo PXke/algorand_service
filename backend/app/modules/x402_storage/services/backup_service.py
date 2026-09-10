@@ -38,17 +38,15 @@ _BYTES_PER_KB = 1024
 # at call time in validate_retention_days() rather than duplicated here.
 MIN_RETENTION_DAYS = 1
 
-# Bound on the free-text label, same "bounded, not shape-validated" treatment
-# as x402_directory's `contact` field.
+# Bound on the free-text label: bounded, not shape-validated.
 MAX_LABEL_LENGTH = 256
 
 
 def _new_backup_id() -> str:
     """A fresh timeuuid-compatible id, with a random node instead of this process's real MAC address.
 
-    Same reasoning and construction as x402_social's `_new_post_or_comment_id`
-    (services/post_service.py): plain uuid.uuid1() embeds the host's NIC MAC
-    address in the node field, which a public id should never leak. Forcing
+    Plain uuid.uuid1() embeds the host's NIC MAC address in the node field,
+    which a public id should never leak. Forcing
     the multicast bit on a random 48-bit node is the standard RFC 4122 way to
     mint a time-based UUID with no real MAC in it, and Cassandra only
     validates the version nibble server-side, which this preserves.
@@ -716,10 +714,9 @@ class BackupService:
     ) -> list[StoredBackup]:
         """This wallet's active, unexpired backups, newest first, clamped to x402_storage_max_results.
 
-        Filtered after the LIMITed read, same accepted tradeoff as
-        x402_directory.search() / x402_board.list_active(): a page can come
-        back short when the front of this wallet's own history is full of
-        deleted/expired rows.
+        Filtered after the LIMITed read -- an accepted tradeoff: a page can
+        come back short when the front of this wallet's own history is full
+        of deleted/expired rows.
         """
         moment = now or datetime.now(tz=UTC)
         cutoff = int(moment.timestamp())

@@ -1,10 +1,9 @@
 """Preview-mode tests for the shared x402 payment gate (modules/x402/preview.py).
 
-Fully offline: the facilitator is a stub that never touches the network
-(same shape as test_x402_directory.py's), Redis is a fake at the get_redis
-seam. Exercises guard.require_payment's `preview` kwarg, paid_request.
-require_paid_request's `preview` kwarg, and the worked reference wiring in
-x402_catalog's x402_ping route.
+Fully offline: the facilitator is a stub that never touches the network,
+Redis is a fake at the get_redis seam. Exercises guard.require_payment's
+`preview` kwarg and paid_request.require_paid_request's `preview` kwarg; the
+route-level wiring is covered by tests/modules/x402_scan/test_scan_route_preview.py.
 """
 
 from __future__ import annotations
@@ -23,7 +22,6 @@ from x402.schemas.v1 import PaymentRequirementsV1
 from x402.server import x402ResourceServerSync
 
 from app.core import rate_limit as rate_limit_core
-from app.core import serialization
 from app.core.config import settings
 from app.core.http import QueryParams, Request
 from app.modules.x402 import circuit_breaker
@@ -33,13 +31,12 @@ from app.modules.x402 import paid_request as payment_service
 from app.modules.x402 import preview as preview_module
 from app.modules.x402 import replay as replay_module
 from app.modules.x402.settlement import InMemorySettlementStore
-from app.modules.x402_catalog.api import routes as catalog_routes
 
 _PAY_TO = "A" * 58
 
 
 # --------------------------------------------------------------------------- #
-# Fakes (same shape as test_x402_directory.py's)
+# Fakes
 # --------------------------------------------------------------------------- #
 class _FakeRedis:
     """Enough of the Redis API for the preview rate limiter and the refund circuit breaker."""
@@ -102,7 +99,7 @@ def _request(
     method: str = "GET",
     headers: dict[str, str] | None = None,
     query: dict[str, Any] | None = None,
-    path: str = "/api/v1/x402/ping",
+    path: str = "/api/v1/x402/scan/url",
 ) -> Request:
     return Request(
         method=method,
@@ -317,64 +314,3 @@ def test_preview_is_rate_limited_per_ip_and_fails_open(monkeypatch: pytest.Monke
         _request(headers=headers), price="$0.10", resource="x402-test", preview=True
     )
     assert broken.is_preview is True
-
-
-# --------------------------------------------------------------------------- #
-# x402_ping: the worked example, both branches
-# --------------------------------------------------------------------------- #
-@pytest.mark.usefixtures("testnet_settings", "fake_redis")
-def test_ping_preview_serves_a_redacted_response_with_no_facilitator_call(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """?preview=true on the worked example gets the redacted shape, never touching the stub facilitator's verify/settle."""
-    monkeypatch.setattr(settings, "x402_ping_price", "$0.001")
-
-    response = catalog_routes.x402_ping(_request(query={"preview": "true"}))
-
-    assert response.status_code == 200
-    body = serialization.loads(response.description)
-    assert body == {"pong": True, "settlement_tx_id": "<preview>", "served_at_epoch": 0}
-
-
-@pytest.mark.usefixtures("testnet_settings", "fake_redis")
-def test_ping_non_preview_behavior_is_completely_unchanged(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Regression: the exact same 402-without-payment shape as before preview/promo existed."""
-    from x402.http.utils import decode_payment_required_header
-
-    monkeypatch.setattr(settings, "x402_ping_price", "$0.001")
-
-    response = catalog_routes.x402_ping(_request())
-
-    assert response.status_code == 402
-    offer = decode_payment_required_header(response.headers["PAYMENT-REQUIRED"]).accepts[0]
-    assert offer.pay_to == _PAY_TO
-
-
-@pytest.mark.usefixtures("testnet_settings", "fake_redis")
-def test_ping_settled_payment_is_unaffected_by_preview_or_promo_plumbing(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A real settled payment still returns the real receipt and calls mark_fulfilled, exactly as before."""
-    settled = x402_guard.PaymentResult(
-        error=None,
-        payer="P" * 58,
-        settlement_headers={"PAYMENT-RESPONSE": "ok"},
-        amount_atomic="1000",
-        payment_txid="TX999",
-        asset_id="10458941",
-        network=ALGORAND_TESTNET_CAIP2,
-    )
-    monkeypatch.setattr(catalog_routes, "require_paid_request", lambda *_a, **_kw: settled)
-    marked: list[str] = []
-    monkeypatch.setattr(
-        catalog_routes, "mark_fulfilled", lambda tx_id, **_kw: marked.append(tx_id) or True
-    )
-
-    response = catalog_routes.x402_ping(_request())
-
-    assert response.status_code == 200
-    body = serialization.loads(response.description)
-    assert body["settlement_tx_id"] == "TX999"
-    assert body["pong"] is True
-    assert "via" not in body
-    assert marked == ["TX999"]

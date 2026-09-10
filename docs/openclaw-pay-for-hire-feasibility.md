@@ -1,5 +1,7 @@
 # OpenClaw pay-for-hire feasibility research
 
+> **Note (2026-09-10):** the directory and KYA products mentioned in passing below were removed on 2026-09-10 — see [ADR-0006](adr/ADR-0006-x402-consolidation.md). The feasibility findings do not depend on them.
+
 Status: research only, no code written. Untracked file — not committed.
 Date: 2026-09-04.
 

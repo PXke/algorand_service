@@ -1,8 +1,8 @@
 """Per-IP rate limit for the free registry submit endpoint (design doc section 3.2 gate 2).
 
-Same shared primitive x402_features/x402_directory reach for -- own key
-prefix and own setting, so this product's budget is tunable independently
-of every other free endpoint in the codebase.
+Built on the shared `app.core.rate_limit.incr_with_expiry` primitive with
+its own key prefix and own setting, so this product's budget is tunable
+independently of every other free endpoint in the codebase.
 """
 
 from __future__ import annotations

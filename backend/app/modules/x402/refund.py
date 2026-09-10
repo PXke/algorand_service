@@ -1,17 +1,14 @@
 """Refund leg: send the full settled amount back to the payer when a paid route's product write fails after payment already settled.
 
-Modeled directly on kya/services/payout_service.py's send_payout -- same
-hot-wallet-signs-and-sends-ASA-transfer shape, same never-raises/best-effort
-contract, same "send back in the SAME asset_id the inbound payment settled
-in". Deliberately a SEPARATE dedicated wallet from both x402_pay_to_address
-(receive-only, no key held) and kyc_payout_mnemonic (KYA's revenue-share
-payout, a different fund for a different purpose) -- see settings.
-x402_refund_mnemonic's own docstring in app/core/config.py.
+The hot wallet signs and sends an ASA transfer, never raises (best-effort
+contract), and always sends back in the SAME asset_id the inbound payment
+settled in. Deliberately a SEPARATE dedicated wallet from
+x402_pay_to_address (receive-only, no key held) -- see
+settings.x402_refund_mnemonic's own docstring in app/core/config.py.
 
-This is the second place in the backend that ever signs a transaction (the
-first is payout_service.py); deliberately isolated the same way, for the
-same reason: the mnemonic is read from settings only inside this module,
-never passed around.
+This is the only place in the backend that signs a transaction, and it is
+deliberately isolated: the mnemonic is read from settings only inside this
+module, never passed around.
 """
 
 from __future__ import annotations
@@ -93,18 +90,15 @@ def _usd_atomic_equivalent(asset: AcceptedAsset, raw_atomic: int) -> int | None:
     not a stablecoin, so decimals-only rescaling (assuming 1 atomic unit is
     worth the same fraction of a dollar for every asset) would still be off
     by goBTC's real market price. This is why that shape was rejected in
-    favor of routing every priced asset through price_oracle -- the same
-    per-asset normalization x402_grading/services/credibility.py already
-    does for settlement spend (`_normalize_to_usd_atomic`), reused here
-    rather than re-invented (CLAUDE.md section 3).
+    favor of routing every priced asset through price_oracle, normalizing
+    per asset to USD atomic units at its live rate.
 
     Returns None when `asset` needs a price and price_oracle has none
     available right now -- fails CLOSED, same reasoning as the Redis
     unreachable case right below: an unpriceable refund must not sail
-    through an unenforceable budget. Ceiling-rounds, unlike credibility.py's
-    floor (that sums SPEND upward being generous; this consumes a BUDGET,
+    through an unenforceable budget. Ceiling-rounds: this consumes a BUDGET,
     so rounding what a refund "costs" against the ceiling DOWN would be the
-    wrong direction for a control that guards money leaving the wallet).
+    wrong direction for a control that guards money leaving the wallet.
     """
     if raw_atomic <= 0:
         return 0

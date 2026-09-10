@@ -85,24 +85,25 @@ def test_a_paid_x402_product_left_on_the_memory_store_is_not_registered(
 ) -> None:
     """A paid route backed by the per-process memory store must not go live.
 
-    x402_enabled alone used to be the only gate; each product is now also
-    gated on its own store setting so a product left on "memory" (the
-    dev/test-only default, CLAUDE.md section 9) never accepts a real settled
-    payment it cannot reliably honor across gunicorn's worker processes. All
-    five default to "memory" here, so none of the routes should exist --
-    exercised via the free GET each product exposes, so this never touches a
-    real store.
+    Each product is gated on its own store setting so a product left on
+    "memory" (the dev/test-only default, CLAUDE.md section 9) never accepts a
+    real settled payment it cannot reliably honor across gunicorn's worker
+    processes. Every kept store defaults to "memory" here, so only the
+    gate-free catalog and bootstrap routes exist -- exercised via the free
+    GET each product exposes, so this never touches a real store.
     """
     monkeypatch.setattr(falcon_main_settings, "x402_enabled", True)
     client = testing.TestClient(create_app())
     for path in (
-        "/api/v1/x402/search",  # directory
-        "/api/v1/x402/board",
-        "/api/v1/x402/features",
-        "/api/v1/x402/grades",
+        "/api/v1/x402/news",
+        "/api/v1/x402/storage/backups",
+        "/api/v1/x402/scan/url",
     ):
         resp = client.simulate_get(path)
         assert resp.status_code == 404, f"{path} should not be registered on the memory store"
+    assert client.simulate_get("/api/v1/x402").status_code == 200
+    assert client.simulate_get("/api/v1/x402/settlements").status_code == 200
+    assert client.simulate_get("/.well-known/x402").status_code == 200
 
 
 def test_a_paid_x402_product_off_the_memory_store_is_registered(
@@ -110,10 +111,54 @@ def test_a_paid_x402_product_off_the_memory_store_is_registered(
 ) -> None:
     """The mirror of the test above: a non-memory store setting registers that product's routes."""
     monkeypatch.setattr(falcon_main_settings, "x402_enabled", True)
-    monkeypatch.setattr(falcon_main_settings, "x402_board_store", "cassandra")
+    monkeypatch.setattr(falcon_main_settings, "news_store", "cassandra")
     client = testing.TestClient(create_app())
-    resp = client.simulate_get("/api/v1/x402/board")
+    resp = client.simulate_get("/api/v1/x402/news")
     assert resp.status_code != 404
+
+
+def test_removed_x402_products_are_never_registered(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Owner decision 2026-09-10: directory, board, features, grades, social, uptime, KYA, receipts and ping are gone -- every one of their paths 404s even with x402 on."""
+    monkeypatch.setattr(falcon_main_settings, "x402_enabled", True)
+    monkeypatch.setattr(falcon_main_settings, "news_store", "cassandra")
+    client = testing.TestClient(create_app())
+    for path in (
+        "/api/v1/x402/list",
+        "/api/v1/x402/search",
+        "/api/v1/x402/board",
+        "/api/v1/x402/features",
+        "/api/v1/x402/grades",
+        "/api/v1/x402/social/agents",
+        "/api/v1/x402/uptime/check",
+        "/api/v1/kyc/verify",
+        "/api/v1/x402/receipts/abc",
+        "/api/v1/x402/ping",
+    ):
+        assert client.simulate_get(path).status_code == 404, path
+        assert client.simulate_post(path).status_code == 404, path
+
+
+def test_paid_routes_refuse_to_start_outside_dev_on_a_memory_settlement_ledger(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """CLAUDE.md section 9: every settlement is logged, durably. A non-dev process with x402 on and the ledger on "memory" must fail at startup, not serve paid routes against a per-process dict."""
+    monkeypatch.setattr(falcon_main_settings, "x402_enabled", True)
+    monkeypatch.setattr(falcon_main_settings, "app_env", "prod")
+    monkeypatch.setattr(falcon_main_settings, "x402_settlement_store", "memory")
+    with pytest.raises(RuntimeError, match="X402_SETTLEMENT_STORE"):
+        create_app()
+
+    # Durable ledger: boots. Dev on memory: boots (the memory backend is for dev/test).
+    monkeypatch.setattr(falcon_main_settings, "x402_settlement_store", "cassandra")
+    assert testing.TestClient(create_app()).simulate_get("/api/v1/x402").status_code == 200
+    monkeypatch.setattr(falcon_main_settings, "app_env", "dev")
+    monkeypatch.setattr(falcon_main_settings, "x402_settlement_store", "memory")
+    assert testing.TestClient(create_app()).simulate_get("/api/v1/x402").status_code == 200
+
+    # x402 off: the guard is not consulted at all.
+    monkeypatch.setattr(falcon_main_settings, "x402_enabled", False)
+    monkeypatch.setattr(falcon_main_settings, "app_env", "prod")
+    assert testing.TestClient(create_app()).simulate_get("/api/v1/x402").status_code == 404
 
 
 def test_ecosystem_left_on_the_memory_store_is_not_registered(

@@ -26,15 +26,10 @@ from app.modules.ecosystem.models.domain import (
     EcosystemError,
     EntryRequest,
 )
+from app.modules.ecosystem.services.markdown_guard import reject_embedded_html
 from app.modules.ecosystem.stores.factory import get_project_store, get_request_store
-from app.modules.x402_social.models.domain import SocialError
-from app.modules.x402_social.services.markdown_guard import reject_embedded_html
 
 _MAX_CONTACT_LENGTH = 254
-
-
-def _reraise_as_ecosystem_error(exc: SocialError) -> None:
-    raise EcosystemError(exc.code, exc.message, http_status=exc.http_status) from exc
 
 
 def normalize_kind(raw: str) -> str:
@@ -53,10 +48,7 @@ def normalize_message(raw: str) -> str:
             "invalid_request",
             f"message must be {MIN_REQUEST_MESSAGE_LENGTH}-{MAX_REQUEST_MESSAGE_LENGTH} characters",
         )
-    try:
-        reject_embedded_html(message, field_name="message")
-    except SocialError as exc:
-        _reraise_as_ecosystem_error(exc)
+    reject_embedded_html(message, field_name="message")
     return message
 
 

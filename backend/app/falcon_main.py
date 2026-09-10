@@ -23,7 +23,6 @@ from app.modules.contact.api.routes import register_contact_routes
 from app.modules.ecosystem.api.routes import register_ecosystem_routes
 from app.modules.glossary.api.routes import register_glossary_routes
 from app.modules.ingest.api.routes import register_ingest_routes
-from app.modules.kya.api.routes import register_kya_routes
 from app.modules.media.api.routes import register_media_routes
 from app.modules.metrics.api.routes import register_metrics_routes
 from app.modules.news.api.routes import register_news_routes
@@ -33,17 +32,10 @@ from app.modules.search.api.routes import register_search_routes
 from app.modules.seo.api.routes import register_seo_routes
 from app.modules.sharing.api.routes import register_sharing_routes
 from app.modules.suggestions.api.routes import register_suggestions_routes
-from app.modules.x402_board.api.routes import register_x402_board_routes
 from app.modules.x402_catalog.api.routes import register_x402_catalog_routes
-from app.modules.x402_directory.api.routes import register_x402_directory_routes
-from app.modules.x402_features.api.routes import register_x402_features_routes
-from app.modules.x402_grading.api.routes import register_x402_grading_routes
 from app.modules.x402_news.api.routes import register_x402_news_routes
-from app.modules.x402_receipts.api.routes import register_x402_receipts_routes
 from app.modules.x402_scan.api.routes import register_x402_scan_routes
-from app.modules.x402_social.api.routes import register_x402_social_routes
 from app.modules.x402_storage.api.routes import register_x402_storage_routes
-from app.modules.x402_uptime.api.routes import register_x402_uptime_routes
 from app.modules.x402_wellknown.api.routes import register_x402_wellknown_routes
 
 
@@ -185,58 +177,32 @@ def _register_x402_routes(router: FalconRouter) -> None:
     charged) until its own store is explicitly set to something durable,
     rather than going live silently alongside whichever products actually
     are. Split out of create_app to keep that function's branching bounded.
+
+    The settlement ledger is the one store with no per-product gate: every
+    paid route writes to it, so outside dev it must be durable before ANY
+    paid route is registered (CLAUDE.md section 9: every settlement logged).
+    A non-dev process with x402_settlement_store still on "memory" refuses
+    to start rather than run paid routes against a ledger that vanishes on
+    restart.
     """
-    if settings.kyc_store != "memory":
-        register_kya_routes(router)
-    if settings.x402_directory_store != "memory":
-        register_x402_directory_routes(router)
-    if settings.x402_board_store != "memory":
-        register_x402_board_routes(router)
-    if settings.x402_features_store != "memory":
-        register_x402_features_routes(router)
-    if settings.x402_grading_store != "memory":
-        register_x402_grading_routes(router)
+    if settings.x402_settlement_store == "memory" and settings.app_env != "dev":
+        raise RuntimeError(
+            "X402_SETTLEMENT_STORE is 'memory' while APP_ENV is "
+            f"{settings.app_env!r}: the settlement ledger must be durable outside dev "
+            "(set X402_SETTLEMENT_STORE=cassandra)"
+        )
     # The News Engine has no store of its own: it reads through the news
     # module's store, so its durability gate is the news store's setting.
     if settings.news_store != "memory":
         register_x402_news_routes(router)
-    # Prototype, off by default -- see modules/x402_scan/__init__.py for the
+    # Gated on X402_SCAN_ENABLED -- see modules/x402_scan/__init__.py for the
     # two owner decisions (which host runs the sandbox container engine;
-    # whether/when to add dynamic analysis) still outstanding before this is
-    # safe to flip on for real traffic.
+    # whether/when to add dynamic analysis) still open.
     if settings.x402_scan_enabled:
         register_x402_scan_routes(router)
-    # Prototype, off by default -- see modules/x402_uptime/__init__.py and
-    # docs/x402-uptime-check-design.md for the reasoned-but-not-owner-
-    # confirmed pricing/rate-limit/cache-TTL defaults still outstanding
-    # before this is safe to flip on for real traffic. Pulled into its own
-    # function (same reason _register_x402_storage_if_enabled is) purely to
-    # keep this function's branch count under ruff's C901 threshold.
-    _register_x402_uptime_if_enabled(router)
-    # Phase S0 only (identity/foundation layer) -- see
-    # docs/x402-social-design.md sections 1, 7 and app/modules/x402_social/.
-    # Same "memory" gate as every other product: a paid write against a
-    # per-process dict is invisible across gunicorn workers, so this stays
-    # unregistered (clean 404, nothing charged) until the store is flipped
-    # to something durable.
-    if settings.x402_social_store != "memory":
-        register_x402_social_routes(router)
     # Roadmap item 12 ("pay-per-MB storage") -- see app/modules/x402_storage/
-    # and _register_x402_storage_if_enabled's own docstring. Pulled into its
-    # own function (rather than an inline `if` here) purely to keep this
-    # function's branch count from crossing ruff's C901 threshold on this one
-    # extra product -- CLAUDE.md section 3: extract before adding a branch.
+    # and _register_x402_storage_if_enabled's own docstring.
     _register_x402_storage_if_enabled(router)
-    # Signed fulfillment receipts (docs/x402-execution-trust-evaluation.md
-    # item 1): the free read side, GET /api/v1/x402/receipts/{receipt_id}.
-    # Generation itself (modules/x402/receipts.py, hooked into every
-    # run_with_refund caller above) is gated separately, on whether
-    # x402_receipt_signing_mnemonic is configured -- this gate is only
-    # about whether the READ route is reachable, same "memory" reasoning as
-    # every other product store above (a receipt written to a per-process
-    # dict would be invisible to a read landing on another gunicorn worker).
-    if settings.x402_receipts_store != "memory":
-        register_x402_receipts_routes(router)
     # The catalog lists whichever of the products above were registered (it
     # re-evaluates the same gates), so it comes last and is gated only on
     # the shared switch.
@@ -245,19 +211,6 @@ def _register_x402_routes(router: FalconRouter) -> None:
     # catalog itself: no product store gate of their own, they just reshape
     # whatever register_x402_catalog_routes's build_catalog() already produced.
     register_x402_wellknown_routes(router)
-
-
-def _register_x402_uptime_if_enabled(router: FalconRouter) -> None:
-    """Register the x402 uptime/reachability check's one route iff settings.x402_uptime_enabled.
-
-    Extracted out of _register_x402_routes purely to keep that function's
-    branch count under ruff's C901 threshold (same reason
-    _register_x402_storage_if_enabled is its own function) -- no second
-    condition here, unlike storage's ANDed pair, this product has exactly
-    one plain boolean gate.
-    """
-    if settings.x402_uptime_enabled:
-        register_x402_uptime_routes(router)
 
 
 def _register_x402_storage_if_enabled(router: FalconRouter) -> None:

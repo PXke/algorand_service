@@ -1740,56 +1740,23 @@ ARTIFACT_SKIP_COUNT_MAX_SCORE = env_float("ARTIFACT_SKIP_COUNT_MAX_SCORE", 6.0)
 # quality-head checkpoint they used to produce had no reader, see
 # docs/modules/gatekeeper.md).
 GATEKEEPER_FACT_MIN = env_float("GATEKEEPER_FACT_MIN", 0.80)
-# x402 probe / monitoring beat (roadmap item 7, CLAUDE.md 9.1). Off by default:
-# it sends real (unpaid, SSRF-guarded) requests to third-party endpoints, so
-# it is enabled deliberately per deployment, not by shipping code. The beat
-# never pays anything; its traffic is labelled by User-Agent and excluded from
-# every ranking.
-X402_PROBE_ENABLED = env_bool("X402_PROBE_ENABLED", False)
-X402_PROBE_INTERVAL_SECONDS = env_int("X402_PROBE_INTERVAL_SECONDS", 1800)
-# Hard per-request timeout, body read cap, and how many newest listings one
-# sweep covers (the recency feed is read LIMITed, never unbounded).
-X402_PROBE_TIMEOUT_SECONDS = env_float("X402_PROBE_TIMEOUT_SECONDS", 5.0)
-X402_PROBE_MAX_BODY_BYTES = env_int("X402_PROBE_MAX_BODY_BYTES", 64 * 1024)
-X402_PROBE_MAX_LISTINGS = env_int("X402_PROBE_MAX_LISTINGS", 200)
 # Algorand Open Registry periodic liveness re-check beat (roadmap item 26,
 # CLAUDE.md section 9.1; design doc's section 9 decision #6, owner-confirmed
-# 2026-09-07: a v1 requirement, not deferred). Same off-by-default,
-# config-driven cadence/scheduling pattern as the x402 probe beat above --
-# see app/modules/ecosystem_probe/. Never pays, SSRF-guarded, only re-checks
-# pending+approved entries (a rejected entry is never re-probed).
+# 2026-09-07: a v1 requirement, not deferred). Off by default: it sends real
+# (unpaid, SSRF-guarded) requests to third-party sites, so it is enabled
+# deliberately per deployment, not by shipping code -- see
+# app/modules/ecosystem_probe/. Only re-checks pending+approved entries (a
+# rejected entry is never re-probed).
 ECOSYSTEM_PROBE_ENABLED = env_bool("ECOSYSTEM_PROBE_ENABLED", False)
 ECOSYSTEM_PROBE_INTERVAL_SECONDS = env_int("ECOSYSTEM_PROBE_INTERVAL_SECONDS", 21600)
 ECOSYSTEM_PROBE_TIMEOUT_SECONDS = env_float("ECOSYSTEM_PROBE_TIMEOUT_SECONDS", 5.0)
 # Bounded scan of ecosystem_projects (a small, fully-enumerable table -- see
 # EcosystemStmts.LIST_ALL's own docstring), never unbounded.
 ECOSYSTEM_PROBE_MAX_ENTRIES = env_int("ECOSYSTEM_PROBE_MAX_ENTRIES", 500)
-# Same convention as X402_PROBE_MAX_BODY_BYTES -- a liveness check only
-# needs to confirm the body exists / match a parking-page signature (see
-# ecosystem_probe/service.py's check_reachable), never the full page.
-# Previously uncapped: net_guard.guarded_get's own default (20MB) applied
-# by omission (2026-09-08 Fable review).
+# Body read cap: a liveness check only needs to confirm the body exists /
+# match a parking-page signature (see ecosystem_probe/service.py's
+# check_reachable), never the full page.
 ECOSYSTEM_PROBE_MAX_BODY_BYTES = env_int("ECOSYSTEM_PROBE_MAX_BODY_BYTES", 64 * 1024)
-# Pricing-model change (owner decision 2026-09-06, migration 114): a listing
-# no longer survives on a one-time paid term -- it survives for as long as
-# it keeps passing health probes. Every HEALTHY probe (reachable AND
-# served_valid_402, the same "healthy" backend's ListingService.
-# probe_leaderboard() already uses) pushes the listing's term_end forward to
-# `now + this many days`; an unhealthy probe changes nothing (see
-# run_probe_sweep's own docstring).
-#
-# ****MUST MATCH backend/app/core/config.py's Settings.x402_listing_term_days
-# field (default 30) EXACTLY, or a listing's real term drifts from what the
-# 402 offer/catalog text tells the payer it bought.**** Workers and backend
-# are separate services with no shared config-loading mechanism (CLAUDE.md
-# section 0), so this is workers' own copy of the same number, not a read of
-# backend's Settings object, and nothing enforces the two stay equal --
-# there is no cross-service config-sharing system to build one from as part
-# of this change (deliberately out of scope, same call CLAUDE.md section 9
-# makes for KYB). If you change one, change the other in the SAME commit;
-# backend/app/core/config.py carries the reciprocal comment pointing back
-# here.
-X402_LISTING_TERM_DAYS = env_int("X402_LISTING_TERM_DAYS", 30)
 # x402 storage reaper beat: POSTs the API-host internal reap route because
 # the local-disk connector lives there, not in this worker process. Off when
 # the token is empty (same "empty = disabled" convention as the API's own

@@ -500,6 +500,13 @@ if [[ ! -s "\$ASN_MMDB" || "\$(cat "\$GEOIP_DIR/.month-asn" 2>/dev/null)" != "\$
 fi
 grep -q '^GEOIP_ASN_DB_PATH=' '${SHARED}/backend.env' \
   || echo "GEOIP_ASN_DB_PATH=\$ASN_MMDB" >> '${SHARED}/backend.env'
+
+# Settlement ledger store (ADR-0006). Later deploys never overwrite
+# shared/backend.env, so a host that predates this setting still has the
+# old X402_DIRECTORY_STORE line and the config default of "memory".
+# falcon_main refuses to boot paid routes in prod against memory.
+grep -q '^X402_SETTLEMENT_STORE=' '${SHARED}/backend.env' \
+  || echo "X402_SETTLEMENT_STORE=cassandra" >> '${SHARED}/backend.env'
 EOF
 
   if [[ "$DEPLOY_SKIP_MIGRATE" != "1" ]]; then

@@ -1,10 +1,11 @@
 """Shared Redis incr-and-expire counter.
 
-The primitive behind every per-key rate limit in this codebase. Five separate copies of "incr key, set expire on the first hit, compare
-against a limit" existed before this (auth/session_store.py,
-seo/analytics_store.py, contact/api/routes.py, sharing/api/routes.py,
-x402_directory/services/rate_limit.py) -- but they are not drop-in
-identical: fail-open vs fail-closed on a Redis error is a deliberate,
+The primitive behind per-key rate limits in this codebase. Four older
+hand-rolled copies of "incr key, set expire on the first hit, compare
+against a limit" still live in auth/session_store.py,
+seo/analytics_store.py, contact/api/routes.py and sharing/api/routes.py --
+and they are not drop-in identical: fail-open vs fail-closed on a Redis
+error is a deliberate,
 security-reasoned choice per caller (sharing's comment endpoint fails
 *closed* specifically because a leaked share token has no wallet/session
 behind it -- see its own comment), and callers disagree on whether they want
@@ -12,12 +13,11 @@ a boolean or the raw count back (seo's frequency check wants the count
 itself, not a threshold decision). So this factors out only the actual
 duplicated mechanism -- the counter -- and leaves the fail-open/closed
 policy and the boolean-vs-count interpretation to the caller, rather than
-forcing one behaviour on all five.
+forcing one behaviour on all of them.
 
 Existing callers are deliberately NOT migrated here (same convention as
-redis_client.py's own docstring) -- this is the primitive new code (starting
-with x402_directory) reaches for, not a refactor of the ones that already
-work and are already tested.
+redis_client.py's own docstring) -- this is the primitive new code reaches
+for, not a refactor of the ones that already work and are already tested.
 """
 
 from __future__ import annotations

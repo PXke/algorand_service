@@ -1,5 +1,7 @@
 # gold-402 — PR-ready entry draft
 
+> **STALE (2026-09-10):** this draft advertises `POST /api/v1/x402/list`, the directory, board, feature-request and grading products — all removed on 2026-09-10 ([ADR-0006](adr/ADR-0006-x402-consolidation.md)). Do not submit as written; a resubmission must describe only the News Engine, sandboxed scan and backup storage, with `https://x402.pxke.me` as the docs link.
+
 Status: **DRAFT ONLY — not sent.** No fork, branch, commit, or PR has been
 created against `github.com/Haustorium12/gold-402`. Nothing here has touched
 that repository. This file is the exact patch content plus the exact

@@ -2,9 +2,8 @@
 
 CLAUDE.md section 9: rate limit every free endpoint per wallet AND per IP.
 
-Mirrors x402_social/services/rate_limit.py's own fix (2026-security-audit
-finding 2): on every wallet-signature-authenticated route here (list,
-detail, delete), the `wallet` query param is an UNAUTHENTICATED CLAIM until
+On every wallet-signature-authenticated route here (list, detail,
+delete), the `wallet` query param is an UNAUTHENTICATED CLAIM until
 services/auth_service.verify_challenge_signature actually returns True for
 it -- so it must never be used to key a rate limit BEFORE that verification
 succeeds. Keying on the unproven claim would let an attacker who does not
@@ -15,8 +14,7 @@ per-IP unconditionally, and the per-wallet counter is only ever touched
 AFTER a caller has actually proven control of that wallet in this same
 request.
 
-Every gate fails OPEN on a Redis error, same convention as
-x402_directory's search_rate_limited: a Redis blip must not take a free
+Every gate fails OPEN on a Redis error: a Redis blip must not take a free
 read/auth path offline.
 """
 
@@ -39,7 +37,7 @@ def ip_rate_limited(request: Request) -> bool:
     checked BEFORE anything else on each of them. An unattributable request
     (no X-Real-IP / X-Forwarded-For, i.e. local dev) is not limited: with no
     key to bucket on, every such caller would share one counter and starve
-    each other, same reasoning as x402_directory's search_rate_limited.
+    each other.
     """
     ip = client_ip(request.headers)
     if not ip:

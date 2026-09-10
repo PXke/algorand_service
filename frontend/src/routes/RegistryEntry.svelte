@@ -186,7 +186,7 @@
             <!-- Cross-domain: x402.pxke.me is a separate product, not a route in
                  this build's router — a plain external link, never navigate(). -->
             Sells a paid endpoint.
-            <a href="https://x402.pxke.me/directory" target="_blank" rel="noopener noreferrer">
+            <a href="https://x402.pxke.me/" target="_blank" rel="noopener noreferrer">
               See it on the marketplace
             </a>
           </dd>

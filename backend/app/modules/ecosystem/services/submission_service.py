@@ -30,9 +30,8 @@ from app.modules.ecosystem.models.domain import (
     StoredProject,
 )
 from app.modules.ecosystem.services.liveness import check_liveness
+from app.modules.ecosystem.services.markdown_guard import reject_embedded_html
 from app.modules.ecosystem.stores.factory import get_project_store
-from app.modules.x402_social.models.domain import SocialError
-from app.modules.x402_social.services.markdown_guard import reject_embedded_html
 
 logger = logging.getLogger(__name__)
 
@@ -48,9 +47,8 @@ _GITHUB_PAGES_SUFFIX = ".github.io"
 # Social/badge/forge hosts a submission must not point at as its own url
 # (design doc section 3.1) -- NOT the crawler's full `_SKIP_HOSTS` set
 # (workers/app/modules/crawler/ecosystem_sync.py, a different service/venv
-# backend cannot import -- same precedented split as x402_uptime's checker
-# vs workers' x402_probe/probe.py, see liveness.py's own docstring), just
-# the ones a submitter could plausibly paste as "my project's url". GitHub
+# backend cannot import), just the ones a submitter could plausibly paste
+# as "my project's url". GitHub
 # repo urls are deliberately NOT here -- "a dev tool's home is its repo" --
 # see _domain_key's own docstring for how a repo url is deduped instead.
 _BLOCKED_SUBMISSION_HOSTS = frozenset(
@@ -80,10 +78,6 @@ _BLOCKED_SUBMISSION_HOSTS = frozenset(
 )
 
 
-def _reraise_as_ecosystem_error(exc: SocialError) -> None:
-    raise EcosystemError(exc.code, exc.message, http_status=exc.http_status) from exc
-
-
 def normalize_name(raw: str) -> str:
     """Trim, length-bound, HTML-reject a submission's display name."""
     name = (raw or "").strip()
@@ -91,10 +85,7 @@ def normalize_name(raw: str) -> str:
         raise EcosystemError(
             "invalid_request", f"name must be {_MIN_NAME_LENGTH}-{_MAX_NAME_LENGTH} characters"
         )
-    try:
-        reject_embedded_html(name, field_name="name")
-    except SocialError as exc:
-        _reraise_as_ecosystem_error(exc)
+    reject_embedded_html(name, field_name="name")
     return name
 
 
@@ -104,9 +95,8 @@ def normalize_description(raw: str) -> str:
     Markdown (multi-line, links) is allowed -- rendered client-side through
     the same `{@html}` + DOMPurify allowlist convention every other
     markdown surface in this codebase uses (CLAUDE.md section 5); this is
-    the write-time half of that contract, same "reject raw HTML at the
-    door" posture x402_social's own markdown bodies already use (2026-09-08:
-    bumped from a 200-char one-liner to 500 chars / multi-line, owner ask).
+    the write-time half of that contract: raw HTML is rejected at the door
+    (services/markdown_guard.py), never stripped.
     """
     description = (raw or "").strip()
     if not (_MIN_DESCRIPTION_LENGTH <= len(description) <= _MAX_DESCRIPTION_LENGTH):
@@ -114,10 +104,7 @@ def normalize_description(raw: str) -> str:
             "invalid_request",
             f"description must be {_MIN_DESCRIPTION_LENGTH}-{_MAX_DESCRIPTION_LENGTH} characters",
         )
-    try:
-        reject_embedded_html(description, field_name="description")
-    except SocialError as exc:
-        _reraise_as_ecosystem_error(exc)
+    reject_embedded_html(description, field_name="description")
     return description
 
 
@@ -131,22 +118,15 @@ def normalize_category_suggestion(raw: str) -> str:
             "invalid_request",
             f"category_suggestion must be at most {_MAX_CATEGORY_SUGGESTION_LENGTH} characters",
         )
-    try:
-        reject_embedded_html(suggestion, field_name="category_suggestion")
-    except SocialError as exc:
-        _reraise_as_ecosystem_error(exc)
+    reject_embedded_html(suggestion, field_name="category_suggestion")
     return suggestion
 
 
 def normalize_url(raw: str, *, field_name: str = "url") -> str:
     """Normalize a submitted url to its canonical form; blank input for an optional field returns "".
 
-    Same lowercase-scheme-and-host, keep-path-and-query shape as
-    x402_directory.services.listing_service.normalize_url -- not imported
-    from there (that module raises DirectoryError, a different
-    PlatformError subclass, and its module is payment-flow-specific), but
-    the same normalization rule so a registry url and a directory listing
-    url of the same endpoint key on the same normalized string.
+    Lowercase scheme and host, keep path and query, so two spellings of the
+    same page key on the same normalized string.
     """
     trimmed = (raw or "").strip()
     if not trimmed:
@@ -206,7 +186,7 @@ def validate_stage(raw: str) -> str:
 
 
 def normalize_tag(raw: str) -> str:
-    """Canonical stored/searched form of one tag: trimmed and lowercased (same rule as x402_directory.normalize_tag)."""
+    """Canonical stored/searched form of one tag: trimmed and lowercased (lowercase, trimmed)."""
     return (raw or "").strip().lower()
 
 

@@ -1,14 +1,17 @@
 """pxke-x402-client: a thin client for PXke's x402 marketplace.
 
+Free-only agent::
+
     from pxke_x402 import PxkeClient
 
-    # Free-only agent
     client = PxkeClient()
     print(client.catalog())
+    print(client.news(limit=5))
 
-    # Paying agent (Algorand mainnet, real money -- see README)
+Paying agent (Algorand mainnet, real money -- see README)::
+
     client = PxkeClient(mnemonic="word1 word2 ... word25")
-    print(client.ping())
+    print(client.scan_url("https://example.com/file.zip")["risk"])
 """
 
 from __future__ import annotations
@@ -32,4 +35,4 @@ __all__ = [
     "PxkePaymentError",
 ]
 
-__version__ = "0.6.0"
+__version__ = "0.7.0"

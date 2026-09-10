@@ -6,15 +6,14 @@ every protected call (GET list, GET one, DELETE) re-proves wallet control
 from scratch, right there in that request -- see api/routes.py's own
 docstring on the auth transport shape.
 
-Style-mirrors x402_social/services/session_service.py's issue_challenge /
-verify_challenge_signature (same short-TTL Redis-backed single-use nonce,
-same fail-closed-on-a-Redis-error contract) but is deliberately NOT an import
-of that module (CLAUDE.md: keep x402_storage self-contained) and deliberately
-smaller: only the two generic signature primitives named in the design --
+A short-TTL, Redis-backed, single-use nonce with a fail-closed-on-a-Redis-
+error contract, kept self-contained (CLAUDE.md: keep x402_storage
+self-contained) and deliberately small: only the two generic signature
+primitives named in the design --
 app.modules.auth.utils.algorand_verify.verify_wallet_signature (a raw-message
 signature) and verify_signed_bytes (algosdk signBytes/Pera signData
-convention) -- no CAIP-122/arc0060/txn-proof support, which social's own
-module needs for its browser-wallet login flow and this module does not.
+convention) -- no CAIP-122/arc0060/txn-proof support, which a browser-wallet
+login flow needs and this module does not.
 """
 
 from __future__ import annotations
@@ -51,7 +50,7 @@ class StorageChallenge:
 
 
 def _challenge_key(wallet: str, nonce: str) -> str:
-    """Keyed by (wallet, nonce), not wallet alone -- same reasoning as x402_social's own _challenge_key.
+    """Keyed by (wallet, nonce), not wallet alone.
 
     A wallet-only key would let a request carrying ANY nonce for a given
     wallet (garbage included, no proof of key possession required) GETDEL

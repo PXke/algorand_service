@@ -4,8 +4,7 @@ Registered as `app.tasks.ecosystem_probe.*` so this module's own beat can be
 scheduled independently of every `app.tasks.newspaper.*`/`app.tasks.crawler.*`
 glob in celery_app.py's task_routes -- both fall to the "default" queue,
 which the worker already consumes (deploy/scripts/run_celery.sh
-`-Q default,scrape,pipeline,chain,security`), same as x402_probe's own
-unrouted tasks.
+`-Q default,scrape,pipeline,chain,security`).
 """
 
 from __future__ import annotations
@@ -26,8 +25,7 @@ logger = logging.getLogger(__name__)
 # sequential timeout-bounded fetches); overlapping ticks must no-op rather
 # than probe the same entries twice. Lock TTL pinned to the celery-wide hard
 # time limit (>= the soft limit, CLAUDE.md invariant 5); the beat entry sets
-# `expires=` to the interval so a stale tick is dropped, not run late --
-# same pairing as x402_probe's own probe_listed_endpoints.
+# `expires=` to the interval so a stale tick is dropped, not run late.
 @single_flight(lambda *_a, **_kw: "ecosystem_probe:sweep", ttl=celery_app.conf.task_time_limit)
 def probe_registry_entries() -> dict[str, object]:
     """Run one liveness sweep over pending+approved registry entries. Re-checks ECOSYSTEM_PROBE_ENABLED so a manual trigger honours the flag too."""

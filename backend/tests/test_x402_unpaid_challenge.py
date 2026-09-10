@@ -38,19 +38,12 @@ from x402.server import x402ResourceServerSync
 
 from app.core.config import settings
 from app.core.http import QueryParams, Request, Response
-from app.modules.kya.api import routes as kyc_routes
 from app.modules.x402 import circuit_breaker, paid_request
 from app.modules.x402 import client as x402_client
 from app.modules.x402 import guard as x402_guard
-from app.modules.x402_board.api import routes as board_routes
-from app.modules.x402_directory.api import routes as directory_routes
-from app.modules.x402_features.api import routes as features_routes
-from app.modules.x402_grading.api import routes as grading_routes
 from app.modules.x402_news.api import routes as news_routes
 from app.modules.x402_scan.api import routes as scan_routes
-from app.modules.x402_social.api import routes as social_routes
 from app.modules.x402_storage.api import routes as storage_routes
-from app.modules.x402_uptime.api import routes as uptime_routes
 
 _PAY_TO = "A" * 58
 
@@ -89,7 +82,7 @@ def _stub_resource_server() -> x402ResourceServerSync:
 def _request(
     method: str = "POST",
     *,
-    path: str = "/api/v1/x402/list",
+    path: str = "/api/v1/x402/scan/url",
     query: dict[str, Any] | None = None,
     path_params: dict[str, str] | None = None,
     headers: dict[str, str] | None = None,
@@ -172,22 +165,6 @@ def test_a_paid_preview_or_promo_request_is_not_challenged(
 # --------------------------------------------------------------------------- #
 # 2. Every reordered route, with a sentinel challenge
 # --------------------------------------------------------------------------- #
-def _post_exists(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(
-        social_routes,
-        "post_service",
-        SimpleNamespace(get=lambda _id: SimpleNamespace(deleted=False, hidden_platform=False)),
-    )
-
-
-def _case_is_open(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(
-        social_routes,
-        "moderation_service",
-        SimpleNamespace(get_case=lambda _id: SimpleNamespace(state=social_routes.CASE_STATE_OPEN)),
-    )
-
-
 def _no_rate_limit(module: object, name: str) -> Callable[[pytest.MonkeyPatch], None]:
     def _apply(monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(module, name, lambda _request: False)
@@ -212,50 +189,6 @@ def _storage_backup_exists(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 _ROUTES: list[tuple[str, object, str, dict[str, Any], Callable[[pytest.MonkeyPatch], None]]] = [
-    ("directory list", directory_routes, "x402_list", {}, _nothing),
-    (
-        "directory renew",
-        directory_routes,
-        "x402_renew",
-        {"path": "/api/v1/x402/list/renew"},
-        _nothing,
-    ),
-    (
-        "directory probe leaderboard",
-        directory_routes,
-        "x402_probe_leaderboard",
-        {"method": "GET", "path": "/api/v1/x402/directory/probe/leaderboard"},
-        _nothing,
-    ),
-    ("board place", board_routes, "x402_board_place", {"path": "/api/v1/x402/board"}, _nothing),
-    (
-        "features demand",
-        features_routes,
-        "x402_features_demand",
-        {"method": "GET", "path": "/api/v1/x402/features/demand"},
-        _nothing,
-    ),
-    (
-        "grade submit",
-        grading_routes,
-        "x402_grade_submit",
-        {"path": "/api/v1/x402/grades"},
-        _nothing,
-    ),
-    (
-        "grade score",
-        grading_routes,
-        "x402_grade_score",
-        {"method": "GET", "path": "/api/v1/x402/grades/score"},
-        _nothing,
-    ),
-    (
-        "grade top",
-        grading_routes,
-        "x402_grade_top",
-        {"method": "GET", "path": "/api/v1/x402/grades/top"},
-        _no_rate_limit(grading_routes, "grading_top_rate_limited"),
-    ),
     (
         "news search",
         news_routes,
@@ -271,78 +204,6 @@ _ROUTES: list[tuple[str, object, str, dict[str, Any], Callable[[pytest.MonkeyPat
         _no_rate_limit(scan_routes, "scan_rate_limited"),
     ),
     (
-        "uptime check",
-        uptime_routes,
-        "x402_uptime_check",
-        {"path": "/api/v1/x402/uptime/check"},
-        _no_rate_limit(uptime_routes, "ip_rate_limited"),
-    ),
-    (
-        "social register",
-        social_routes,
-        "x402_social_register",
-        {"path": "/api/v1/x402/social/register"},
-        _nothing,
-    ),
-    (
-        "social agent search",
-        social_routes,
-        "x402_social_agent_search",
-        {"method": "GET", "path": "/api/v1/x402/social/agents/search"},
-        _nothing,
-    ),
-    (
-        "social follow",
-        social_routes,
-        "x402_social_follow",
-        # No path_params at all -- the worst case: a bare probe that has not
-        # substituted a real Algorand address for `:wallet` yet.
-        {"path": "/api/v1/x402/social/agents/x/follow"},
-        _nothing,
-    ),
-    (
-        "social post",
-        social_routes,
-        "x402_social_post_create",
-        {"path": "/api/v1/x402/social/posts"},
-        _nothing,
-    ),
-    (
-        "social comment",
-        social_routes,
-        "x402_social_comment_create",
-        {"path": "/api/v1/x402/social/posts/p1/comments", "path_params": {"post_id": "p1"}},
-        _post_exists,
-    ),
-    (
-        "social react",
-        social_routes,
-        "x402_social_react",
-        {"path": "/api/v1/x402/social/posts/p1/react", "path_params": {"post_id": "p1"}},
-        _post_exists,
-    ),
-    (
-        "social group create",
-        social_routes,
-        "x402_social_group_create",
-        {"path": "/api/v1/x402/social/groups"},
-        _nothing,
-    ),
-    (
-        "social report",
-        social_routes,
-        "x402_social_report_create",
-        {"path": "/api/v1/x402/social/reports"},
-        _nothing,
-    ),
-    (
-        "social case vote",
-        social_routes,
-        "x402_social_case_vote",
-        {"path": "/api/v1/x402/social/cases/c1/vote", "path_params": {"case_id": "c1"}},
-        _case_is_open,
-    ),
-    (
         "storage create",
         storage_routes,
         "x402_storage_create_backup",
@@ -355,24 +216,15 @@ _ROUTES: list[tuple[str, object, str, dict[str, Any], Callable[[pytest.MonkeyPat
         "storage renew",
         storage_routes,
         "x402_storage_renew_backup",
-        # wallet moved to a query param 2026-09-06 (was body-only, so a
-        # header-less request always 400'd before it could ever see this
-        # challenge) -- the free lookup it enables must resolve to an
-        # existing, not-at-cap backup before the price-bearing challenge can
-        # fire at all, hence the setup below.
+        # wallet is a query param, so the free lookup it enables resolves to
+        # an existing, not-at-cap backup before the price-bearing challenge
+        # can fire at all, hence the setup below.
         {
             "path": "/api/v1/x402/storage/backups/b1/renew",
             "path_params": {"backup_id": "b1"},
             "query": {"wallet": "A" * 58},
         },
         _storage_backup_exists,
-    ),
-    (
-        "kya verify",
-        kyc_routes,
-        "kyc_verify",
-        {"method": "GET", "path": "/api/v1/kyc/verify"},
-        _nothing,
     ),
 ]
 
@@ -406,19 +258,20 @@ def test_every_reordered_route_challenges_before_reading_its_input(
 # 3. One route end to end against the offline facilitator
 # --------------------------------------------------------------------------- #
 @pytest.mark.usefixtures("testnet_settings")
-def test_an_empty_body_with_no_payment_yields_the_listing_offer_end_to_end(
+def test_an_empty_body_with_no_payment_yields_the_scan_offer_end_to_end(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """POST /api/v1/x402/list with an empty body and no payment header -- the exact request found live returning 400 -- now returns the real 402 at the listing price."""
-    monkeypatch.setattr(settings, "x402_listing_price", "$0.10")
+    """POST /api/v1/x402/scan/url with an empty body and no payment header returns the real 402 at the scan price, never a 400 from body validation."""
+    monkeypatch.setattr(settings, "x402_scan_price", "$0.10")
+    _no_rate_limit(scan_routes, "scan_rate_limited")(monkeypatch)
 
-    response = directory_routes.x402_list(_request(body=b""))
+    response = scan_routes.x402_scan_url(_request(body=b""))
 
     assert response.status_code == 402
     offer = decode_payment_required_header(response.headers["PAYMENT-REQUIRED"])
     assert offer.accepts[0].amount == "100000"
     assert offer.accepts[0].extra["tag"] == x402_client.CHALLENGE_TAG
-    assert offer.resource.url.endswith("/api/v1/x402/list")
+    assert offer.resource.url.endswith("/api/v1/x402/scan/url")
 
 
 @pytest.mark.usefixtures("testnet_settings")

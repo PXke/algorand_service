@@ -46,7 +46,8 @@ export default defineConfig(({ mode }) => {
           ? {
               name: 'PXke x402',
               short_name: 'PXke x402',
-              description: 'x402 endpoints on Algorand: list yours, find others, pay per call.',
+              description:
+                'Pay-per-call services for agents on Algorand: file scanning, backup storage, news.',
               theme_color: '#eef0f5',
               background_color: '#eef0f5',
               display: 'standalone',
@@ -83,6 +84,11 @@ export default defineConfig(({ mode }) => {
           // one). The locale glob deliberately excludes `en-*.js` and
           // `es5-*.js` (a legacy-JS polyfill chunk, unrelated to the `es`
           // locale) — verified against a real `dist/assets` listing.
+          // `injectRegister: false` above stops the plugin from injecting
+          // these itself, so without them a new worker installs and then
+          // waits forever while the old one keeps serving the old build.
+          skipWaiting: true,
+          clientsClaim: true,
           globPatterns: ['**/*.{js,css,html,ico,svg,woff2,png,webp}'],
           globIgnores: [
             '**/wallet-connect-*.js',

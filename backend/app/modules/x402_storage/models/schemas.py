@@ -5,9 +5,9 @@ backend -- pydantic is fully removed (CLAUDE.md section 5 / global rule).
 Response bodies are plain dicts built by api/routes.py's own `_backup_json`,
 the same convention every other x402 product's routes use.
 
-GET and DELETE requests never carry a body in this backend's own convention
-(see x402_directory/api/routes.py's admin-delete docstring), so the
-wallet-signature auth proof for the free authenticated routes (list, detail,
+GET and DELETE requests never carry a body in this backend's own
+convention, so the wallet-signature auth proof for the free authenticated
+routes (list, detail,
 delete) is read from query params directly in api/routes.py, not through a
 Struct here -- there is nothing to decode a JSON body into on those routes.
 """
@@ -19,17 +19,15 @@ from typing import Annotated, Literal
 import msgspec
 from msgspec import Meta
 
-# Same shape as x402_social/models/schemas.py's own WalletAddress -- not
-# imported from there to keep this module self-contained (the task's own
-# instruction: a small self-contained equivalent, not an x402_social import).
+# Shape bound for a 58-character Algorand address, defined locally so this
+# module stays self-contained.
 WalletAddress = Annotated[str, Meta(min_length=58, max_length=58)]
 
 ProofMethod = Literal["legacy_message", "signed_bytes"]
 
 # Mirrors services/backup_service.MAX_LABEL_LENGTH -- kept as a literal
 # compile-time constant here (msgspec.Meta bounds must be compile-time
-# constants) rather than imported, matching x402_social/models/schemas.py's
-# own documented split between a compile-time shape bound here and the real
+# constants) rather than imported: a compile-time shape bound here, the real
 # runtime-configured cap enforced downstream.
 _MAX_LABEL_LENGTH = 256
 

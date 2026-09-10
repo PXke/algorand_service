@@ -188,11 +188,6 @@
           {/if}
           Submit for review
         </button>
-        <span class="aside">
-          Selling a paid x402 endpoint?
-          <a href="https://x402.pxke.me/list" target="_blank" rel="noopener noreferrer">List it on the marketplace</a>
-          instead.
-        </span>
       </div>
     </form>
   {/if}
@@ -308,13 +303,6 @@
   .send:disabled {
     opacity: 0.65;
     cursor: not-allowed;
-  }
-  .aside {
-    color: var(--subtle);
-    font-size: 13px;
-  }
-  .aside a {
-    color: var(--accent);
   }
   .spinner {
     width: 16px;

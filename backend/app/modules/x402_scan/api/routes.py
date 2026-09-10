@@ -80,9 +80,8 @@ _OUTPUT_EXAMPLE = {
 }
 
 # The redacted `?preview=true` response (modules/x402/preview.py): a FIXED,
-# clearly-fake report, never a real scan. Unlike x402_uptime_check's preview
-# (a real reachability check is cheap and safe to run for free) a real scan
-# here means a real outbound fetch of a caller-supplied URL PLUS a full
+# clearly-fake report, never a real scan. A real scan here means a real
+# outbound fetch of a caller-supplied URL PLUS a full
 # sandbox run -- exactly what the paid path already needs its own rate
 # limit and bounded concurrency slot for (see scan_rate_limited and
 # acquire_scan_slot above), so it is not something to also hand out
@@ -201,8 +200,7 @@ def x402_scan_url(request: Request) -> Response:
             output_example=_OUTPUT_EXAMPLE,
             # Without this the package defaults to a query-params discovery
             # extension, which would describe this POST-with-JSON-body route
-            # incorrectly (found during a 2026-09-01 discovery audit -- see
-            # x402_directory's own x402_list for the same documented pitfall).
+            # incorrectly (found during a 2026-09-01 discovery audit).
             body_type="json",
         ),
     }

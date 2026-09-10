@@ -1,13 +1,11 @@
 """A `declare_discovery_extension` wrapper that cannot reproduce the OutputConfig bug.
 
-Both KYC paid routes (see the 2026-08-30 fix) called
+The challenge's own submission-guide docs show
 `declare_discovery_extension(..., output={"example": {...}})` -- a plain
-dict -- because that is exactly what the challenge's own submission-guide
-docs show. The installed x402-avm==2.0.2 package reads `output.example` as
-an attribute, so a bare dict 500s the route before it ever emits a 402.
-x402_directory's route got this right by hand; KYC's two routes did not.
+dict. The installed x402-avm==2.0.2 package reads `output.example` as an
+attribute, so a bare dict 500s the route before it ever emits a 402.
 
-describe_json_endpoint exists so no future module has to remember the
+describe_json_endpoint exists so no module has to remember the
 OutputConfig wrapping by hand at every call site -- it is structurally
 impossible to pass a bare dict here.
 """

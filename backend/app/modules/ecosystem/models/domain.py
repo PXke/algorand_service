@@ -1,8 +1,8 @@
 """Domain types for the Algorand Open Registry (roadmap item 26).
 
-A NEW, separate concern from the paid `x402_directory` (see
-`docs/awesome-algorand-directory-design.md` section 6 for why): free,
-anonymous, human-reviewed ecosystem-project listings, glossary-shaped.
+Free, anonymous, human-reviewed ecosystem-project listings,
+glossary-shaped -- deliberately not a paid x402 product (see
+`docs/awesome-algorand-directory-design.md` section 6 for why).
 """
 
 from __future__ import annotations

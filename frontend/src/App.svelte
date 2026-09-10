@@ -18,9 +18,6 @@
     ecosystem: 'ecosystem',
   }
 
-  type X402Tab = 'directory' | 'board' | 'requests' | 'grades' | 'register'
-  const X402_TABS: readonly X402Tab[] = ['directory', 'board', 'requests', 'grades', 'register']
-
   type View =
     | { name: 'home' }
     | { name: 'news' }
@@ -38,8 +35,6 @@
     | { name: 'about' }
     | { name: 'contact' }
     | { name: 'suggestions' }
-    | { name: 'x402'; tab: X402Tab }
-    | { name: 'x402Endpoints' }
     | { name: 'admin' }
     | { name: 'shared'; token: string }
     | { name: 'notfound' }
@@ -60,8 +55,6 @@
     | 'about'
     | 'contact'
     | 'suggestions'
-    | 'x402'
-    | 'x402Endpoints'
     | 'admin'
     | 'shared'
 
@@ -81,20 +74,15 @@
     about: () => import('./routes/About.svelte'),
     contact: () => import('./routes/Contact.svelte'),
     suggestions: () => import('./routes/Suggestions.svelte'),
-    x402: () => import('./routes/X402.svelte'),
-    x402Endpoints: () => import('./routes/X402Endpoints.svelte'),
     admin: () => import('./routes/admin/AdminHub.svelte'),
     shared: () => import('./routes/SharedArticle.svelte'),
   }
 
   let lazy = $state<Partial<Record<LazyName, Component<any>>>>({})
 
-  // News-build route table. UNCHANGED by the 2026-09-07 marketplace redesign
-  // below: every path here, /x402* included, still resolves exactly as it
-  // did (X402.svelte/X402Endpoints.svelte, the newspaper's own /x402 hub
-  // page) -- config.product === 'news' never touches the Marketplace* view
-  // table further down. This function only runs at all when
-  // config.product !== 'marketplace' (see the `view` derived below).
+  // News-build route table. config.product === 'news' never touches the
+  // marketplace view table further down; this function only runs at all
+  // when config.product !== 'marketplace' (see the `view` derived below).
   function resolveView(path: string): View {
     if (path === '/') return { name: 'home' }
     if (path === '/news') return { name: 'news' }
@@ -118,8 +106,8 @@
     const glossaryTerm = matchPath('/glossary/:slug', path)
     if (glossaryTerm) return { name: 'glossaryTerm', slug: glossaryTerm.slug }
     if (path === '/registry') return { name: 'registry' }
-    // Checked before the generic /registry/:slug match below, same
-    // "special path before the param route" precedent as /x402/endpoints.
+    // Checked before the generic /registry/:slug match below (special path
+    // before the param route).
     if (path === '/registry/submit') return { name: 'registrySubmit' }
     const registryRequest = matchPath('/registry/:slug/request', path)
     if (registryRequest) return { name: 'registryRequest', slug: registryRequest.slug }
@@ -141,17 +129,13 @@
       }
       return { name: 'suggestions' }
     }
-    if (path === '/x402') return { name: 'x402', tab: 'directory' }
-    // Checked before the generic /x402/:tab match below -- "endpoints" is a
-    // separate top-level page (PXke's own products), not one of the
-    // Marketplace page's own tabs.
-    if (path === '/x402/endpoints') return { name: 'x402Endpoints' }
-    const x402 = matchPath('/x402/:tab', path)
-    if (x402) {
-      const tab = X402_TABS.find((t) => t === x402.tab.toLowerCase())
-      if (tab) return { name: 'x402', tab }
-      queueMicrotask(() => navigate('/x402', true))
-      return { name: 'x402', tab: 'directory' }
+    if (path === '/x402' || path.startsWith('/x402/')) {
+      // The x402 storefront lives on its own domain (x402.pxke.me); nginx
+      // 301s these paths there in prod, this keeps a dev server without
+      // nginx landing somewhere real too. A full navigation, not
+      // client-side routing -- separate SPA, separate origin.
+      queueMicrotask(() => window.location.replace(config.marketplaceSiteUrl))
+      return { name: 'home' }
     }
     if (path === '/admin' || path === '/sources') {
       if (path === '/sources') queueMicrotask(() => navigate('/admin', true))
@@ -207,87 +191,59 @@
   })
 
   // ---- Marketplace build route table (x402.pxke.me) ---------------------
-  // A genuinely separate, flat route table -- no /x402 prefix, because the
-  // marketplace domain IS the whole site here, not a section of the
-  // newspaper. Real top-level pages per
-  // docs/x402-marketplace-product-redesign.md §4: Overview / Directory /
-  // Listing detail / Board / Requests / Trust / Services / Developers /
-  // List an endpoint, nav- and catalog-driven (see AppShell.svelte). This
-  // replaces the flat single-page X402.svelte tab bar that used to serve
-  // x402.pxke.me too for a few hours on 2026-09-07 before this shipped --
-  // that page still serves algorand.pxke.me/x402 unchanged, above.
+  // A separate, flat route table -- no /x402 prefix, because the storefront
+  // domain IS the whole site here. One page per product (Scan, Storage,
+  // News), the Overview, and Developers.
   type MarketplaceView =
     | { name: 'mktOverview' }
-    | { name: 'mktDirectory' }
-    | { name: 'mktListing'; url: string }
-    | { name: 'mktRequests' }
+    | { name: 'mktScan' }
+    | { name: 'mktStorage' }
+    | { name: 'mktNews' }
     | { name: 'mktDevelopers' }
-    | { name: 'mktRegister' }
     | { name: 'notfound' }
 
-  type MarketplaceLazyName =
-    | 'mktDirectory'
-    | 'mktListing'
-    | 'mktRequests'
-    | 'mktDevelopers'
-    | 'mktRegister'
+  type MarketplaceLazyName = 'mktScan' | 'mktStorage' | 'mktNews' | 'mktDevelopers'
 
   const marketplaceLoaders: Record<MarketplaceLazyName, () => Promise<{ default: Component<any> }>> = {
-    mktDirectory: () => import('./routes/marketplace/Directory.svelte'),
-    mktListing: () => import('./routes/marketplace/ListingDetail.svelte'),
-    mktRequests: () => import('./routes/marketplace/Requests.svelte'),
+    mktScan: () => import('./routes/marketplace/Scan.svelte'),
+    mktStorage: () => import('./routes/marketplace/Storage.svelte'),
+    mktNews: () => import('./routes/marketplace/News.svelte'),
     mktDevelopers: () => import('./routes/marketplace/Developers.svelte'),
-    mktRegister: () => import('./routes/marketplace/Register.svelte'),
   }
 
   let mktLazy = $state<Partial<Record<MarketplaceLazyName, Component<any>>>>({})
 
-  // Paths tonight's brief live deploy of x402.pxke.me actually served (the
-  // old X402.svelte tab routing, /x402 prefix included, per the algorand.
-  // pxke.me/x402 → x402.pxke.me$request_uri 301 in
-  // deploy/nginx/algorand-platform.conf) -- kept as client-side redirects so
-  // the few hours this was live, and any link already shared from it, don't
-  // dead-end.
-  const MARKETPLACE_LEGACY_REDIRECTS: Record<string, string> = {
-    '/x402': '/directory',
-    '/x402/board': '/board',
-    '/x402/requests': '/requests',
-    '/x402/grades': '/trust',
-    '/x402/endpoints': '/services',
-    '/x402/register': '/list',
-    // 2026-09-07 evening: Board, Trust and Services folded into the one
-    // Endpoints list (PXke's own services are rows there; placements are its
-    // featured strip; probe and grade data live on each listing's page).
-    '/board': '/directory',
-    '/trust': '/directory',
-    '/services': '/directory',
-  }
+  // Paths earlier builds of x402.pxke.me served (the old /x402-prefixed tab
+  // routing, then the 2026-09-07 directory/board/requests/list pages) --
+  // kept as client-side redirects so a link already shared from either
+  // era lands on the overview instead of a dead end.
+  const MARKETPLACE_LEGACY_REDIRECTS = new Set([
+    '/x402',
+    '/directory',
+    '/listing',
+    '/requests',
+    '/list',
+    '/board',
+    '/trust',
+    '/services',
+  ])
 
-  function resolveMarketplaceView(path: string, query: URLSearchParams): MarketplaceView {
-    const legacy = MARKETPLACE_LEGACY_REDIRECTS[path]
-    if (legacy) {
-      queueMicrotask(() => navigate(legacy, true))
+  function resolveMarketplaceView(path: string): MarketplaceView {
+    if (MARKETPLACE_LEGACY_REDIRECTS.has(path) || path.startsWith('/x402/')) {
+      queueMicrotask(() => navigate('/', true))
       return { name: 'mktOverview' }
     }
     if (path === '/') return { name: 'mktOverview' }
-    if (path === '/directory') return { name: 'mktDirectory' }
-    if (path === '/listing') {
-      const url = query.get('url') ?? ''
-      if (!url) {
-        queueMicrotask(() => navigate('/directory', true))
-        return { name: 'mktDirectory' }
-      }
-      return { name: 'mktListing', url }
-    }
-    if (path === '/requests') return { name: 'mktRequests' }
+    if (path === '/scan') return { name: 'mktScan' }
+    if (path === '/storage') return { name: 'mktStorage' }
+    if (path === '/news') return { name: 'mktNews' }
     if (path === '/developers') return { name: 'mktDevelopers' }
-    if (path === '/list') return { name: 'mktRegister' }
     return { name: 'notfound' }
   }
 
   const mktView = $derived.by((): MarketplaceView =>
     config.product === 'marketplace'
-      ? resolveMarketplaceView($route.path, $route.query)
+      ? resolveMarketplaceView($route.path)
       : { name: 'mktOverview' },
   )
 
@@ -315,15 +271,8 @@
     {:else if mktView.name === 'notfound'}
       <NotFound />
     {:else if mktLazy[mktView.name]}
-      {#if mktView.name === 'mktListing'}
-        {#key mktView.url}
-          {@const C = mktLazy.mktListing!}
-          <C url={mktView.url} />
-        {/key}
-      {:else}
-        {@const C = mktLazy[mktView.name]!}
-        <C />
-      {/if}
+      {@const C = mktLazy[mktView.name]!}
+      <C />
     {:else}
       <div class="page"><p class="muted">Loading…</p></div>
     {/if}
@@ -367,12 +316,6 @@
         {@const C = lazy.shared!}
         <C token={view.token} />
       {/key}
-    {:else if view.name === 'x402'}
-      {@const C = lazy.x402!}
-      <C tab={view.tab} />
-    {:else if view.name === 'x402Endpoints'}
-      {@const C = lazy.x402Endpoints!}
-      <C />
     {:else}
       {@const C = lazy[view.name]!}
       <C />

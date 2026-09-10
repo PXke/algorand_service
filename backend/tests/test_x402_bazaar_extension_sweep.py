@@ -1,19 +1,12 @@
 """Every paid route's 402 must carry a Bazaar extension the facilitator accepts.
 
-Found live 2026-09-05 on POST /api/v1/x402/social/agents/{wallet}/follow: the
-route declared a query-params discovery extension for a POST, the resource
-server injected `method: "POST"` into it at request time, and the GoPlausible
-facilitator's own `validate_discovery_extension` then rejected it -- so
-`extract_discovery_info` returned None, the warning was logged on THEIR side,
-and the route was silently never catalogued in the Bazaar. Nothing on our side
-failed: the 402 was well-formed, the payment settled, the leaderboard counted
-it. Only the catalog entry was missing.
-
-tests/test_x402_discovery.py already pins that rule on the primitive, and a few
-module tests spot-check their own route. Neither catches a route that simply
-forgets -- which is exactly how the follow route shipped. This sweep closes the
-class: it drives the real `register_x402_*_routes` registrars, so a newly added
-paid route is covered the day it is registered, with no list to keep in sync.
+A route whose declared discovery extension fails the facilitator's own
+`validate_discovery_extension` (after the resource server injects the HTTP
+method at request time) still settles payments fine -- it is just silently
+never catalogued in the Bazaar. tests/test_x402_discovery.py pins that rule
+on the primitive; this sweep drives the real `register_x402_*_routes`
+registrars, so a newly added paid route is covered the day it is registered,
+with no list to keep in sync.
 
 For every route that answers an unpaid request with a 402 it asserts:
 
@@ -22,7 +15,7 @@ For every route that answers an unpaid request with a 402 it asserts:
    injecting the route's HTTP method exactly the way
    `BazaarResourceServerExtension.enrich_declaration` does at request time;
 2. a route with a path parameter advertises the TEMPLATE
-   (`.../{entry_id}/renew`), not one concrete value -- the facilitator
+   (`.../{backup_id}/renew`), not one concrete value -- the facilitator
    catalogs one entry per distinct advertised URL;
 3. every payment option carries the challenge tag.
 
@@ -35,7 +28,6 @@ import json
 from collections.abc import Callable, Iterator
 from types import SimpleNamespace
 from typing import Never
-from unittest.mock import MagicMock
 
 import pytest
 
@@ -70,11 +62,6 @@ _WALLET = "KSAVOYTVNB7A6NKCM4W2WBOOGFHWH2SEGR5T6OGB7THCAT5E36LDFEBTII"
 # Placeholder values for path parameters, so a route that looks its subject up
 # before charging gets past that check and reaches its offer.
 _PATH_PARAM_VALUES = {
-    "entry_id": "00000000-0000-0000-0000-000000000001",
-    "request_id": "00000000-0000-0000-0000-000000000001",
-    "post_id": "00000000-0000-0000-0000-000000000001",
-    "group_id": "00000000-0000-0000-0000-000000000001",
-    "case_id": "00000000-0000-0000-0000-000000000001",
     "backup_id": "00000000-0000-0000-0000-000000000001",
     "article_id": "00000000-0000-0000-0000-000000000001",
     "wallet": _WALLET,
@@ -88,22 +75,19 @@ _QUERY_BY_PATH = {"/api/v1/x402/storage/backups": {"declared_size_bytes": "1024"
 # sees exactly the routes the app registers.
 _REGISTRARS = [
     ("x402_catalog", "register_x402_catalog_routes"),
-    ("x402_directory", "register_x402_directory_routes"),
-    ("x402_board", "register_x402_board_routes"),
-    ("x402_features", "register_x402_features_routes"),
-    ("x402_grading", "register_x402_grading_routes"),
     ("x402_news", "register_x402_news_routes"),
     ("x402_scan", "register_x402_scan_routes"),
-    ("x402_uptime", "register_x402_uptime_routes"),
-    ("x402_social", "register_x402_social_routes"),
     ("x402_storage", "register_x402_storage_routes"),
 ]
 
 # Guards the sweep against silently degrading to "nothing was checked" -- if a
 # registrar stops registering, or every route starts erroring before its offer,
 # the count drops and this test fails instead of passing vacuously. Raise it
-# when paid routes are added; never lower it to make a red test green.
-_MINIMUM_PAID_ROUTES_COVERED = 24
+# when paid routes are added; never lower it to make a red test green. Set to
+# the paid routes that reach their offer from a bare request today: news
+# search, scan url, storage create (storage renew/add-version need a real
+# backup lookup first).
+_MINIMUM_PAID_ROUTES_COVERED = 3
 
 
 class _StubFacilitator:
@@ -164,14 +148,6 @@ class _RecordingRouter:
         return self._decorator("HEAD", path)
 
 
-def _service(**attrs: object) -> MagicMock:
-    """A store/service double that answers "the subject exists and is usable"."""
-    stub = MagicMock()
-    for name, value in attrs.items():
-        setattr(stub, name, value)
-    return stub
-
-
 def _request(method: str, path: str) -> Request:
     path_params: dict[str, str] = {}
     for segment in path.split("/"):
@@ -204,12 +180,7 @@ def registered_routes(monkeypatch: pytest.MonkeyPatch) -> list[_Route]:
     # Every paid route checks its breaker before its offer; keep it closed
     # without Redis.
     monkeypatch.setattr(circuit_breaker, "is_tripped", lambda _resource: False)
-    for flag in (
-        "x402_social_moderation_enabled",
-        "x402_scan_enabled",
-        "x402_uptime_enabled",
-    ):
-        monkeypatch.setattr(settings, flag, True)
+    monkeypatch.setattr(settings, "x402_scan_enabled", True)
 
     router = _RecordingRouter()
     for package, registrar in _REGISTRARS:
@@ -220,41 +191,6 @@ def registered_routes(monkeypatch: pytest.MonkeyPatch) -> list[_Route]:
                 monkeypatch.setattr(module, name, lambda _request, *_a, **_kw: False)
         getattr(module, registrar)(router)
 
-    social = importlib.import_module("app.modules.x402_social.api.routes")
-    monkeypatch.setattr(
-        social,
-        "post_service",
-        _service(get=lambda _id: SimpleNamespace(deleted=False, hidden_platform=False)),
-    )
-    monkeypatch.setattr(
-        social,
-        "moderation_service",
-        _service(get_case=lambda _id: SimpleNamespace(state=social.CASE_STATE_OPEN)),
-        raising=False,
-    )
-    monkeypatch.setattr(
-        social,
-        "group_service",
-        _service(get=lambda _id: SimpleNamespace(deleted=False)),
-        raising=False,
-    )
-    features = importlib.import_module("app.modules.x402_features.api.routes")
-    monkeypatch.setattr(
-        features,
-        "feature_service",
-        _service(
-            exists=lambda _id: True,
-            get=lambda _id: SimpleNamespace(status="open", claimed_by=None),
-        ),
-        raising=False,
-    )
-    board = importlib.import_module("app.modules.x402_board.api.routes")
-    monkeypatch.setattr(
-        board,
-        "board_service",
-        _service(get=lambda _id: SimpleNamespace(expired=False, payer=_WALLET)),
-        raising=False,
-    )
     return router.routes
 
 
@@ -324,7 +260,7 @@ def test_every_paid_route_declares_an_extension_the_facilitator_accepts(
 def test_a_route_with_a_path_parameter_advertises_its_template(
     registered_routes: list[_Route],
 ) -> None:
-    """The facilitator catalogs one Bazaar entry per distinct advertised URL, so a templated route must advertise `{param}`, never one concrete value -- otherwise every vote, renew or follow creates its own junk entry."""
+    """The facilitator catalogs one Bazaar entry per distinct advertised URL, so a templated route must advertise `{param}`, never one concrete value -- otherwise every renew creates its own junk entry."""
     concrete: list[str] = []
 
     for method, path, offer in _offers(registered_routes):

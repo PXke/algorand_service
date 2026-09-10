@@ -1,28 +1,31 @@
-"""Calling a paid method without a mnemonic (and without an injected http_client)
-must fail clearly and immediately -- not with a confusing low-level error, and
-not after an HTTP round-trip that could never have been paid for.
+"""Calling a paid method without a mnemonic (and without an injected http_client) must fail clearly and immediately.
+
+Not with a confusing low-level error, and not after an HTTP round-trip that
+could never have been paid for.
 """
 
 from __future__ import annotations
 
-import pytest
+from collections.abc import Callable
+from typing import Any
 
+import pytest
 from pxke_x402 import PxkeClient, PxkeConfigError
 
 from .conftest import FakeResponse, FakeSession
 
 _PAID_CALLS = [
-    lambda c: c.ping(),
-    lambda c: c.list_endpoint("https://example.com", "$0.01", "desc"),
-    lambda c: c.place_on_board("https://example.com", "Agent", "pitch"),
-    lambda c: c.submit_grade("https://example.com", 5),
-    lambda c: c.read_score("https://example.com"),
     lambda c: c.search_news("tinyman"),
+    lambda c: c.scan_url("https://example.com/file.zip"),
+    lambda c: c.storage_create_backup(b"hello"),
+    lambda c: c.storage_renew_backup("b1", "WALLETADDR"),
 ]
 
 
 @pytest.mark.parametrize("make_call", _PAID_CALLS)
-def test_every_paid_method_raises_pxke_config_error_without_a_mnemonic(make_call) -> None:
+def test_every_paid_method_raises_pxke_config_error_without_a_mnemonic(
+    make_call: Callable[[PxkeClient], Any],
+) -> None:
     session = FakeSession([])  # no responses scripted: a real request would blow up loudly
     client = PxkeClient(session=session)  # no mnemonic, no http_client
 
@@ -37,7 +40,7 @@ def test_the_error_message_names_the_free_methods_still_available() -> None:
     client = PxkeClient()
 
     with pytest.raises(PxkeConfigError) as excinfo:
-        client.ping()
+        client.scan_url("https://example.com/file.zip")
 
     assert "catalog()" in str(excinfo.value)
 

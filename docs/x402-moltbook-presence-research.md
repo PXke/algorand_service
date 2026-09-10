@@ -1,5 +1,7 @@
 # Moltbook / Clawstr presence research (x402 marketplace publicity)
 
+> **Note (2026-09-10):** the endpoint directory, probe history and grading products this research refers to were removed on 2026-09-10 — see [ADR-0006](adr/ADR-0006-x402-consolidation.md). The publicity/trust findings stand; the product references are historical.
+
 Date: 2026-09-04. Scope: research only — nothing was posted, drafted, or sent.
 Sources: direct inspection of Relay's state on `root@92.222.76.121` (OpenClaw
 session store, workspace memory, feedback log, verified post log), read-only

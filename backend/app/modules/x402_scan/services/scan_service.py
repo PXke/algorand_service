@@ -6,10 +6,7 @@ second unvalidated lookup at connect time) rather than re-deriving that
 logic — CLAUDE.md forbids a new copy of existing logic. It does NOT reuse
 `media.api.routes._stream_fetch` itself: that helper is media-proxy-specific
 (hard-gates on `content-type: image/*`, which is the wrong gate for an
-arbitrary file/tarball scan target). `resolve_public_ip` originated in
-`media.api.routes` as a private helper; it has since been promoted to the
-shared `app.core.ssrf_guard` module now that a third real consumer
-(x402_uptime, after this one) exists.
+arbitrary file/tarball scan target).
 
 The file never touches the shared prod filesystem outside its own
 tempdir-per-request, and that tempdir is always removed (`finally`), pass or

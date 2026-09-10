@@ -36,7 +36,6 @@ import importlib
 from collections.abc import Callable
 from types import SimpleNamespace
 from typing import Never
-from unittest.mock import MagicMock
 
 import pytest
 
@@ -63,125 +62,27 @@ _Handler = Callable[..., object]
 ALIAS_PAIRS: tuple[tuple[str, str, str], ...] = (
     # meta
     ("GET", "/api/v1/x402/settlements/recent", "/api/v1/x402/settlements"),
-    # discover / directory
-    ("POST", "/api/v1/x402/list", "/api/v1/x402/directory/listings"),
-    ("GET", "/api/v1/x402/search", "/api/v1/x402/directory/listings"),
-    ("GET", "/api/v1/x402/listings", "/api/v1/x402/directory/listings/lookup"),
-    ("POST", "/api/v1/x402/list/renew", "/api/v1/x402/directory/listings/boost"),
-    ("GET", "/api/v1/x402/directory/probe", "/api/v1/x402/uptime/probes/latest"),
-    ("GET", "/api/v1/x402/directory/probe/history", "/api/v1/x402/uptime/probes"),
-    (
-        "GET",
-        "/api/v1/x402/directory/probe/leaderboard",
-        "/api/v1/x402/trust/leaderboards/reliability",
-    ),
-    # discover / board
-    ("POST", "/api/v1/x402/board", "/api/v1/x402/board/placements"),
-    ("GET", "/api/v1/x402/board", "/api/v1/x402/board/placements"),
-    ("POST", "/api/v1/x402/board/:entry_id/renew", "/api/v1/x402/board/placements/:entry_id/boost"),
-    ("GET", "/api/v1/x402/board/:entry_id/go", "/api/v1/x402/board/placements/:entry_id/go"),
-    (
-        "GET",
-        "/api/v1/x402/board/:entry_id/clicks",
-        "/api/v1/x402/board/placements/:entry_id/clicks",
-    ),
-    # discover / requests (features -> requests)
-    ("POST", "/api/v1/x402/features", "/api/v1/x402/requests"),
-    ("GET", "/api/v1/x402/features", "/api/v1/x402/requests"),
-    ("GET", "/api/v1/x402/features/demand", "/api/v1/x402/requests/ranked"),
-    (
-        "POST",
-        "/api/v1/x402/features/:request_id/vote",
-        "/api/v1/x402/requests/:request_id/votes",
-    ),
-    (
-        "POST",
-        "/api/v1/x402/features/:request_id/claim",
-        "/api/v1/x402/requests/:request_id/claims",
-    ),
-    (
-        "POST",
-        "/api/v1/x402/features/:request_id/complete",
-        "/api/v1/x402/requests/:request_id/completions",
-    ),
-    # trust / grades
-    ("GET", "/api/v1/x402/grades/summary", "/api/v1/x402/grades/lookup"),
-    ("GET", "/api/v1/x402/grades/top", "/api/v1/x402/trust/leaderboards/graded"),
-    # trust / uptime
-    ("POST", "/api/v1/x402/uptime/check", "/api/v1/x402/uptime/checks"),
-    ("GET", "/api/v1/x402/uptime/history", "/api/v1/x402/uptime/checks"),
-    # trust / leaderboards (social half)
-    ("GET", "/api/v1/x402/social/agents/leaderboard", "/api/v1/x402/trust/leaderboards/spend"),
-    # network / social
-    ("POST", "/api/v1/x402/social/register", "/api/v1/x402/social/agents"),
-    ("PATCH", "/api/v1/x402/social/profile", "/api/v1/x402/social/agents/me"),
-    (
-        "DELETE",
-        "/api/v1/x402/social/groups/:group_id/membership",
-        "/api/v1/x402/social/groups/:group_id/members/me",
-    ),
-    (
-        "POST",
-        "/api/v1/x402/social/groups/:group_id/join",
-        "/api/v1/x402/social/groups/:group_id/members",
-    ),
-    # identity primitive (storage half)
+    # identity primitive (storage)
     ("POST", "/api/v1/x402/storage/auth/challenge", "/api/v1/x402/storage/auth/nonce"),
 )
 
 # Free, side-effect-free GET pairs whose response never depends on which of
 # the two paths was used to call it -- safe to assert full response equality
-# rather than only "same handler, same status". Kept intentionally smaller
-# than ALIAS_PAIRS: mutating routes (board's click-through, POST writes) or
-# routes whose free/paid status genuinely depends on the specific
-# path/target (grades/top's pre-gate 404) are covered by the paid/mutating
-# test below instead, since a second identical call is not guaranteed
-# side-effect-free for them.
+# rather than only "same handler, same status". Mutating routes (storage's
+# nonce mint) are covered by the paid/mutating test below instead, since a
+# second identical call is not guaranteed side-effect-free for them.
 _FREE_DEEP_EQUALITY_PAIRS: tuple[tuple[str, str, str], ...] = (
     ("GET", "/api/v1/x402/settlements/recent", "/api/v1/x402/settlements"),
-    ("GET", "/api/v1/x402/search", "/api/v1/x402/directory/listings"),
-    ("GET", "/api/v1/x402/listings", "/api/v1/x402/directory/listings/lookup"),
-    ("GET", "/api/v1/x402/directory/probe", "/api/v1/x402/uptime/probes/latest"),
-    ("GET", "/api/v1/x402/directory/probe/history", "/api/v1/x402/uptime/probes"),
-    ("GET", "/api/v1/x402/board", "/api/v1/x402/board/placements"),
-    ("GET", "/api/v1/x402/features", "/api/v1/x402/requests"),
-    ("GET", "/api/v1/x402/grades/summary", "/api/v1/x402/grades/lookup"),
 )
 
 _WALLET = "KSAVOYTVNB7A6NKCM4W2WBOOGFHWH2SEGR5T6OGB7THCAT5E36LDFEBTII"
-_EXAMPLE_URL = "https://api.example.com/v1/quote"
-
 _PATH_PARAM_VALUES = {
-    "entry_id": "00000000-0000-0000-0000-000000000001",
-    "request_id": "00000000-0000-0000-0000-000000000001",
-    "group_id": "00000000-0000-0000-0000-000000000001",
     "backup_id": "00000000-0000-0000-0000-000000000001",
     "wallet": _WALLET,
 }
 
-# A few routes require a non-empty query to reach anything meaningful
-# (a lookup-by-url, or storage's size-priced create).
-_QUERY_BY_PATH: dict[str, dict[str, str]] = {
-    "/api/v1/x402/listings": {"url": _EXAMPLE_URL},
-    "/api/v1/x402/directory/listings/lookup": {"url": _EXAMPLE_URL},
-    "/api/v1/x402/directory/probe": {"url": _EXAMPLE_URL},
-    "/api/v1/x402/uptime/probes/latest": {"url": _EXAMPLE_URL},
-    "/api/v1/x402/directory/probe/history": {"url": _EXAMPLE_URL},
-    "/api/v1/x402/uptime/probes": {"url": _EXAMPLE_URL},
-    "/api/v1/x402/grades/summary": {"url": _EXAMPLE_URL},
-    "/api/v1/x402/grades/lookup": {"url": _EXAMPLE_URL},
-    "/api/v1/x402/grades/top": {"tag": "pricing"},
-    "/api/v1/x402/trust/leaderboards/graded": {"tag": "pricing"},
-}
-
 _REGISTRARS = [
     ("x402_catalog", "register_x402_catalog_routes"),
-    ("x402_directory", "register_x402_directory_routes"),
-    ("x402_board", "register_x402_board_routes"),
-    ("x402_features", "register_x402_features_routes"),
-    ("x402_grading", "register_x402_grading_routes"),
-    ("x402_uptime", "register_x402_uptime_routes"),
-    ("x402_social", "register_x402_social_routes"),
     ("x402_storage", "register_x402_storage_routes"),
 ]
 
@@ -240,13 +141,6 @@ class _RecordingRouter:
         return self._decorator("HEAD", path)
 
 
-def _service(**attrs: object) -> MagicMock:
-    stub = MagicMock()
-    for name, value in attrs.items():
-        setattr(stub, name, value)
-    return stub
-
-
 def _request(method: str, path: str) -> Request:
     """A header-less (unpaid), rate-limit-bypassed request for `path`, path params filled in."""
     path_params: dict[str, str] = {}
@@ -259,7 +153,7 @@ def _request(method: str, path: str) -> Request:
     return Request(
         method=method,
         headers={},
-        query_params=QueryParams(_QUERY_BY_PATH.get(path, {})),
+        query_params=QueryParams({}),
         path_params=path_params,
         body=b"",
         url=SimpleNamespace(scheme="https", host="localhost", path=resolved),
@@ -279,8 +173,6 @@ def routes_by_key(monkeypatch: pytest.MonkeyPatch) -> dict[tuple[str, str], _Han
     monkeypatch.setattr(settings, "x402_pay_to_address", _WALLET)
     monkeypatch.setattr(x402_guard, "get_resource_server", _stub_resource_server)
     monkeypatch.setattr(circuit_breaker, "is_tripped", lambda _resource: False)
-    for flag in ("x402_social_moderation_enabled", "x402_uptime_enabled"):
-        monkeypatch.setattr(settings, flag, True)
 
     router = _RecordingRouter()
     for package, registrar in _REGISTRARS:
@@ -290,35 +182,6 @@ def routes_by_key(monkeypatch: pytest.MonkeyPatch) -> dict[tuple[str, str], _Han
                 monkeypatch.setattr(module, name, lambda _request, *_a, **_kw: False)
         getattr(module, registrar)(router)
 
-    social = importlib.import_module("app.modules.x402_social.api.routes")
-    monkeypatch.setattr(
-        social,
-        "post_service",
-        _service(get=lambda _id: SimpleNamespace(deleted=False, hidden_platform=False)),
-    )
-    monkeypatch.setattr(
-        social,
-        "group_service",
-        _service(get=lambda _id: SimpleNamespace(deleted=False)),
-        raising=False,
-    )
-    features = importlib.import_module("app.modules.x402_features.api.routes")
-    monkeypatch.setattr(
-        features,
-        "feature_service",
-        _service(
-            exists=lambda _id: True,
-            get=lambda _id: SimpleNamespace(status="open", claimed_by=None),
-        ),
-        raising=False,
-    )
-    board = importlib.import_module("app.modules.x402_board.api.routes")
-    monkeypatch.setattr(
-        board,
-        "board_service",
-        _service(get=lambda _id: SimpleNamespace(expired=False, payer=_WALLET)),
-        raising=False,
-    )
     return router.by_key
 
 
@@ -402,9 +265,9 @@ def test_paid_or_mutating_alias_pairs_advertise_the_same_price_and_resource(
             continue
 
         if old_status != 402:
-            # Free-but-mutating (features submit/vote/etc. reached a non-402
-            # outcome, e.g. a 400/404 from this test's minimal fixtures) --
-            # same status on both sides is everything this generic check can
+            # Free-but-mutating (storage's nonce mint reached a non-402
+            # outcome, e.g. a 400 from this test's minimal fixtures) -- same
+            # status on both sides is everything this generic check can
             # safely assert without seeding real domain state.
             continue
 
@@ -433,15 +296,9 @@ def test_paid_or_mutating_alias_pairs_advertise_the_same_price_and_resource(
             # to require_payment() so the Bazaar catalogs one TEMPLATE entry
             # rather than one per parameter value (see
             # test_x402_bazaar_extension_sweep.py's own test on this). That
-            # resource_path is a hardcoded string still naming the OLD path
-            # -- untouched by this pass, which deliberately does not touch
-            # payment-gate call sites (CLAUDE.md section 9 / the task's own
-            # scope limit). So for these routes specifically, old and new
-            # calls advertise the SAME (old) URL -- not a divergence, and not
-            # something this pass changes; see this file's own "Observed,
-            # not fixed" note and docs/x402-marketplace-ux-audit.md section
-            # 3.5's "Only resource_path ... should emit the new canonical
-            # path" follow-up.
+            # resource_path is a hardcoded string naming the OLD path, so
+            # for these routes specifically, old and new calls advertise the
+            # SAME (old) URL -- not a divergence.
             if old_url != new_url:
                 failures.append(
                     f"{method} {old_path} vs {new_path}: hardcoded resource_path "
@@ -480,7 +337,7 @@ def _offer_facts(offer: PaymentRequired) -> tuple[object, ...]:
 
     require_payment() (app/modules/x402/guard.py) builds resource.url from
     the REQUEST's own path (`_resource_url`); the short stable ledger id
-    (e.g. "x402-directory-list") is never echoed into the response at all,
+    (e.g. "x402-storage-backup-create") is never echoed into the response at all,
     only resource.description (static text, independent of path) and the
     priced `accepts` list -- both must be identical between an old path and
     its new alias, since both are produced by the identical handler call.

@@ -2,9 +2,8 @@
 
 This is the "first five minutes" walkthrough: discover what's for sale, try
 it for free, make one real paid call, know what happens if it goes wrong,
-list your own endpoint, and check an endpoint before you trust it. Every
-example below is a real request shape against the current code, not a
-paraphrase.
+then use each of the three products once. Every example below is a real
+request shape against the current code, not a paraphrase.
 
 **This is not a tutorial on how x402 payments work.** For "how do I build
 and sign an Algorand x402 payment in Python," use
@@ -19,37 +18,40 @@ narrative walk-through, that one is what you keep open while integrating.
 For the facilitator/CAIP-2/challenge-tag mechanics specific to this build,
 see [`x402-facilitator.md`](x402-facilitator.md).
 
-Base URL: `https://algorand-api.pxke.me`. Human-readable mirror of the same
-catalog: `https://algorand.pxke.me/x402` (free to browse, no wallet needed).
+Base URL: `https://algorand-api.pxke.me`. Human-readable storefront for the
+same three products: `https://x402.pxke.me` (free to browse, no wallet
+needed; `/developers` there mirrors this page).
 
 ## 0. What's for sale right now
 
-Snapshot of the live catalog on 2026-09-05 — 10 products, 73 routes, all on
-Algorand **mainnet**, all paying to one receive-only address, all accepting
-USDC (preferred), EURQ and USDQ. The catalog (§1) is the source of truth;
-this table exists so you can see the shape of the whole marketplace in one
-screen before fetching anything. "Free" routes are rate-limited per wallet
-and per IP; "paid" routes answer `402` until paid.
+Snapshot of the live catalog on 2026-09-10 — 3 products plus the catalog
+itself, 19 routes, all on Algorand **mainnet**, all paying to one
+receive-only address, all accepting USDC (preferred), EURQ and USDQ. The
+catalog (§1) is the source of truth; this table exists so you can see the
+shape of the whole marketplace in one screen before fetching anything.
+"Free" routes are rate-limited per IP (and per wallet where a wallet is
+proven); "paid" routes answer `402` until paid.
 
 | Product (`product` key) | Routes | Paid from | What it is |
 |---|---|---|---|
-| Catalog (`catalog`) | 3 | $0.001 | This document, a free proof-of-volume settlement feed, and `ping` — the cheapest paid route, built for testing your x402 client end-to-end |
-| Endpoint directory (`directory`) | 7 | $0.02 | List an x402 endpoint ($0.02) — stays listed indefinitely while it keeps passing health probes, no renewal needed; pay to boost it to the top of search for 7 days ($0.05); free tag/category search and listing detail, free probe + probe history, paid measured-reliability leaderboard |
-| Visibility board (`board`) | 5 | $0.05 | A paid link + pitch (+ optional category) on the public board for 14 days (fixed term, not probed); pay to boost it to the top of the board for 3 days ($0.05); free feed with `?category=` filter, free click-through, paid owner-only click analytics ($0.01) |
-| Feature-request board (`features`) | 6 | $0.02 | File a request (free, anonymous), browse with status (free), vote/claim/mark-complete ($0.02 each, completion never verified), read ranked paid demand ($0.05) |
-| Endpoint grading (`grading`) | 5 | $0.02 | Grade any x402 endpoint you verifiably paid ($0.02, `tx_id` required), free grade index/summary, paid weighted score and per-tag top list ($0.03) |
+| Catalog (`catalog`) | 2 (+ `/.well-known/x402`, `/openapi.json`) | free | This document, and a free proof-of-volume settlement feed |
 | News Engine (`news`) | 4 | $0.001 | Free headlines, free tag taxonomy and free full article reads (`?lang=` serves the stored translations) from the PXke Algorand newspaper; paid ranked full-text search (previewable) |
-| Sandboxed file/tarball scan (`scan`) | 1 | $0.01 | Static malware/archive scan of a file fetched from a URL you'd rather not open yourself |
-| Uptime / reachability check (`uptime`) | 1 | $0.001 | One reachability check of a caller-supplied URL from our servers: status, latency, TLS |
-| Agent social network (`social`) | 37 | $0.002 | Wallet-identity profiles ($0.10 to register), posts, comments, reactions, follows, groups, trending, and paid-stake moderation cases; most reads are free |
-| Agent backup storage (`storage`) | 9 | $0.001 | Store an opaque backup blob (versioned — add new versions under the same id, list/fetch any specific one) for a caller-chosen retention (1-90 days), billed by the KB at $0.002/MB per 90 days with a $0.001 floor, wallet-signature-authenticated list/get/delete for free, paid store/renew/add-version |
+| Sandboxed file/tarball scan (`scan`) | 1 | $0.01 | Static malware/archive scan of a file fetched from a URL you'd rather not open yourself, in a container that never executes it (previewable) |
+| Agent backup storage (`storage`) | 9 | $0.001 floor | Store an opaque backup blob (versioned — add new versions under the same id, fetch any specific one) for a caller-chosen retention (1-90 days), billed by the KB at $0.002/MB per 90 days; wallet-signature-authenticated list/get/delete for free, paid store/renew/add-version |
 
-Every route in every product carries a plain-English `description` in the
-catalog, and most also carry an `input_example`, so the per-route reference
-for the newer products (`scan`, `uptime`, `social`, `storage`) is the catalog
-entry itself plus `GET /openapi.json` — read those rather than guessing at a
-body shape. Know Your Agent (`kyc/*`) is code-complete but switched off in
-production, so it does not appear in the catalog and will `404`.
+Every route carries a plain-English `description` in the catalog, and every
+paid route also carries an `input_example`, so the catalog entry itself plus
+`GET /openapi.json` is a complete per-route reference — read those rather
+than guessing at a body shape.
+
+If you integrated before 2026-09-10: the endpoint directory
+(`/x402/list`, `/x402/search`, `/x402/listings`, `/x402/directory/*`), the
+visibility board (`/x402/board`), the feature-request board
+(`/x402/features`), grading (`/x402/grades`), the uptime check, the agent
+social network (`/x402/social`), fulfillment receipts, KYA (`/kyc/*`) and
+the `/x402/ping` route were all removed
+([ADR-0006](adr/ADR-0006-x402-consolidation.md)) and now `404`. Nothing
+about payment mechanics changed.
 
 ## 1. Discovery: find what's for sale without knowing anything in advance
 
@@ -77,12 +79,14 @@ knowledge:
   "pay_to": "<receive-only Algorand address>",
   "facilitator_url": "https://facilitator.goplausible.xyz/",
   "assets": [{"symbol": "USDC", "asa_id": 31566704, "decimals": 6}, "..."],
+  "sections": [{"key": "meta", "title": "Start here"}, {"key": "services", "title": "Services"}],
+  "products": [{"key": "news", "section": "services", "entry": "GET /api/v1/x402/news", "status": "live", "..."}],
   "routes": [
     {
       "product": "news", "method": "GET", "path": "/api/v1/x402/news/search",
       "paid": true, "price_usd": "$0.001", "resource": "x402-news-search",
       "supports_preview": true, "supports_promo": true,
-      "input_example": {"q": "..."}
+      "input_example": {"q": "tinyman volume", "limit": 10}
     },
     "..."
   ]
@@ -105,23 +109,35 @@ either works on a given path.
 
 `?preview=true` (also `1`/`yes`) skips payment entirely and returns a
 **redacted** version of the real response shape — same keys, sentinel
-values (`"<preview>"`, or a negative count/total that a real response could
-never legitimately carry). Nothing is settled, no facilitator call happens,
-but it's still a real served request so it's rate-limited per IP. This is
-wired on the paid *reads*: `GET /api/v1/x402/ping`, `GET
-/api/v1/x402/grades/score`, `GET /api/v1/x402/grades/top`, `GET
-/api/v1/x402/features/demand` and `GET /api/v1/x402/news/search` — not on
-write/action routes, since there's nothing to preview on a route whose
-entire point is performing the paid action.
+values (`"<preview>"`, `null` where a real verdict would be, or a negative
+score that a real response could never legitimately carry). Nothing is
+settled, no facilitator call happens, and the real work is never run (the
+search engine is never queried, no file is ever fetched), but it's still a
+real served request so it's rate-limited per IP. This is wired on the two
+paid *reads* — `GET /api/v1/x402/news/search` and `POST /api/v1/x402/scan/url`
+— not on the storage write routes, since there's nothing to preview on a
+route whose entire point is performing the paid action.
 
 ```bash
-curl "https://algorand-api.pxke.me/api/v1/x402/ping?preview=true"
-# {"pong": true, "settlement_tx_id": "<preview>", "served_at_epoch": 0}
+curl "https://algorand-api.pxke.me/api/v1/x402/news/search?q=algorand&preview=true"
+# {"query": "algorand", "engine": "<preview>",
+#  "items": [{"article_id": "<preview>", "slug": "<preview>", "title": "<preview>",
+#             "summary": "<preview>", "snippet": "<preview>", "score": -1.0,
+#             "published_at_epoch": 0, "url": "<preview>"}],
+#  "settlement_tx_id": "<preview>"}
+
+curl -X POST "https://algorand-api.pxke.me/api/v1/x402/scan/url?preview=true" \
+  -H "Content-Type: application/json" -d '{"url": "https://example.com/file.zip"}'
+# {"source_url": "<preview>", "status": "preview",
+#  "one_line_summary": "Preview only -- no file was fetched or scanned. Pay to run a real scan.",
+#  "clamav": {"engine": "<preview>", "clean": null, ...},
+#  "risk": {"score": -1.0, "verdict": "<preview>", "malicious": null, "caution_notes": []},
+#  "settlement_tx_id": "<preview>", ...}
 ```
 
-Compare that to a real paid `ping` (`settlement_tx_id` is a real on-chain
-tx id, `served_at_epoch` a real timestamp) and you can see exactly what
-preview does and doesn't give you: the shape, never the substance.
+Compare that to a real paid call (`settlement_tx_id` is a real on-chain tx
+id, `score`/`malicious` are real) and you can see exactly what preview does
+and doesn't give you: the shape, never the substance.
 
 ### Promo codes — admin-issued, not self-service
 
@@ -132,8 +148,8 @@ the operator's admin UI, typically handed to a specific agent or tester for
 a specific route. If you've been given one:
 
 ```bash
-curl "https://algorand-api.pxke.me/api/v1/x402/ping?promo=YOUR-CODE&promo_wallet=YOURWALLETADDRESSHERE"
-# {"pong": true, "settlement_tx_id": "", "served_at_epoch": 1798765432, "via": "promo"}
+curl "https://algorand-api.pxke.me/api/v1/x402/news/search?q=algorand&promo=YOUR-CODE&promo_wallet=YOURWALLETADDRESSHERE"
+# {"query": "algorand", "engine": "typesense", "items": [...], "settlement_tx_id": "", "via": "promo"}
 ```
 
 A successful redemption gets you the **real, non-redacted** response (a
@@ -142,28 +158,20 @@ an empty `settlement_tx_id` since nothing settled. Any failure — unknown
 code, wrong resource, expired, exhausted, already used by your wallet, a
 malformed wallet address, or a storage blip — is silent: the request just
 falls through to the normal payment gate, so you'll see a `402`, not a promo
-error. `supports_promo` is set on nearly every paid route (see the catalog);
-the one deliberate exception is `GET /api/v1/kyc/verify`, which pays out to
-the *looked-up* wallet on a hit and is intentionally left unwired rather
-than assumed safe.
+error. `supports_promo` is set on the two paid reads and not on the storage
+writes.
 
 If you don't have a code, preview is your free-testing path for the routes
-that support it; for a write route (listing, voting, grading) with no
-preview support, the only way to see the real shape without paying is the
-`input_example`/`output_example` already in the catalog and in
+that support it; for a storage write with no preview support, the way to
+see the real shape without paying is the `input_example`/`output_example`
+already in the catalog and in
 [`x402-marketplace-api.md`](x402-marketplace-api.md).
 
 ## 3. Making a real paid call
 
-If all you want is to prove your client can build, sign and settle a real
-payment here, use `GET /api/v1/x402/ping` ($0.001, supports `?preview=true`
-and promo codes): it returns a receipt and nothing else, so a mistake costs
-a tenth of a cent and no product state changes. The walkthrough below uses a
-real product at the same price instead, so you also see what a paid response
-body looks like.
-
-Full round trip against `GET /api/v1/x402/news/search` ($0.001 — tied for
-the cheapest paid route, good for a first live test):
+Full round trip against `GET /api/v1/x402/news/search` ($0.001 — the
+cheapest paid route, good for a first live test: a mistake costs a tenth
+of a cent and no product state changes):
 
 **Step 1 — call with no payment.** You get `402 Payment Required` with an
 empty JSON body; the actual offer is in the `PAYMENT-REQUIRED` response
@@ -213,7 +221,8 @@ wrapper, see
 [`x402-facilitator.md`](x402-facilitator.md#the-packages-own-clientavmsigner-docstring-example-is-wrong-in-three-places)
 first — the package's own docstring example for `ClientAvmSigner` doesn't
 work as written against the installed `x402-avm==2.0.2`, and that page has
-a working implementation.
+a working implementation. The Python SDK in this repo (`x402-client/`,
+`pxke_x402`) does all of this for you: `client.news_search("algorand")`.
 
 **Step 3 — retry with the payment attached** in the `PAYMENT-SIGNATURE`
 request header:
@@ -231,7 +240,9 @@ Content-Type: application/json
 {
   "query": "algorand",
   "engine": "typesense",
-  "items": [{"article_id": "...", "title": "...", "score": 1.23, "url": "..."}],
+  "items": [{"article_id": "...", "slug": "...", "title": "...", "summary": "...",
+             "snippet": "... <mark>Algorand</mark> ...", "score": 1.23,
+             "published_at_epoch": 1756377600, "url": "https://algorand.pxke.me/news/articles/..."}],
   "settlement_tx_id": "ABCDEF...52-CHAR-TXID"
 }
 ```
@@ -252,22 +263,24 @@ unfamiliar service: *what if I pay and get nothing?*
 The marketplace makes a real, code-backed guarantee here, but it's narrower
 than "any complaint gets your money back" — read the distinction carefully:
 
-- **You don't like the response, the data was wrong, the search came back
-  empty, you changed your mind** — none of this is refunded. Payment
+- **You don't like the response, the search came back empty, the scan found
+  nothing, you changed your mind** — none of this is refunded. Payment
   settles on-chain before any product work runs; there is no escrow and no
   dispute process. This is the same as paying any other x402 resource.
-- **A wallet ownership conflict** (you tried to relist a URL someone else
-  currently holds, or renew a listing/placement you don't own) — the
-  payment is **taken and kept**, the write is refused with a `4xx`, and you
-  still get a settlement receipt. This is documented per-route (each such
-  route's 402 offer description says so) precisely because it's the
-  caller's own action, not a platform failure — refunding it would make
-  probing other people's listings free and repeatable.
-- **The product write itself fails after your payment settled** — a bug or
-  outage on the marketplace's side, not anything about your request — is
-  where the real guarantee kicks in. `run_with_refund` (in
+- **Your own input was the problem after payment** — the URL you asked us
+  to scan refused the connection, timed out or was over the size cap (`422
+  fetch_failed`); you tried to renew or add a version to a backup another
+  wallet created (`403 backup_owned_by_another_payer`) — the payment is
+  **taken and kept**, the write is refused, and you still get a settlement
+  receipt. Each such route's 402 offer description says so, precisely
+  because it's the caller's own action, not a platform failure: refunding a
+  fetch failure would make refunds free to trigger on demand.
+- **The product write itself fails after your payment settled** — the
+  search engine is down, the scan sandbox crashes, the storage connector
+  fails: a bug or outage on the marketplace's side, not anything about your
+  request — is where the real guarantee kicks in. `run_with_refund` (in
   `backend/app/modules/x402/paid_request.py`) wraps every product write on
-  this class of route: on an unexpected failure it automatically sends the
+  every paid route: on an unexpected failure it automatically sends the
   **full settled amount back** from a dedicated refund wallet, records the
   refund on the settlement ledger, and returns a `503` — not manual, not a
   promise you have to chase:
@@ -283,172 +296,112 @@ than "any complaint gets your money back" — read the distinction carefully:
 
 There is no escrow anywhere in this design: every payment settles on-chain
 first, and a refund (when one happens) is a same-marketplace remediation
-step afterward, never a smart-contract guarantee. If you want a stronger
-guarantee than "the marketplace's own operator refunds its own bugs," that's
-what the self-declared `reimburses` flag on third-party directory listings
-is about — see §5, and note it's unverified.
+step afterward, never a smart-contract guarantee.
 
-## 5. Listing your own endpoint
+## 5. Scanning a file you'd rather not open yourself
 
-If you run an x402 endpoint (on or off this marketplace's infrastructure —
-any http(s) URL qualifies), you can list it in the public directory so
-other agents discover it through `GET /api/v1/x402/search` and
-`GET /api/v1/x402/listings?url=`.
+`POST /api/v1/x402/scan/url` ($0.01) fetches a URL server-side and runs it
+through a network-isolated container that never executes it: ClamAV, file
+type, entropy, embedded URLs/IPs, YARA, fuzzy hash, and a bomb-safe member
+listing for zip/tar archives. Same 402/retry dance as §3, with a JSON body:
 
 ```bash
-curl -si -X POST "https://algorand-api.pxke.me/api/v1/x402/list" \
-  -H "PAYMENT-SIGNATURE: <signed payment for $0.02>" \
+curl -si -X POST "https://algorand-api.pxke.me/api/v1/x402/scan/url" \
+  -H "PAYMENT-SIGNATURE: <signed payment for $0.01>" \
   -H "Content-Type: application/json" \
-  -d '{
-    "url": "https://api.example.com/v1/quote",
-    "price": "$0.01",
-    "description": "Live FX quote, one currency pair per call.",
-    "assets": ["USDC"],
-    "tags": ["fx", "market-data"],
-    "category": "finance",
-    "reimburses": false,
-    "contact": "support@example.com"
-  }'
+  -d '{"url": "https://example.com/suspicious-download.zip"}'
 ```
 
-Same call-with-no-payment-first / `402` / retry-with-`PAYMENT-SIGNATURE`
-dance as §3 — this is just another paid route, price `$0.02`
-(`x402_listing_price` in `backend/app/core/config.py`). Fields:
+```json
+{
+  "source_url": "https://example.com/suspicious-download.zip",
+  "download_bytes": 18422, "status": "ok",
+  "one_line_summary": "No concerns found -- no indicators -- file type: Zip archive data",
+  "target": {"type": "Zip archive data", "entropy_bits_per_byte": 7.91, "indicators": {"urls": [], "ipv4_addresses": []}, "...": "..."},
+  "clamav": {"engine": "clamdscan", "clean": true, "infected_files": []},
+  "archive": {"archive_kind": "zip", "member_count": 3, "members": [], "...": "..."},
+  "risk": {"score": 0.0, "verdict": "no concerns found", "malicious": false, "caution_notes": []},
+  "settlement_tx_id": "..."
+}
+```
 
-| Field | Notes |
-|---|---|
-| `url` | 8–2048 chars, http(s), the endpoint being listed |
-| `price` | 1–64 chars, free text — your endpoint's own price, not validated against it |
-| `description` | ≤2000 chars |
-| `assets` | ≤16 strings, your endpoint's accepted assets |
-| `tags` | ≤16 strings, ≤64 chars each, stored trimmed+lowercased; what `?tag=` search matches. Tags starting with `category:` are reserved and rejected |
-| `category` | one of `data, ai, finance, identity, storage, compute, social, tooling, other` (default `other`) |
-| `schema` | optional object, ≤4 KiB serialized |
-| `reimburses` | optional bool, default `false` |
-| `contact` | optional string, ≤256 chars |
+Act on `risk.malicious`; read `caution_notes` for why. Limits: 1 GiB
+download, 60 s fetch, 90 s sandbox, 30 calls/hour per IP (paid or not),
+and a small concurrency cap — if capacity is full you get `503
+scan_unavailable` *before* paying, never a charge. A URL we cannot fetch
+(refused, timed out, non-200, private/loopback address) is `422
+fetch_failed` with the payment kept (§4). Static analysis only: "no
+concerns found" means no known indicator, not "safe to run".
 
-**`reimburses` and `contact` are your own self-declared, unverified
-claims.** Setting `reimburses: true` tells other agents "I refund a payer
-when my endpoint fails to deliver" — the marketplace does **not** audit or
-enforce this for a third-party listing; it's exactly as trustworthy as the
-lister is. Don't read a `true` here as a platform guarantee — it's the same
-kind of unverified self-report a storefront's own "satisfaction guaranteed"
-badge is, not the marketplace's own `run_with_refund` mechanism from §4
-(which only ever covers the marketplace's *own* routes).
+## 6. Backing up your own state
 
-A listing stays live **for as long as it keeps passing health probes**
-(roughly every 30 minutes) — there is no renewal payment required to
-survive; only 30 days of total unresponsiveness delists it (owner decision
-2026-09-06, against a competitive study showing no comparable x402
-directory charges a recurring fee just to stay listed). Relisting a URL you
-already own (or one that has gone dark for that long) starts fresh;
-relisting a URL someone else currently holds is refused (payment kept, per
-§4's ownership-conflict case).
+Agent backup storage is the one product with a free *authenticated*
+surface, and it has no sessions: every free call proves wallet control
+fresh.
 
-`POST /list/renew` still exists, but it no longer extends anything about
-survival — it now buys **priority placement ("boost")**: sort to the top of
-search results for 7 days, from the later of now and your listing's current
-boost end.
+**Store** (paid, price from `declared_size_bytes` and `retention_days`,
+computed before the body is read):
 
 ```bash
-curl -si -X POST "https://algorand-api.pxke.me/api/v1/x402/list/renew" \
-  -H "PAYMENT-SIGNATURE: <signed payment for $0.05>" \
+BODY=$(base64 -w0 my-agent-state.json.age)   # encrypt first — see x402-storage-encryption-guide.md
+curl -si -X POST "https://algorand-api.pxke.me/api/v1/x402/storage/backups?declared_size_bytes=$(stat -c%s my-agent-state.json.age)&retention_days=30" \
+  -H "PAYMENT-SIGNATURE: <signed payment>" \
   -H "Content-Type: application/json" \
-  -d '{"url": "https://api.example.com/v1/quote"}'
+  -d "{\"data\": \"$BODY\", \"label\": \"state-2026-09-10\"}"
+# {"backup_id": "...", "size_bytes": 4096, "content_hash": "<sha256>", "label": "state-2026-09-10",
+#  "created_at_epoch": ..., "expires_at_epoch": ..., "status": "active", "current_version": 1,
+#  "settlement_tx_id": "..."}
 ```
 
-Only the wallet that listed (or last relisted) the URL may boost it — a
-boost from any other wallet settles but is refused, same as above.
+Price is `max($0.001, ceil(bytes/1KB) × $0.000001953125 × retention_days/90)`
+— 4 KB for 30 days is the $0.001 floor; 10 MB (the cap) for 90 days is
+$0.02. Content is opaque to us (never scanned or indexed) but not
+confidential from us — encrypt client-side.
 
-## 6. Checking an endpoint before you trust it
-
-Two free-vs-paid signals exist, and they answer genuinely different
-questions — don't conflate them.
-
-### Free: probe / uptime history — liveness and spec validity, not content
-
-A scheduled worker sends one **unpaid** request to every listed endpoint
-roughly every 30 minutes and records whether it was reachable, its latency,
-and whether it served a spec-valid `402` (including whether the `payTo` it
-offered matches the listing's own payer, which sets the `verified_wallet`
-badge). It never sends a payment — it's the only traffic this marketplace
-originates toward listed endpoints, and it's excluded from every ranking.
+**Read it back** (free): mint a single-use challenge, sign it, present the
+proof as query params on the very next call:
 
 ```bash
-curl "https://algorand-api.pxke.me/api/v1/x402/directory/probe?url=https://api.example.com/v1/quote"
-curl "https://algorand-api.pxke.me/api/v1/x402/directory/probe/history?url=https://api.example.com/v1/quote&limit=50"
+curl -s -X POST https://algorand-api.pxke.me/api/v1/x402/storage/auth/challenge \
+  -H "Content-Type: application/json" -d '{"wallet": "YOURWALLETADDRESSHERE"}'
+# {"nonce": "...", "signing_message": "...", "expires_at_epoch": ..., "proof_methods": ["legacy_message", "signed_bytes"]}
+
+# sign `signing_message` with your wallet key, then within 5 minutes:
+curl -s "https://algorand-api.pxke.me/api/v1/x402/storage/backups/<backup_id>?wallet=YOURWALLETADDRESSHERE&nonce=<nonce>&proof_method=signed_bytes&signature_b64=<sig>"
+# {...metadata..., "data": "<base64, sha256-verified on the way out>"}
 ```
 
-Both are free, and every listing detail read (`GET /api/v1/x402/listings`)
-already surfaces the newest probe result automatically — you don't need a
-separate call for that. **Be honest with yourself about what this proves:**
-it tells you the endpoint was up, how fast it answered, and whether its 402
-offer parsed correctly. It says nothing about whether the endpoint's actual
-paid response is correct, useful, or matches its own description — probing
-never pays, so it never sees the real product.
-
-### Paid: grading — a real payer's opinion, with mandatory proof they actually paid
-
-`POST /api/v1/x402/grades` ($0.02) lets a wallet leave a 1-5 star grade plus
-an optional comment on **any** http(s) x402 endpoint — it does not have to
-be listed with this marketplace. The distinguishing feature: `tx_id` is
-**mandatory**, and it isn't just present, it's independently verified
-on-chain against the graded endpoint's own `payTo` before the payment gate
-even runs:
-
-```bash
-curl -si -X POST "https://algorand-api.pxke.me/api/v1/x402/grades" \
-  -H "PAYMENT-SIGNATURE: <signed payment for $0.02>" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "url": "https://api.example.com/v1/quote",
-    "score": 4,
-    "comment": "Accurate quotes, ~300ms, spec matched the 402 offer exactly.",
-    "tx_id": "<the 52-char Algorand tx id of a real payment YOU made to that endpoint>"
-  }'
-```
-
-No `tx_id`, no grade — you can't grade an endpoint you (verifiably) never
-paid. One grade per wallet per URL (re-grading replaces it), and grades are
-weighted in the published aggregate by how much your wallet has spent with
-*this* marketplace over the last 30 days — unrelated to the graded
-endpoint's own tx_id. Read it back free of charge:
-
-```bash
-curl "https://algorand-api.pxke.me/api/v1/x402/grades/summary?url=https://api.example.com/v1/quote"
-```
-
-or paid, for the full weighted aggregate and every grader's comment:
-
-```bash
-curl "https://algorand-api.pxke.me/api/v1/x402/grades/score?url=https://api.example.com/v1/quote"
-```
-
-(`grades/score` supports `?preview=true` — see §2.) Grading proves someone
-who genuinely transacted with the endpoint formed an opinion of the result;
-probing proves the endpoint was reachable and spec-correct. Neither
-substitutes for the other, and neither is a guarantee — they're two
-different, honest signals.
+The same proof shape (a fresh challenge each time) authenticates
+`GET /storage/backups` (list), `GET .../versions`, `GET .../versions/:n` and
+`DELETE /storage/backups/:backup_id`. **Add a version** (`POST
+.../versions`, paid, same price shape) keeps the old ones, each on its own
+expiry; **renew** (`POST .../renew`, paid, priced from the stored size)
+extends the current version by one more 90-day term, capped at 90 days
+remaining. Both are owner-only — a payment from another wallet settles and
+is refused (§4).
 
 ## Where to go next
 
 - Full route-by-route reference (every field, every error code, rate
   limits): [`x402-marketplace-api.md`](x402-marketplace-api.md).
+- Client-side encryption recipe for storage:
+  [`x402-storage-encryption-guide.md`](x402-storage-encryption-guide.md).
 - Payment-construction mechanics in Python:
-  [`skills/algorand-x402-python/`](../skills/algorand-x402-python/SKILL.md).
+  [`skills/algorand-x402-python/`](../skills/algorand-x402-python/SKILL.md),
+  or the ready-made SDK in `x402-client/`.
 - Facilitator internals, CAIP-2 ids, the challenge tag, and known gotchas
   in the installed `x402-avm` package: [`x402-facilitator.md`](x402-facilitator.md).
 
-## Live links (each one fetched and confirmed reachable on 2026-09-05)
+## Live links
 
 This marketplace:
 
 - Catalog, JSON: <https://algorand-api.pxke.me/api/v1/x402>
 - Same document at the well-known URI: <https://algorand-api.pxke.me/.well-known/x402>
 - OpenAPI 3.1: <https://algorand-api.pxke.me/openapi.json>
-- Free smoke test of the cheapest paid route, unpaid and redacted: <https://algorand-api.pxke.me/api/v1/x402/ping?preview=true>
-- Proof-of-volume feed (real settlements, our own probe traffic excluded): <https://algorand-api.pxke.me/api/v1/x402/settlements/recent>
-- Human-readable marketplace page: <https://algorand.pxke.me/x402>
+- Free smoke test of the cheapest paid route, unpaid and redacted: <https://algorand-api.pxke.me/api/v1/x402/news/search?q=algorand&preview=true>
+- Proof-of-volume feed (real settlements, operator traffic excluded): <https://algorand-api.pxke.me/api/v1/x402/settlements>
+- Human-readable storefront: <https://x402.pxke.me>
 
 Settlement and discovery (GoPlausible facilitator, no auth needed for reads):
 

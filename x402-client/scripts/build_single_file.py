@@ -51,9 +51,10 @@ one file and import it than install a package at all.
 Requires: requests, py-algorand-sdk, msgpack, x402-avm>=2.0.2 (pip install
 requests py-algorand-sdk msgpack "x402-avm[avm]>=2.0.2").
 
-Free methods need no wallet. Paid methods need mnemonic= at construction --
-real Algorand mainnet, real USDC/EURQ/USDQ, real money. See PxkeClient's own
-docstring below for the full method list.
+Free methods need no wallet (catalog, settlements_recent, news, read_article).
+Paid methods need mnemonic= at construction -- real Algorand mainnet, real
+USDC/EURQ/USDQ, real money (search_news, scan_url, storage_create_backup,
+storage_renew_backup). See each method's own docstring below.
 
 Source of truth: https://algorand-api.pxke.me/api/v1/x402 (always fetch this
 for current prices/routes rather than trusting a cached copy of this file).

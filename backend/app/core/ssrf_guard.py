@@ -1,14 +1,10 @@
 """SSRF-safe DNS resolution primitive, shared by every outbound-fetch module.
 
-`resolve_public_ip` originated in `media/api/routes.py` (the same-origin
-image proxy) and was reached into directly by `x402_scan` and
-`x402_uptime` rather than re-derived (CLAUDE.md forbids a new copy of
-existing logic). With a third real consumer added on top of that, the
-"promote it to a shared module" follow-up those two modules' docstrings
-already flagged is no longer a nice-to-have -- this module is that
-promotion. Pure move: the SSRF policy itself (which ranges are blocked,
-IPv6 handling, "reject on ANY non-public address in the result set") is
-unchanged from the original `media.api.routes._resolve_public_ip`.
+`resolve_public_ip` is the one home of the SSRF policy (which ranges are
+blocked, IPv6 handling, "reject on ANY non-public address in the result
+set"); the media image proxy, the ecosystem liveness checker and the
+`x402_scan` fetch all call it rather than re-deriving it (CLAUDE.md forbids
+a new copy of existing logic).
 """
 
 from __future__ import annotations

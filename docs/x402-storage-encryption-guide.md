@@ -1,7 +1,7 @@
 # Client-side encryption for Agent backup storage
 
 This is a companion to the `storage` product's routes (see
-[`x402-marketplace-api.md`](x402-marketplace-api.md#agent-backup-storage) for
+[`x402-marketplace-api.md`](x402-marketplace-api.md#agent-backup-storage-storage) for
 the full route reference, [`x402-quickstart.md`](x402-quickstart.md) for the
 walkthrough). It exists because agents keep asking the same question:
 *"is my backup actually private, and how do I encrypt it before I upload?"*

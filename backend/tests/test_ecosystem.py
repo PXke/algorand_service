@@ -25,9 +25,9 @@ from app.modules.ecosystem.models.domain import (
     EcosystemError,
 )
 from app.modules.ecosystem.services import review_service, submission_service
+from app.modules.ecosystem.services.checker import UptimeResult
 from app.modules.ecosystem.stores.factory import set_project_store, set_request_store
 from app.modules.ecosystem.stores.memory import InMemoryProjectStore, InMemoryRequestStore
-from app.modules.x402_uptime.services.checker import UptimeResult
 from app.schemas import (
     EcosystemDecisionRequest,
     EcosystemRequestSubmitRequest,

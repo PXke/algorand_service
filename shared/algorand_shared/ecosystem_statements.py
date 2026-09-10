@@ -23,16 +23,13 @@ Five tables (migration 121):
   `description` through the ordinary edit/approve path ever changes what is
   actually served).
 - `ecosystem_projects_by_domain` (domain PK) -- the LWT one-entry-per-domain
-  dedupe gate (`INSERT_BY_DOMAIN_IF_ABSENT`), mirroring
-  `x402_statements`/backend's own `X402DirectoryStmts.INSERT_LISTING_IF_ABSENT`
-  pattern but keyed on domain (the real submission-uniqueness key here, see
-  the design doc's section 3.2) rather than a url hash.
+  dedupe gate (`INSERT_BY_DOMAIN_IF_ABSENT`), keyed on domain (the real
+  submission-uniqueness key here, see the design doc's section 3.2).
 - `ecosystem_projects_by_category` ((category), approved_at DESC, slug) --
   written only on approve, deleted on reject/delete/edit-then-rewrite. Every
   approved entry also gets a second row under the reserved `"all"` pseudo-
-  category (mirrors `x402_directory`'s `DIRECTORY_PARTITION` convention) so
-  the unfiltered index is the same single-partition bounded read as a real
-  category.
+  category so the unfiltered index is the same single-partition bounded
+  read as a real category.
 - `ecosystem_projects_by_tag` ((tag), approved_at DESC, slug) -- same shape,
   one row per free tag (up to `settings.ecosystem_max_tags`).
 - `ecosystem_submissions_by_status` ((status), submitted_at DESC, slug) --
@@ -46,8 +43,7 @@ request_id) -- same admin-queue shape as `ecosystem_submissions_by_status`,
 for a free, anonymous change/removal request against an already-approved
 entry (backend-only, `app.modules.ecosystem.services.request_service`).
 
-Same `_Stmt` descriptor shape as `x402_statements.py`: preparation is
-delegated to whichever service's `app.core.cassandra.prepare_cached` is
+`_Stmt` is a plain descriptor of CQL text: preparation is delegated to whichever service's `app.core.cassandra.prepare_cached` is
 importing this.
 """
 

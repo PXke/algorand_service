@@ -88,7 +88,6 @@ def _apply_paid_extensions(operation: dict[str, Any], route: dict[str, Any]) -> 
         operation["x-x402-price-unit"] = route["price_unit"]
     operation["x-x402-resource"] = route["resource"]
     operation["x-x402-supports-preview"] = route["supports_preview"]
-    operation["x-x402-supports-receipts"] = route["supports_receipts"]
 
 
 def _operation(route: dict[str, Any]) -> dict[str, Any]:
