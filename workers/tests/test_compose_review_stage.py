@@ -9,6 +9,7 @@ from typing import Any, Never
 import pytest
 
 from app.modules.ai.llm_compose import (
+    _build_revision_prompt,
     _parse_article_fields,
     _review_and_revise,
     _revision_length_rule,
@@ -53,6 +54,78 @@ class TestRevisionLengthRule:
         rule = _revision_length_rule(too_long=False, needs_depth=True, needs_factual_fix=True)
         assert "Improve narrative synthesis" in rule
         assert "Correct or hedge EXACTLY" not in rule
+
+
+class TestRevisionScopedIssueBlock:
+    """Root-caused 2026-09-10 (Derova mempool piece, real compose).
+
+    Fixing one flagged issue by fully regenerating the draft let an
+    untouched-but-rewritten sentence drift into a NEW error -- round 2
+    corrected one wrong fee-mechanics claim but introduced two more about the
+    same topic. That same real compose's own grade_detail ALSO flagged a
+    repetition issue in the same pass (the same judgment re-argued across
+    four sections) -- a whole-piece pattern that genuinely needs cross-
+    paragraph edits, unlike the one-sentence fee claim. A single blanket
+    "touch only what's flagged" instruction would fight the repetition fix,
+    so issues are scoped per KIND instead: localized issues (naming one
+    specific claim) get a "redo only the paragraph containing it"
+    instruction; document-wide issues (repetition, structure, narrative
+    depth) keep the existing broader license to restructure across sections.
+    Both can appear in the same prompt at once, which is exactly what
+    regressed on the real compose.
+    """
+
+    def _prompt(self, fixable: list[str], localized_fixable: list[str], **kwargs: bool) -> str:
+        return _build_revision_prompt(
+            "gen_user text", fixable, [], localized_fixable=localized_fixable, **kwargs
+        )
+
+    def test_localized_issue_gets_redo_only_that_paragraph_instruction(self) -> None:
+        """A factcheck-wrong-shaped issue (present in localized_fixable) gets the single-paragraph instruction, not license to touch the whole piece."""
+        claim = 'factual concern (wrong): "congestion never raises the per-byte rate"'
+        prompt = self._prompt([claim], [claim], too_long=False, needs_depth=False)
+        assert claim in prompt
+        assert "find the paragraph in the current draft that" in prompt
+        assert "revise ONLY that paragraph" in prompt
+
+    def test_document_wide_issue_keeps_broader_restructure_license(self) -> None:
+        """A repetition/structure-shaped issue (absent from localized_fixable) keeps the existing cross-section license -- it must NOT get the single-paragraph instruction, which would fight a fix that inherently spans sections."""
+        issue = "repetition scored 3/5 -- the same judgment restated across sections"
+        prompt = self._prompt([issue], [], too_long=False, needs_depth=True)
+        assert issue in prompt
+        assert "restructure or rewrite across as many sections" in prompt
+        assert "find the paragraph in the current draft that" not in prompt
+
+    def test_mixed_localized_and_document_wide_issues_in_one_pass(self) -> None:
+        """The exact shape of the real regression: a wrong factual claim AND a repetition issue flagged in the SAME pass. Each must get its own correctly-scoped instruction in the same prompt, not one blanket rule applied to both."""
+        claim = 'factual concern (wrong): "congestion never raises the per-byte rate"'
+        repetition = "repetition scored 3/5 -- the same judgment restated across sections"
+        prompt = self._prompt([claim, repetition], [claim], too_long=False, needs_depth=True)
+        assert claim in prompt
+        assert repetition in prompt
+        assert "revise ONLY that paragraph" in prompt
+        assert "restructure or rewrite across as many sections" in prompt
+        # needs_depth's own broader mandate is still present alongside the
+        # per-issue scoping -- the two layers coexist, neither replaces the other.
+        assert "Improve narrative synthesis" in prompt
+
+    def test_truncation_to_top_ten_happens_before_scope_classification(self) -> None:
+        """_revision_issues_block truncates fixable[:10] FIRST, then classifies what survives -- classifying before truncating could let a low-priority document-wide issue bump a high-priority localized one out of the top 10 instead of the other way around."""
+        localized = ['factual concern (wrong): "the only real claim"']
+        filler = [f"structure issue {i}" for i in range(12)]
+        prompt = self._prompt(localized + filler, localized, too_long=False, needs_depth=False)
+        assert "the only real claim" in prompt
+        # Exactly 10 issues total should appear (1 localized + 9 filler) --
+        # the 12th filler issue must be truncated away.
+        assert "structure issue 8" in prompt
+        assert "structure issue 9" not in prompt
+
+    def test_no_localized_issues_omits_the_localized_block_entirely(self) -> None:
+        """A pass with only document-wide issues must not mention paragraph-level scoping at all -- there's nothing for it to apply to."""
+        issue = "structure — Formatting Deserts: 5 consecutive paragraphs"
+        prompt = self._prompt([issue], [], too_long=False, needs_depth=False)
+        assert "These specific claims need fixing" not in prompt
+        assert "find the paragraph in the current draft that" not in prompt
 
 
 class _FakeMistral:

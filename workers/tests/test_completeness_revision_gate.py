@@ -117,29 +117,31 @@ def _fixable_kwargs(**overrides: object) -> dict:
 
 
 def test_collect_fixable_issues_includes_completeness_gap_when_enabled() -> None:
-    """check_completeness_gate=True on a completeness-failing draft surfaces the gap in the returned fixable list and stashes it onto review['completeness_gap']."""
+    """check_completeness_gate=True on a completeness-failing draft surfaces the gap in the returned fixable list (and localized_fixable, since it names a specific due-diligence gap) and stashes it onto review['completeness_gap']."""
     review: dict = {}
-    fixable = mc._collect_fixable_issues(
+    fixable, localized_fixable = mc._collect_fixable_issues(
         **_fixable_kwargs(review=review, check_completeness_gate=True)
     )
 
     assert any("screen_sanctions_and_pep" in i for i in fixable)
+    assert any("screen_sanctions_and_pep" in i for i in localized_fixable)
     assert "completeness_gap" in review
 
 
 def test_collect_fixable_issues_ignores_completeness_by_default() -> None:
     """check_completeness_gate defaults False -- a recompose call site (which never passes it) must never see a completeness-driven revision, matching the deliberate exclusion _grade_and_gate already documents."""
     review: dict = {}
-    fixable = mc._collect_fixable_issues(**_fixable_kwargs(review=review))
+    fixable, localized_fixable = mc._collect_fixable_issues(**_fixable_kwargs(review=review))
 
     assert not any("screen_sanctions_and_pep" in i for i in fixable)
+    assert not any("screen_sanctions_and_pep" in i for i in localized_fixable)
     assert "completeness_gap" not in review
 
 
 def test_completeness_fixable_survives_top_ten_truncation_ordering() -> None:
     """Placed right after factual_fixable (same reasoning as that list's own ordering comment) -- a due-diligence gap must not get crowded out of _build_revision_prompt's fixable[:10] by lower-stakes issues."""
     review = {"issues": [f"schema issue {i}" for i in range(15)]}
-    fixable = mc._collect_fixable_issues(
+    fixable, _localized_fixable = mc._collect_fixable_issues(
         **_fixable_kwargs(review=review, check_completeness_gate=True)
     )
 
@@ -157,9 +159,11 @@ def test_check_completeness_gate_threads_through_run_grade_revise_loop(
     def _fake_grade(*_a: object, **_kw: object) -> dict:
         return {"quality": {"issues": []}, "factcheck": {}}
 
-    def _fake_collect(*_a: object, check_completeness_gate: bool, **_kw: object) -> list[str]:
+    def _fake_collect(
+        *_a: object, check_completeness_gate: bool, **_kw: object
+    ) -> tuple[list[str], list[str]]:
         seen_flags.append(check_completeness_gate)
-        return []
+        return [], []
 
     monkeypatch.setattr(mc, "_grade_current_draft", _fake_grade)
     monkeypatch.setattr(mc, "_record_grade", lambda *_a, **_kw: None)

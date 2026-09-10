@@ -2336,8 +2336,8 @@ def _collect_fixable_issues(
     chain_check_cache: dict,
     factcheck: dict | None = None,
     check_completeness_gate: bool = False,
-) -> list[str]:
-    """Gather every revision-worthy issue across the schema check, quality rubric, the factcheck audit, and the deterministic gates, stashing each gate's own findings onto `review` for the trace/telemetry record.
+) -> tuple[list[str], list[str]]:
+    """Gather every revision-worthy issue across the schema check, quality rubric, the factcheck audit, and the deterministic gates, stashing each gate's own findings onto `review` for the trace/telemetry record. Returns ``(fixable, localized_fixable)`` -- the full flat list (unchanged shape/order from before), and the subset of it that names one specific claim/passage rather than a whole-piece pattern (see ``_partition_fixable_by_scope``'s module comment for the full list of which category is which).
 
     ``check_completeness_gate`` (2026-09-09): opt-in, set only for fresh
     content (see `_run_grade_revise_loop`'s own docstring) — the completeness
@@ -2392,7 +2392,21 @@ def _collect_fixable_issues(
     if completeness_fixable:
         review["completeness_gap"] = completeness_fixable
 
-    return (
+    # localized: each of these names ONE specific claim/passage/quote that
+    # lives in one place in the draft -- see _partition_fixable_by_scope's
+    # module comment for why these (not schema/quality) get the
+    # single-paragraph revision instruction.
+    localized_fixable = (
+        factual_fixable
+        + completeness_fixable
+        + link_fixable
+        + chain_fixable
+        + authority_fixable
+        + unsourced_fixable
+        + broken_link_fixable
+        + stale_deadline_fixable
+    )
+    fixable = (
         factual_fixable
         # completeness_fixable placed right after factual_fixable, same
         # reasoning as that list's own comment above: a mandatory
@@ -2408,6 +2422,7 @@ def _collect_fixable_issues(
         + broken_link_fixable
         + stale_deadline_fixable
     )
+    return fixable, localized_fixable
 
 
 # Root-caused 2026-08-04 (Humanitarian Network recompose #2): the needs_depth
@@ -2497,6 +2512,69 @@ def _revision_length_rule(
     )
 
 
+# Root-caused 2026-09-10 (Derova mempool piece, real compose): a single
+# blanket "touch only what's flagged" instruction fights a DIFFERENT class
+# of issue the same revision pass often has to fix at once. That piece's
+# own grade_detail flagged BOTH at once: one wrong fee-mechanics claim (one
+# sentence, one paragraph) AND a repetition issue -- "the core judgment...
+# is re-argued from scratch four times (intro, the 2021 forum caveat, the
+# architecture section, the closing) -- state it once and reference it
+# afterward" -- which by its nature spans four non-contiguous sections.
+# Fixing the repetition issue genuinely requires touching multiple
+# paragraphs; a rigid single-paragraph rule would fight that. The two issue
+# kinds need different scopes in the SAME prompt:
+#   - localized: factcheck-wrong claims, unsourced-specifics findings,
+#     broken-link-claims, stale-deadline flags, dead links, unattributed-
+#     authority, chain-entity mismatches, completeness gaps -- each names
+#     ONE specific claim/passage/quote that lives in one place in the
+#     draft. These get "find the paragraph containing this, redo only
+#     that paragraph."
+#   - document-wide: schema/structure issues (Formatting Deserts, Buried
+#     Metrics, Citation Density) and quality-rubric issues (repetition,
+#     narrative synthesis, technical depth, critical distance) -- these
+#     are whole-piece patterns by construction. These keep the existing,
+#     broader license to restructure/rewrite across sections.
+def _partition_fixable_by_scope(
+    fixable: list[str], localized_fixable: list[str]
+) -> tuple[list[str], list[str]]:
+    """Split ``fixable`` (already truncated to the top 10 by caller) into (localized, document_wide) using membership in ``localized_fixable`` -- the caller already knows each issue's kind (it built the category lists in ``_collect_fixable_issues``), this just re-applies that same classification after the two have been flattened together for truncation/already-fixed tracking."""
+    localized_set = set(localized_fixable)
+    localized = [i for i in fixable if i in localized_set]
+    document_wide = [i for i in fixable if i not in localized_set]
+    return localized, document_wide
+
+
+def _revision_issues_block(fixable: list[str], localized_fixable: list[str]) -> str:
+    """The "here's what a reviewer flagged" section of the revision prompt, scope-labeled per ``_partition_fixable_by_scope``. Truncates to the top 10 of ``fixable`` FIRST (preserving the existing priority order -- factual/completeness concerns are placed first by ``_collect_fixable_issues`` specifically so they survive this truncation), then classifies what survives -- never the other way around, or a low-priority document-wide issue could bump a high-priority localized one out entirely."""
+    localized, document_wide = _partition_fixable_by_scope(fixable[:10], localized_fixable)
+    blocks = ["A reviewer flagged these problems:"]
+    if localized:
+        localized_text = "\n".join(f"- {i}" for i in localized)
+        blocks.append(
+            f"These specific claims need fixing:\n{localized_text}\n\n"
+            "For EACH one, find the paragraph in the current draft that "
+            "contains it and revise ONLY that paragraph to fix it. Leave "
+            "every other paragraph in the piece exactly as it is, copied "
+            "verbatim — a paragraph you don't need to touch cannot "
+            "introduce a new error, but one you rewrite \"while you're at "
+            'it" can (a real incident: fixing one wrong fee-mechanics '
+            "claim by also rewriting its surrounding paragraph introduced "
+            "two MORE wrong claims about the same topic on the very next "
+            "revision pass)."
+        )
+    if document_wide:
+        document_wide_text = "\n".join(f"- {i}" for i in document_wide)
+        blocks.append(
+            f"These broader issues need fixing:\n{document_wide_text}\n\n"
+            "These are whole-piece patterns (the same point restated "
+            "across sections, structure, narrative depth) that genuinely "
+            "can't be fixed by touching one paragraph — restructure or "
+            "rewrite across as many sections as the issue actually "
+            "requires."
+        )
+    return "\n\n".join(blocks)
+
+
 def _build_revision_prompt(
     gen_user: str,
     fixable: list[str],
@@ -2505,8 +2583,22 @@ def _build_revision_prompt(
     too_long: bool,
     needs_depth: bool,
     needs_factual_fix: bool = False,
+    localized_fixable: list[str] | None = None,
 ) -> str:
-    issues_block = "\n".join(f"- {i}" for i in fixable[:10])
+    """Build the revision-pass prompt: the flagged issues (scoped per issue -- see ``_partition_fixable_by_scope``), the length/depth rule for this pass, and the grounding/tool-access rules every revision shares.
+
+    ``localized_fixable`` (2026-09-10, root-caused on the Derova mempool
+    piece): the subset of ``fixable`` that names one specific claim/passage
+    (a factcheck-wrong claim, an unsourced-specifics finding, a dead link, a
+    completeness gap, ...) rather than a whole-piece pattern (repetition,
+    structure, narrative depth). These get a narrower "find the paragraph
+    that contains this and redo only that paragraph" instruction instead of
+    open license to touch the whole piece -- see
+    ``_partition_fixable_by_scope``'s own docstring for why a single
+    blanket instruction doesn't work here (repetition genuinely needs
+    cross-paragraph edits; a wrong fee-mechanics claim doesn't).
+    """
+    issues_block = _revision_issues_block(fixable, localized_fixable or [])
     carried_block = ""
     if already_fixed:
         carried_block = (
@@ -2518,7 +2610,7 @@ def _build_revision_prompt(
         too_long=too_long, needs_depth=needs_depth, needs_factual_fix=needs_factual_fix
     )
     return (
-        gen_user + f"\n\nA reviewer flagged these problems:\n{issues_block}\n\n"
+        gen_user + f"\n\n{issues_block}\n\n"
         f"{length_rule} You have tool access again for this revision, specifically "
         "to fix the flagged problems above — call a tool when a flagged issue is "
         "something a fresh lookup could actually resolve (an unverified or stale "
@@ -2859,7 +2951,7 @@ def _run_grade_revise_loop(
         )
 
         needs_revision = quality_needs_revision(quality, min_score=WRITER_QUALITY_LLM_MIN_SCORE)
-        fixable = _collect_fixable_issues(
+        fixable, localized_fixable = _collect_fixable_issues(
             review,
             quality,
             needs_revision=needs_revision,
@@ -2923,6 +3015,7 @@ def _run_grade_revise_loop(
             too_long=too_long,
             needs_depth=needs_depth,
             needs_factual_fix=needs_factual_fix,
+            localized_fixable=localized_fixable,
         )
         gen_system = system + _STAGE2_GENERATION_GUIDANCE
 

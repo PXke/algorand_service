@@ -235,9 +235,9 @@ def test_review_and_revise_merges_final_cumulative_rubric_usage_once(
     # is the SECOND call to _grade_current_draft); second pass is clean.
     fixable_calls = {"n": 0}
 
-    def _fake_collect_fixable_issues(*_a: object, **_kw: object) -> list[str]:
+    def _fake_collect_fixable_issues(*_a: object, **_kw: object) -> tuple[list[str], list[str]]:
         fixable_calls["n"] += 1
-        return ["headline: too long"] if fixable_calls["n"] == 1 else []
+        return (["headline: too long"], []) if fixable_calls["n"] == 1 else ([], [])
 
     monkeypatch.setattr(mc, "_collect_fixable_issues", _fake_collect_fixable_issues)
     monkeypatch.setattr(
@@ -333,7 +333,7 @@ def test_run_two_stage_compose_folds_digest_and_rubric_usage_into_extra_usage(
         }
 
     monkeypatch.setattr(mc, "_grade_current_draft", _fake_grade_current_draft)
-    monkeypatch.setattr(mc, "_collect_fixable_issues", lambda *_a, **_kw: [])
+    monkeypatch.setattr(mc, "_collect_fixable_issues", lambda *_a, **_kw: ([], []))
 
     trace: list = []
     debug: dict = {}
@@ -438,7 +438,7 @@ def test_compose_final_aggregate_includes_rubric_and_digest_usage(
         }
 
     monkeypatch.setattr(mc, "_grade_current_draft", _fake_grade_current_draft)
-    monkeypatch.setattr(mc, "_collect_fixable_issues", lambda *_a, **_kw: [])
+    monkeypatch.setattr(mc, "_collect_fixable_issues", lambda *_a, **_kw: ([], []))
 
     mc._compose_via_writer_tools(
         system="sys",
