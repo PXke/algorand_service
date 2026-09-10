@@ -737,3 +737,159 @@ def test_narrative_guidance_pins_the_scene_includes_the_product_itself() -> None
     # design review: an earlier draft of this rule said exactly that and was
     # corrected before shipping).
     assert "before any on-chain" not in mc._NARRATIVE_GUIDANCE
+
+
+# ── Editorial mission refactor (2026-09-09) ──────────────────────────────
+# Owner review of a live AlgoChess piece: "we do not know anything about the
+# site itself, what you can do, what it is... it is directly in very
+# technical details"; the mission is "to make the algorand ecosystem more
+# alive so even if there was one sad player it would be good to have a long
+# article that kind of promote the usage of the service." Root cause was the
+# prompt itself: ~7,000 words of accreted per-incident prohibitions with no
+# statement of what the newspaper is for or who reads it, an "investigative
+# journalist" identity, a lede rule that asked for a hook but never for a
+# nut graf, a length rule tied to trace volume, three anti-fabrication rules
+# that together deleted all outside context, and a rubric with no
+# reader-facing dimension. These tests pin the positive spec that replaced it.
+
+
+def test_system_prompt_opens_with_the_editorial_mission_before_any_rule() -> None:
+    """The mission paragraph (what PXke is for, the five reader questions, who the reader is) must sit before WRITING GUIDELINES, for both the scrape and the assignment identity."""
+    for assignment in (False, True):
+        system = mc._writer_system_prompt("2026-09-09", assignment=assignment)
+        assert "WHAT THIS NEWSPAPER IS FOR" in system
+        assert "1. What is this, in plain words?" in system
+        assert "THE READER is" in system
+        assert "never as the bulk of the piece" in system
+        assert system.index("WHAT THIS NEWSPAPER IS FOR") < system.index("WRITING GUIDELINES")
+        # The identity line drives register: a features writer who fact-checks,
+        # not an investigator who writes.
+        assert "features writer" in system
+        assert "senior investigative journalist" not in system
+
+
+def test_lede_rule_demands_a_nut_graf_and_product_first_section() -> None:
+    """Open Like A Story now says WHAT IT IS first: the first paragraph names the subject and what a person does on it, the first section is the product as a reader meets it, and verification comes after in its own section."""
+    text = mc._writing_guidelines("2026-09-09")
+    assert "SAY WHAT IT IS FIRST" in text
+    assert "what the subject IS and what a person DOES with it" in text
+    assert "FIRST SECTION after the lede is the product as a reader meets it" in text
+    assert "contract verification comes AFTER that" in text
+
+
+def test_plain_register_rule_bans_aphoristic_closers_and_teaser_headers() -> None:
+    """Every section of the AlgoChess piece ended on an epigram and its headers were metaphors; the register rule names both as failures."""
+    text = mc._writing_guidelines("2026-09-09")
+    assert "PLAIN REGISTER" in text
+    assert "Do NOT end sections on an aphorism" in text
+    assert "never a tease or a metaphor" in text
+    assert "distinctly human and authoritative" not in text
+    # The close follows the same rule.
+    assert "the last line is a fact or a next step, not an epigram" in text
+
+
+def test_context_and_comparables_survive_from_research_to_digest_to_writer() -> None:
+    """Outside context was being deleted at three points: research never asked for it, the digest template had no home for it, and the stage-2 grounding rule taught the writer to discard competitor material. All three now carry it, labelled as OTHER products."""
+    assert "CONTEXT AND COMPARABLES" in mc._RESEARCH_MISSION_AND_ROUTING
+    assert "CONTEXT AND COMPARABLES" in mc._RESEARCH_PHASE_GUIDANCE
+    assert "CONTEXT AND COMPARABLES" in mc._TOOLS_GUIDANCE
+    assert "### Context & Comparables" in mc._RESEARCH_DIGEST_SYNTHESIS
+    assert "a fact here is never a fact about the subject" in mc._RESEARCH_DIGEST_SYNTHESIS
+    assert "CONTEXT IS DIFFERENT FROM TRANSPLANTING" in mc._NARRATIVE_GUIDANCE
+    # The anti-transplant rule still stands, and now says the comparable is kept.
+    assert "transplanted onto the story's subject" in mc._NARRATIVE_GUIDANCE
+    assert "the ban is on confusing the two" in mc._SOURCING_AND_FRAMING_RULES
+
+
+def test_digest_carries_what_the_product_is_like_to_use() -> None:
+    """Stage 2 writes the product section from the digest only, so the digest must be told that screens, flows and free-vs-paid facts are verified facts to carry over in full."""
+    assert "WHAT IT IS LIKE TO USE, VERBATIM" in mc._RESEARCH_DIGEST_SYNTHESIS
+
+
+def test_scene_rule_spells_out_the_shape_of_a_product_piece() -> None:
+    """THE SCENE INCLUDES THE PRODUCT ITSELF is now a positive (a)-(e) shape — lede, product, why it matters, the catch, what's next — rather than a complaint about the last draft."""
+    text = mc._NARRATIVE_GUIDANCE
+    assert "THE SHAPE OF THE PIECE" in text
+    for marker in (
+        "(a) The lede",
+        "(b) The product as a reader meets it",
+        "(c) Why it matters",
+        "(d) The catch",
+        "(e) What is next",
+    ):
+        assert marker in text
+    assert "has the shape wrong regardless of how good its findings are" in text
+
+
+def test_length_is_scaled_to_reader_value_not_trace_volume() -> None:
+    """A 48-round forensic pass must not produce a 2,000-word audit of a two-player site: the digest is the ceiling on what may be said, not a quota, and the research-side length contract stops at the reader's questions rather than at 'material exhausted'."""
+    assert "not a quota of what you must say" in mc._NARRATIVE_GUIDANCE
+    assert "stop when the five reader questions" in mc._NO_FABRICATION
+    assert "Stop only when the verified material is genuinely exhausted" not in mc._NO_FABRICATION
+
+
+def test_prompts_carry_no_decorative_numeric_limits() -> None:
+    """Owner sweep, 2026-09-09: numbers the model reads as targets ('about 80 words', 'about a third of the body', '1-2 sentences', 'three consecutive paragraphs', 'at least THREE sub-narratives') were fake precision and got gamed or padded to. Only limits an actual gate enforces (the 90-char headline, the 280-char summary, the tag count, the configured round budget, the gap-list cap, a real tool parameter) may carry a number."""
+    text = "".join(
+        [
+            mc._writer_system_prompt("2026-09-09"),
+            mc._NARRATIVE_GUIDANCE,
+            mc._research_phase_guidance([]),
+            mc._RESEARCH_DIGEST_SYNTHESIS,
+        ]
+    )
+    for banned in (
+        "about 80 words",
+        "about a third",
+        "one-third",
+        "1-2 sentences",
+        "three consecutive paragraphs",
+        "at least THREE",
+        "at least TWO",
+        "at least one search_web",
+        "800 words",
+    ):
+        assert banned not in text, banned
+
+
+def test_prompts_carry_no_dated_incident_notes() -> None:
+    """Incident history lives in these tests' docstrings, the commit log and docs/adr — not in the prompt the model reads. Eighteen dated post-mortems had accreted into the prompt by 2026-09-09; a rule may keep its illustrative example, but never the date-stamped narrative of who got it wrong when."""
+    assembled = "".join(
+        [
+            mc._writer_system_prompt("2026-09-09"),
+            mc._writer_system_prompt("2026-09-09", assignment=True),
+            mc._NARRATIVE_GUIDANCE,
+            mc._STAGE2_GENERATION_GUIDANCE,
+            mc._SPECIAL_EDITION_STAGE2_OVERRIDE,
+            mc._SPECIAL_EDITION_DEPTH_INSTRUCTIONS,
+            mc._research_phase_guidance([]),
+            mc._TOOLS_GUIDANCE,
+            mc._RESEARCH_DIGEST_SYNTHESIS,
+            mc._FIRST_COVERAGE_GUIDANCE,
+            mc._EVOLUTION_GUIDANCE,
+            mc._PROFILE_GUIDANCE,
+        ]
+    )
+    dated = re.compile(
+        r"(root-caused|flagged|observed|owner directive|owner call)[^.\n]{0,30}?20\d\d-\d\d",
+        re.IGNORECASE,
+    )
+    hits = [assembled[max(0, m.start() - 40) : m.end() + 40] for m in dated.finditer(assembled)]
+    assert hits == []
+
+
+def test_algorand_primer_survives_between_mission_and_guidelines() -> None:
+    """The primer sits between the mission block and WRITING GUIDELINES in the assembled system prompt; a block splice once dropped it silently because nothing pinned its position."""
+    system = mc._writer_system_prompt("2026-09-09")
+    assert "ABOUT ALGORAND" in system
+    assert (
+        system.index("WHAT THIS NEWSPAPER IS FOR")
+        < system.index("ABOUT ALGORAND")
+        < system.index("WRITING GUIDELINES")
+    )
+
+
+def test_primer_states_the_current_block_time() -> None:
+    """2026-09-09 AlgoChess hold: the writer wrote 'about three seconds' and 'roughly five hours for 7,200 rounds' from training, and the factcheck audit judged them from its own training — the prompt never stated a block time. Owner figure: ~2.8 seconds. The primer carries it (with the rounds-to-hours conversion) so the writer has the right number if it draws on one at all."""
+    assert "2.8 seconds" in mc._ALGORAND_PRIMER
+    assert "7,200 rounds is about 5.6 hours" in mc._ALGORAND_PRIMER

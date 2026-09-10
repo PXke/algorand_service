@@ -61,6 +61,7 @@ def test_grade_article_quality_llm_includes_repetition(monkeypatch: pytest.Monke
     class _StubClient:
         def chat_json_object(self, *_a: object, **_kw: object) -> dict:
             return {
+                "reader_value": 4,
                 "narrative_synthesis": 4,
                 "technical_depth": 4,
                 "critical_distance": 4,
@@ -115,6 +116,7 @@ def test_grade_article_quality_llm_includes_critical_distance(
     class _StubClient:
         def chat_json_object(self, *_a: object, **_kw: object) -> dict:
             return {
+                "reader_value": 4,
                 "narrative_synthesis": 4,
                 "technical_depth": 4,
                 "critical_distance": 2,
@@ -160,6 +162,7 @@ def test_partial_rubric_recovered_by_retry_is_not_flagged(monkeypatch: pytest.Mo
         [
             {"narrative_synthesis": 4, "issues": []},  # partial first answer
             {
+                "reader_value": 4,
                 "narrative_synthesis": 4,
                 "technical_depth": 4,
                 "critical_distance": 4,
@@ -192,6 +195,7 @@ def test_grade_article_quality_llm_covers_a_long_body_past_the_old_12k_cap(
         def chat_json_object(self, messages: list[dict], *_a: object, **_kw: object) -> dict:
             seen["user_content"] = messages[-1]["content"]
             return {
+                "reader_value": 4,
                 "narrative_synthesis": 4,
                 "technical_depth": 4,
                 "critical_distance": 4,
@@ -391,3 +395,67 @@ def test_factcheck_forcing_issues_excludes_overstated() -> None:
     assert len(forcing) == 1
     assert "B" in forcing[0]
     assert "wrong" in forcing[0]
+
+
+def test_rubric_has_a_reader_value_dimension_that_gates_revision() -> None:
+    """2026-09-09 editorial mission refactor: the four existing dimensions are all rigor dimensions, so a fully-verified audit that never says what the product is scored full marks and no revision pass ever pushed toward the reader. reader_value is scored first, named in the output schema, and a low score forces a revision with a concrete fix."""
+    from app.modules.newspaper.article_quality_llm import _QUALITY_RUBRIC, _dimension_issues
+
+    assert "reader_value" in _QUALITY_RUBRIC
+    assert '{"reader_value": 3' in _QUALITY_RUBRIC
+    assert "FIRST PARAGRAPH already answers (1)" in _QUALITY_RUBRIC
+    assert "is the bulk of the body" in _QUALITY_RUBRIC
+    assert quality_needs_revision(
+        {
+            "reader_value": 2,
+            "narrative_synthesis": 5,
+            "technical_depth": 5,
+            "critical_distance": 5,
+            "repetition": 5,
+        },
+        min_score=3,
+    )
+    issues = _dimension_issues(
+        {
+            "reader_value": 2,
+            "narrative_synthesis": 5,
+            "technical_depth": 5,
+            "critical_distance": 5,
+            "repetition": 5,
+        }
+    )
+    assert len(issues) == 1
+    assert "reader value scored 2/5" in issues[0]
+    assert "first paragraph" in issues[0]
+
+
+def test_grade_article_quality_llm_carries_reader_value(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The reader_value score reaches the returned grade dict, and a full five-dimension response is not treated as partial."""
+
+    class _StubClient:
+        def chat_json_object(self, *_a: object, **_kw: object) -> dict:
+            return {
+                "reader_value": 2,
+                "narrative_synthesis": 4,
+                "technical_depth": 4,
+                "critical_distance": 4,
+                "repetition": 4,
+                "issues": [],
+            }
+
+    monkeypatch.setattr("app.core.config.WRITER_QUALITY_LLM_ENABLED", True, raising=False)
+    result = grade_article_quality_llm(
+        title="T", body="Some article body text.", client=_StubClient()
+    )
+    assert result["model"] == "llm_rubric"
+    assert result["reader_value"] == 2
+    assert quality_needs_revision(result, min_score=3)
+
+
+def test_factcheck_prompt_anchors_block_time_on_the_current_figure() -> None:
+    """Same 2026-09-09 hold as the primer test: the factcheck auditor must judge round-to-time claims against the current ~2.8 s block time, not a recalled 3 or 4 seconds, and must treat two consistent-enough figures as an internal inconsistency rather than calling one of them wrong."""
+    from app.modules.newspaper.article_quality_llm import _FACTCHECK_PROMPT
+
+    assert "2.8 seconds" in _FACTCHECK_PROMPT
+    assert "7,200 rounds is about 5.6 hours" in _FACTCHECK_PROMPT
+    assert "override anything older you recall" in _FACTCHECK_PROMPT

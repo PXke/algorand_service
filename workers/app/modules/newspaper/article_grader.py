@@ -630,7 +630,13 @@ def grade_article_draft(
     }
 
 
-_QUALITY_DIMENSIONS = ("narrative_synthesis", "technical_depth", "critical_distance", "repetition")
+_QUALITY_DIMENSIONS = (
+    "reader_value",
+    "narrative_synthesis",
+    "technical_depth",
+    "critical_distance",
+    "repetition",
+)
 # The editorial judgment a human actually cares about, weighted 3x the
 # mechanical checks COMBINED (0.75 vs 0.25) — structure/length are cheap
 # sanity checks (do headers/tables/links exist, is the length in range),
@@ -666,9 +672,15 @@ def fuse_quality_into_grade(review: dict, quality: dict) -> dict:
     quality_score = _quality_score_0_1(quality)
     subscores = review.get("subscores") or {}
     structure, length = subscores.get("structure"), subscores.get("length")
-    if quality_score is None or not isinstance(structure, int | float) or not isinstance(length, int | float):
+    if (
+        quality_score is None
+        or not isinstance(structure, int | float)
+        or not isinstance(length, int | float)
+    ):
         return review
-    fused = _QUALITY_WEIGHT * quality_score + _STRUCTURE_WEIGHT * structure + _LENGTH_WEIGHT * length
+    fused = (
+        _QUALITY_WEIGHT * quality_score + _STRUCTURE_WEIGHT * structure + _LENGTH_WEIGHT * length
+    )
     review["grade"] = round(10.0 * fused, 1)
     subscores["quality"] = round(quality_score, 2)
     review["subscores"] = subscores

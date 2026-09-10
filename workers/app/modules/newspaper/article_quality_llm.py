@@ -11,8 +11,25 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _QUALITY_RUBRIC = (
-    "You are a strict editor grading an Algorand-focused news draft.\n"
+    "You are a strict editor grading a draft for PXke, an Algorand newspaper "
+    "whose job is to make the ecosystem feel alive to a curious reader and get "
+    "them to try what is being built — rigorously, but for a reader, not an "
+    "auditor.\n"
     "Score ONLY these dimensions from 1 (poor) to 5 (excellent):\n"
+    "- reader_value: would a curious reader with average crypto familiarity "
+    "finish this knowing (1) what the subject IS in plain words, (2) what they "
+    "can DO on it today and what that looks like, (3) why it matters and how "
+    "it compares to what already exists, (4) the real catch, and (5) what is "
+    "next? Score 5 only if the FIRST PARAGRAPH already answers (1) and the "
+    "first section after it describes the product as a person meets it. "
+    "Score LOW (1-2) if the reader is several sections into contract "
+    "parameters, key roles or on-chain forensics before learning what the "
+    "product is or what using it is like, if verification detail is the bulk "
+    "of the body, if there is no outside context at all "
+    "(no comparable, no 'why should an Algorand reader care'), or if section "
+    "headers and sentence endings are aphorisms and teases rather than plain "
+    "statements. A rigorous, fully-verified audit that never says what the "
+    "thing is scores 1 here regardless of its other scores.\n"
     "- narrative_synthesis: cohesive journalism weaving findings together — NOT "
     "comma-separated feature dumps, NOT generic press-release tone, NOT dictionary "
     "definitions of curriculum pillars or feature lists, and NOT a draft that "
@@ -45,8 +62,8 @@ _QUALITY_RUBRIC = (
     "worded slightly differently — that still counts as repetition, not new "
     "information.\n\n"
     "Output a single JSON object with exactly these keys:\n"
-    '{"narrative_synthesis": 3, "technical_depth": 3, "critical_distance": 3, '
-    '"repetition": 3, "issues": ["short fix"]}\n'
+    '{"reader_value": 3, "narrative_synthesis": 3, "technical_depth": 3, '
+    '"critical_distance": 3, "repetition": 3, "issues": ["short fix"]}\n'
     "JSON SAFETY: Return JSON only — no markdown fences or prose. In issue strings "
     "use single quotes for any quoted text, or avoid double quotes entirely; never "
     "emit unescaped double quotes inside JSON string values.\n"
@@ -55,6 +72,7 @@ _QUALITY_RUBRIC = (
 
 _FALLBACK_QUALITY = {
     "model": "llm_rubric_error",
+    "reader_value": 2,
     "narrative_synthesis": 2,
     "technical_depth": 2,
     "critical_distance": 2,
@@ -62,6 +80,9 @@ _FALLBACK_QUALITY = {
     "issues": [
         "quality rubric could not be parsed — weave facts into connected journalism, "
         "not dictionary-style summaries",
+        "say what the subject is and what a reader does on it in the first "
+        "paragraph, describe the product before its contract internals, and "
+        "never let verification detail be the bulk of the body",
         "explain the Algorand layer-1 mechanics THIS story actually involves "
         "(never bolt on unrelated ones); put multi-item data in a Markdown "
         "table (Concept / Real-World Implication columns)",
@@ -82,7 +103,13 @@ def _parse_quality_response(raw: Any) -> dict[str, Any] | None:  # noqa: ANN401 
     return _parse_json_object(raw.strip())
 
 
-_QUALITY_DIMS = ("narrative_synthesis", "technical_depth", "critical_distance", "repetition")
+_QUALITY_DIMS = (
+    "reader_value",
+    "narrative_synthesis",
+    "technical_depth",
+    "critical_distance",
+    "repetition",
+)
 
 
 def _graded_scores(
@@ -117,10 +144,20 @@ def _graded_scores(
 def _dimension_issues(scores: dict[str, int | None]) -> list[str]:
     """Actionable feedback for each dimension scoring below the 4/5 quality bar."""
     issues = []
+    reader_value = scores["reader_value"]
     narrative = scores["narrative_synthesis"]
     technical = scores["technical_depth"]
     critical_distance = scores["critical_distance"]
     repetition = scores["repetition"]
+    if reader_value is not None and reader_value < 4:
+        issues.append(
+            f"reader value scored {reader_value}/5 — the first paragraph must say "
+            "what the subject is and what a reader does on it; the first section "
+            "describes the product as a person meets it; on-chain/contract "
+            "verification gets one section, never the bulk of the body; "
+            "add the outside context that says why an Algorand reader should care; "
+            "headers and closing lines are plain statements, not aphorisms"
+        )
     if narrative is not None and narrative < 4:
         issues.append(
             f"narrative synthesis scored {narrative}/5 — weave facts into "
@@ -159,6 +196,7 @@ def grade_article_quality_llm(
     if not WRITER_QUALITY_LLM_ENABLED:
         return {
             "model": "disabled",
+            "reader_value": None,
             "narrative_synthesis": None,
             "technical_depth": None,
             "issues": [],
@@ -167,6 +205,7 @@ def grade_article_quality_llm(
     if not text_body:
         return {
             "model": "skipped",
+            "reader_value": None,
             "narrative_synthesis": None,
             "technical_depth": None,
             "issues": ["empty body"],
@@ -202,10 +241,7 @@ def grade_article_quality_llm(
         issues.extend(_dimension_issues(scores))
         return {
             "model": "llm_rubric_partial" if missing else "llm_rubric",
-            "narrative_synthesis": scores["narrative_synthesis"],
-            "technical_depth": scores["technical_depth"],
-            "critical_distance": scores["critical_distance"],
-            "repetition": scores["repetition"],
+            **{dim: scores[dim] for dim in _QUALITY_DIMS},
             "issues": issues,
         }
     except Exception as exc:
@@ -225,7 +261,7 @@ def _clamp_score(value: Any) -> int | None:  # noqa: ANN401 -- arbitrary model-e
 
 def quality_needs_revision(quality: dict[str, Any], *, min_score: int) -> bool:
     """True when any LLM dimension falls below the revision threshold."""
-    for key in ("narrative_synthesis", "technical_depth", "critical_distance", "repetition"):
+    for key in _QUALITY_DIMS:
         score = quality.get(key)
         if score is not None and int(score) < min_score:
             return True
@@ -278,7 +314,13 @@ _FACTCHECK_PROMPT = (
     "— those are sourcing questions for a different check, not general-knowledge "
     "questions; or anything the piece already hedges as unverified/undisclosed.\n\n"
     "For each protocol/mechanics claim you find, verify it against your own "
-    "knowledge and give it a verdict:\n"
+    "knowledge — anchored on these current figures, which override anything "
+    "older you recall: Algorand produces a new block roughly every 2.8 "
+    "seconds with finality in that same block, so a window stated in rounds "
+    "converts at 2.8 seconds per round (7,200 rounds is about 5.6 hours; a "
+    "piece saying 'about three seconds' and 'roughly five hours' for 7,200 "
+    "rounds is internally inconsistent but neither figure is wrong on its "
+    "own) — and give it a verdict:\n"
     '- "correct": accurate as stated.\n'
     '- "overstated": broadly right but asserts more certainty or scope than is '
     "actually true.\n"
